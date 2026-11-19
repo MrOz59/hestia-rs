@@ -1,0 +1,10 @@
+# Android: link the C++ runtime (used by OpenH264) statically into
+# libhestia_app.so. The `cc` crate defaults to libc++_shared.so, which nothing
+# packages into the APK, so the app failed to load with an unresolved
+# std::__ndk1 symbol. A single native library may use c++_static (NDK docs).
+# The C++ ABI part (libc++abi) is added by apps/hestia-app/build.rs.
+[env]
+CXXSTDLIB_aarch64_linux_android = "c++_static"
+CXXSTDLIB_armv7_linux_androideabi = "c++_static"
+CXXSTDLIB_x86_64_linux_android = "c++_static"
+CXXSTDLIB_i686_linux_android = "c++_static"

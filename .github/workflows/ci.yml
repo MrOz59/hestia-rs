@@ -101,6 +101,23 @@ jobs:
       - name: Build native library
         run: cargo ndk -t arm64-v8a --platform 26 build --release -p hestia-app --lib
 
+      # The .so must not depend on symbols nothing will provide at runtime
+      # (dlopen fails with "cannot locate symbol" on the device otherwise).
+      - name: Check native library dependencies
+        run: |
+          tools="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          so=target/aarch64-linux-android/release/libhestia_app.so
+          echo "NEEDED:"; "$tools/llvm-readelf" -d "$so" | grep NEEDED
+          if "$tools/llvm-readelf" -d "$so" | grep -q 'libc++_shared'; then
+            echo "::error::libhestia_app.so needs libc++_shared.so (expected static libc++)"; exit 1
+          fi
+          cxx=$("$tools/llvm-nm" -D --undefined-only "$so" | awk '{print $NF}' \
+            | grep -E '__ndk1|__gxx_personality|^__cxa_(allocate_exception|throw|begin_catch|end_catch|rethrow|guard_)|^_ZT[ISV]|^_Zn[wa]|^_Zd[la]' || true)
+          if [ -n "$cxx" ]; then
+            echo "::error::unresolved C++ runtime symbols in libhestia_app.so"; echo "$cxx" | head -40; exit 1
+          fi
+          echo "no unresolved C++ runtime symbols"
+
       - uses: actions/upload-artifact@v4
         with:
           name: hestia-rs-android-arm64-lib
@@ -120,6 +137,7 @@ jobs:
           export CARGO_APK_RELEASE_KEYSTORE="$RUNNER_TEMP/ci.keystore"
           export CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android
           cargo apk build --release -p hestia-app --lib
+          unzip -l target/release/apk/*.apk | grep -E 'lib/.*\.so'
 
       - uses: actions/upload-artifact@v4
         if: steps.apk.outcome == 'success'
