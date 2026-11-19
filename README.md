@@ -92,6 +92,11 @@ cargo run --release -p hestia-cli -- --help
 
 ### Android (arm64)
 
+Use **NDK r30** (or whichever NDK matches skia-bindings' prebuilt Skia, see
+the CI workflow): Slint renders with Skia on Android, and an older NDK's libc++
+lacks symbols the prebuilt library needs, so the app builds but fails to load
+on the device. Point `ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT` at it.
+
 ```sh
 rustup target add aarch64-linux-android
 cargo install cargo-ndk cargo-apk
@@ -102,7 +107,9 @@ cargo apk build --release -p hestia-app --lib
 ```
 
 CI builds both and uploads the Linux binaries, the Android library and (best
-effort) an APK as workflow artifacts.
+effort) an APK as workflow artifacts. It also checks that `libhestia_app.so`
+has no unresolved C++ runtime symbols. The CI APK is signed with a throwaway
+key per run: uninstall the previous one before installing a new build.
 
 ## CLI
 

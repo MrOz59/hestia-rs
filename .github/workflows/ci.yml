@@ -180,4 +180,4 @@ jobs:
         if: steps.apk.outcome == 'success'
         with:
           name: hestia-rs-android-arm64-apk
-          path: target/release/apk/*.apk
+          path: target/release/apk/hestia-rs.apk
