@@ -1,0 +1,701 @@
+import { ComboBox, Slider, Switch, Spinner } from "std-widgets.slint";
+import { Theme, PillButton, LinkButton, Chip } from "theme.slint";
+
+export struct HostCard {
+    id: string,
+    name: string,
+    address: string,
+    online: bool,
+    checking: bool,
+    paired: bool,
+    hermes: bool,
+    version: string,
+    status: string,
+}
+
+export struct AppCard {
+    id: int,
+    title: string,
+    art: image,
+    has-art: bool,
+    running: bool,
+    hdr: bool,
+}
+
+component StatusDot inherits Rectangle {
+    in property <color> tone;
+    width: 10px;
+    height: 10px;
+    border-radius: 5px;
+    background: root.tone;
+}
+
+component HostTile inherits Rectangle {
+    in property <HostCard> host;
+    callback clicked;
+
+    border-radius: Theme.radius;
+    background: touch.has-hover ? Theme.card-hover : Theme.card;
+    border-width: 1px;
+    border-color: root.host.paired ? Theme.accent.transparentize(0.6) : Theme.border;
+    drop-shadow-blur: 18px;
+    drop-shadow-color: #00000050;
+    animate background { duration: 120ms; }
+
+    VerticalLayout {
+        padding: 18px;
+        spacing: 8px;
+
+        HorizontalLayout {
+            spacing: 10px;
+            VerticalLayout {
+                alignment: center;
+                StatusDot {
+                    tone: root.host.checking ? Theme.warn : (root.host.online ? Theme.ok : Theme.muted);
+                }
+            }
+            Text {
+                text: root.host.name;
+                color: Theme.text;
+                font-size: 18px;
+                font-weight: 700;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: root.host.address;
+            color: Theme.muted;
+            font-size: 13px;
+            overflow: elide;
+        }
+
+        HorizontalLayout {
+            spacing: 6px;
+            alignment: start;
+            Chip {
+                text: root.host.checking ? "Checking" : (root.host.online ? "Online" : "Offline");
+                tone: root.host.checking ? Theme.warn : (root.host.online ? Theme.ok : Theme.muted);
+            }
+            Chip {
+                text: root.host.paired ? "Paired" : "Not paired";
+                tone: root.host.paired ? Theme.accent : Theme.warn;
+            }
+            if root.host.hermes: Chip {
+                text: root.host.version == "" ? "Hermes" : "Hermes " + root.host.version;
+                tone: Theme.info;
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+        }
+
+        Text {
+            text: root.host.status;
+            color: Theme.muted;
+            font-size: 12px;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component AppTile inherits Rectangle {
+    in property <AppCard> app;
+    callback clicked;
+
+    border-radius: Theme.radius;
+    background: Theme.card;
+    clip: true;
+    border-width: root.app.running ? 2px : 1px;
+    border-color: root.app.running ? Theme.accent : (touch.has-hover ? Theme.accent.transparentize(0.5) : Theme.border);
+    animate border-color { duration: 120ms; }
+
+    VerticalLayout {
+        Rectangle {
+            vertical-stretch: 1;
+            background: Theme.surface;
+            clip: true;
+
+            if root.app.has-art: Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.app.art;
+                image-fit: cover;
+            }
+
+            if !root.app.has-art: Text {
+                width: parent.width - 24px;
+                x: 12px;
+                height: parent.height;
+                text: root.app.title;
+                color: Theme.muted;
+                font-size: 17px;
+                font-weight: 700;
+                wrap: word-wrap;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                background: touch.has-hover ? #ffffff10 : transparent;
+                animate background { duration: 120ms; }
+            }
+        }
+
+        HorizontalLayout {
+            height: 44px;
+            padding-left: 12px;
+            padding-right: 10px;
+            spacing: 6px;
+            Text {
+                text: root.app.title;
+                color: Theme.text;
+                font-size: 14px;
+                font-weight: 600;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+            if root.app.running: VerticalLayout {
+                alignment: center;
+                Chip {
+                    text: "Running";
+                    tone: Theme.accent;
+                }
+            }
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component PageHeader inherits HorizontalLayout {
+    in property <string> title;
+    in property <string> subtitle;
+    padding: Theme.page-padding;
+    padding-bottom: 8px;
+    spacing: 10px;
+
+    VerticalLayout {
+        alignment: center;
+        horizontal-stretch: 1;
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: 26px;
+            font-weight: 800;
+            overflow: elide;
+        }
+        if root.subtitle != "": Text {
+            text: root.subtitle;
+            color: Theme.muted;
+            font-size: 13px;
+            overflow: elide;
+        }
+    }
+
+    @children
+}
+
+export component HostsPage inherits Rectangle {
+    in property <[HostCard]> hosts;
+    in property <bool> scanning;
+    callback open-host(string);
+    callback add-host;
+    callback refresh;
+    callback settings;
+
+    property <length> pad: Theme.page-padding;
+    property <length> gap: 16px;
+    property <length> min-tile: 260px;
+    property <int> cols: Math.max(1, Math.floor((root.width - 2 * root.pad + root.gap) / (root.min-tile + root.gap)));
+    property <length> tile-w: (root.width - 2 * root.pad - (root.cols - 1) * root.gap) / root.cols;
+    property <length> tile-h: 168px;
+
+    VerticalLayout {
+        PageHeader {
+            title: "Hestia";
+            subtitle: root.scanning ? "Looking for hosts on your network…" : "Your hosts";
+            if root.scanning: VerticalLayout {
+                alignment: center;
+                Spinner {
+                    width: 22px;
+                    height: 22px;
+                    indeterminate: true;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                PillButton {
+                    text: "Refresh";
+                    clicked => {
+                        root.refresh();
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                PillButton {
+                    text: "Settings";
+                    clicked => {
+                        root.settings();
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                PillButton {
+                    text: "Add host";
+                    primary: true;
+                    clicked => {
+                        root.add-host();
+                    }
+                }
+            }
+        }
+
+        if root.hosts.length == 0: VerticalLayout {
+            vertical-stretch: 1;
+            alignment: center;
+            padding: 32px;
+            spacing: 10px;
+            Text {
+                text: "No hosts yet";
+                color: Theme.text;
+                font-size: 20px;
+                font-weight: 700;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: "Hosts running Hermes (or Sunshine/Apollo) on this network show up here automatically. You can also add one by its IP address.";
+                color: Theme.muted;
+                font-size: 14px;
+                wrap: word-wrap;
+                horizontal-alignment: center;
+            }
+        }
+
+        if root.hosts.length > 0: Flickable {
+            vertical-stretch: 1;
+            viewport-width: self.width;
+            viewport-height: Math.ceil(root.hosts.length / root.cols) * (root.tile-h + root.gap) + root.pad;
+
+            for host[i] in root.hosts: HostTile {
+                x: root.pad + Math.mod(i, root.cols) * (root.tile-w + root.gap);
+                y: 8px + Math.floor(i / root.cols) * (root.tile-h + root.gap);
+                width: root.tile-w;
+                height: root.tile-h;
+                host: host;
+                clicked => {
+                    root.open-host(host.id);
+                }
+            }
+        }
+    }
+}
+
+export component AppsPage inherits Rectangle {
+    in property <string> host-name;
+    in property <string> host-detail;
+    in property <[string]> chips;
+    in property <[AppCard]> apps;
+    in property <bool> loading;
+    in property <bool> app-running;
+    callback back;
+    callback launch(int);
+    callback quit-app;
+    callback forget;
+
+    property <length> pad: Theme.page-padding;
+    property <length> gap: 16px;
+    property <length> min-tile: 150px;
+    property <int> cols: Math.max(2, Math.floor((root.width - 2 * root.pad + root.gap) / (root.min-tile + root.gap)));
+    property <length> tile-w: (root.width - 2 * root.pad - (root.cols - 1) * root.gap) / root.cols;
+    property <length> tile-h: root.tile-w * 4 / 3 + 44px;
+
+    VerticalLayout {
+        PageHeader {
+            title: root.host-name;
+            subtitle: root.host-detail;
+            VerticalLayout {
+                alignment: center;
+                PillButton {
+                    text: "Back";
+                    clicked => {
+                        root.back();
+                    }
+                }
+            }
+            if root.app-running: VerticalLayout {
+                alignment: center;
+                PillButton {
+                    text: "Quit app";
+                    danger: true;
+                    clicked => {
+                        root.quit-app();
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                PillButton {
+                    text: "Forget";
+                    clicked => {
+                        root.forget();
+                    }
+                }
+            }
+        }
+
+        if root.chips.length > 0: HorizontalLayout {
+            padding-left: root.pad;
+            padding-right: root.pad;
+            padding-bottom: 8px;
+            spacing: 6px;
+            alignment: start;
+            for chip in root.chips: Chip {
+                text: chip;
+                tone: Theme.info;
+            }
+        }
+
+        if root.loading: VerticalLayout {
+            vertical-stretch: 1;
+            alignment: center;
+            HorizontalLayout {
+                alignment: center;
+                Spinner {
+                    width: 36px;
+                    height: 36px;
+                    indeterminate: true;
+                }
+            }
+        }
+
+        if !root.loading && root.apps.length == 0: VerticalLayout {
+            vertical-stretch: 1;
+            alignment: center;
+            Text {
+                text: "This host has no apps you are allowed to see.";
+                color: Theme.muted;
+                horizontal-alignment: center;
+            }
+        }
+
+        if !root.loading && root.apps.length > 0: Flickable {
+            vertical-stretch: 1;
+            viewport-width: self.width;
+            viewport-height: Math.ceil(root.apps.length / root.cols) * (root.tile-h + root.gap) + root.pad;
+
+            for app[i] in root.apps: AppTile {
+                x: root.pad + Math.mod(i, root.cols) * (root.tile-w + root.gap);
+                y: 8px + Math.floor(i / root.cols) * (root.tile-h + root.gap);
+                width: root.tile-w;
+                height: root.tile-h;
+                app: app;
+                clicked => {
+                    root.launch(app.id);
+                }
+            }
+        }
+    }
+}
+
+export component SessionPage inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <[string]> lines;
+    in property <bool> busy;
+    callback back;
+    callback quit-app;
+
+    VerticalLayout {
+        PageHeader {
+            title: root.title;
+            subtitle: root.subtitle;
+        }
+
+        VerticalLayout {
+            vertical-stretch: 1;
+            alignment: center;
+            padding: Theme.page-padding;
+
+            HorizontalLayout {
+                alignment: center;
+                Rectangle {
+                    width: Math.min(560px, root.width - 2 * Theme.page-padding);
+                    border-radius: Theme.radius;
+                    background: Theme.card;
+                    border-width: 1px;
+                    border-color: Theme.border;
+
+                    VerticalLayout {
+                        padding: 24px;
+                        spacing: 10px;
+
+                        if root.busy: HorizontalLayout {
+                            alignment: center;
+                            Spinner {
+                                width: 32px;
+                                height: 32px;
+                                indeterminate: true;
+                            }
+                        }
+
+                        for line in root.lines: Text {
+                            text: line;
+                            color: Theme.text;
+                            font-size: 14px;
+                            wrap: word-wrap;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: end;
+                            PillButton {
+                                text: "Back to apps";
+                                clicked => {
+                                    root.back();
+                                }
+                            }
+                            PillButton {
+                                text: "Quit app";
+                                danger: true;
+                                enabled: !root.busy;
+                                clicked => {
+                                    root.quit-app();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component SettingRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> hint;
+    spacing: 16px;
+    min-height: 48px;
+
+    VerticalLayout {
+        alignment: center;
+        horizontal-stretch: 1;
+        Text {
+            text: root.label;
+            color: Theme.text;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        if root.hint != "": Text {
+            text: root.hint;
+            color: Theme.muted;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+    }
+
+    VerticalLayout {
+        alignment: center;
+        horizontal-stretch: 0;
+        @children
+    }
+}
+
+export component SettingsPage inherits Rectangle {
+    in-out property <int> resolution;
+    in-out property <int> fps;
+    in-out property <float> bitrate-mbps;
+    in-out property <int> codec;
+    in-out property <int> audio;
+    in-out property <bool> hdr;
+    in-out property <bool> virtual-display;
+    in-out property <bool> host-audio;
+    in-out property <bool> gamescope;
+    in-out property <bool> optimize;
+    in-out property <bool> clipboard;
+    in property <string> client-id;
+    in property <string> data-dir;
+    callback back;
+    callback save;
+
+    VerticalLayout {
+        PageHeader {
+            title: "Settings";
+            subtitle: "Applied to the next session";
+            VerticalLayout {
+                alignment: center;
+                PillButton {
+                    text: "Back";
+                    clicked => {
+                        root.back();
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                PillButton {
+                    text: "Save";
+                    primary: true;
+                    clicked => {
+                        root.save();
+                    }
+                }
+            }
+        }
+
+        Flickable {
+            vertical-stretch: 1;
+            viewport-width: self.width;
+            viewport-height: form.preferred-height;
+            form := HorizontalLayout {
+                width: root.width;
+                alignment: center;
+                VerticalLayout {
+                    width: Math.min(640px, root.width - 2 * Theme.page-padding);
+                    padding-top: 8px;
+                    padding-bottom: 32px;
+                    spacing: 6px;
+
+                    Text {
+                        text: "Video";
+                        color: Theme.accent;
+                        font-size: 13px;
+                        font-weight: 700;
+                    }
+                    SettingRow {
+                        label: "Resolution";
+                        ComboBox {
+                            width: 170px;
+                            model: ["1280 × 720", "1920 × 1080", "2560 × 1440", "3840 × 2160"];
+                            current-index <=> root.resolution;
+                        }
+                    }
+                    SettingRow {
+                        label: "Frame rate";
+                        ComboBox {
+                            width: 170px;
+                            model: ["30 fps", "60 fps", "90 fps", "120 fps", "144 fps"];
+                            current-index <=> root.fps;
+                        }
+                    }
+                    SettingRow {
+                        label: "Bitrate";
+                        hint: Math.round(root.bitrate-mbps) + " Mbps";
+                        Slider {
+                            width: 200px;
+                            minimum: 5;
+                            maximum: 150;
+                            value <=> root.bitrate-mbps;
+                        }
+                    }
+                    SettingRow {
+                        label: "Codec";
+                        hint: "Auto picks the best one both sides support";
+                        ComboBox {
+                            width: 170px;
+                            model: ["Auto", "H.264", "HEVC", "AV1"];
+                            current-index <=> root.codec;
+                        }
+                    }
+                    SettingRow {
+                        label: "HDR";
+                        hint: "Needs HDR support on the host (Hermes-KMS) and this display";
+                        Switch {
+                            checked <=> root.hdr;
+                        }
+                    }
+
+                    Text {
+                        text: "Hermes";
+                        color: Theme.accent;
+                        font-size: 13px;
+                        font-weight: 700;
+                    }
+                    SettingRow {
+                        label: "Virtual display";
+                        hint: "Stream from a virtual display sized to this device";
+                        Switch {
+                            checked <=> root.virtual-display;
+                        }
+                    }
+                    SettingRow {
+                        label: "Gamescope session";
+                        hint: "Run games in an isolated Gamescope session when the host supports it";
+                        Switch {
+                            checked <=> root.gamescope;
+                        }
+                    }
+                    SettingRow {
+                        label: "Clipboard sync";
+                        Switch {
+                            checked <=> root.clipboard;
+                        }
+                    }
+
+                    Text {
+                        text: "Audio & host";
+                        color: Theme.accent;
+                        font-size: 13px;
+                        font-weight: 700;
+                    }
+                    SettingRow {
+                        label: "Speakers";
+                        ComboBox {
+                            width: 170px;
+                            model: ["Stereo", "5.1 surround", "7.1 surround"];
+                            current-index <=> root.audio;
+                        }
+                    }
+                    SettingRow {
+                        label: "Play audio on host";
+                        Switch {
+                            checked <=> root.host-audio;
+                        }
+                    }
+                    SettingRow {
+                        label: "Optimize game settings";
+                        hint: "Let the host adjust its display mode for the stream";
+                        Switch {
+                            checked <=> root.optimize;
+                        }
+                    }
+
+                    Text {
+                        text: "About";
+                        color: Theme.accent;
+                        font-size: 13px;
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: "Client id: " + root.client-id;
+                        color: Theme.muted;
+                        font-size: 12px;
+                    }
+                    Text {
+                        text: "Data: " + root.data-dir;
+                        color: Theme.muted;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}

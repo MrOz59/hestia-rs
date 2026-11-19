@@ -1,0 +1,12 @@
+[package]
+name = "hestia-discovery"
+description = "mDNS discovery of GameStream hosts for Hestia RS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+log.workspace = true

@@ -1,0 +1,407 @@
+import { LineEdit, Spinner } from "std-widgets.slint";
+import { Theme, PillButton, LinkButton, Dialog } from "theme.slint";
+import { HostCard, AppCard, HostsPage, AppsPage, SessionPage, SettingsPage } from "pages.slint";
+
+export { HostCard, AppCard } from "pages.slint";
+
+export component AppWindow inherits Window {
+    title: "Hestia";
+    preferred-width: 1180px;
+    preferred-height: 760px;
+    min-width: 340px;
+    min-height: 480px;
+    background: Theme.bg;
+    default-font-size: 14px;
+
+    // 0 = hosts, 1 = apps, 2 = session, 3 = settings
+    in-out property <int> screen: 0;
+
+    // Startup (identity generation on first run)
+    in property <bool> starting: true;
+    in property <string> starting-text: "Getting ready…";
+
+    in property <string> toast;
+
+    // Hosts
+    in property <[HostCard]> hosts;
+    in property <bool> scanning;
+    callback refresh-hosts();
+    callback open-host(string);
+
+    // Add host
+    in-out property <bool> add-visible;
+    in property <string> add-error;
+    in property <bool> add-busy;
+    in-out property <string> add-address;
+    callback add-host(string);
+
+    // Pairing
+    in-out property <bool> pair-visible;
+    in property <string> pair-host-name;
+    in property <string> pair-pin;
+    in property <string> pair-status;
+    in property <bool> pair-busy;
+    in property <bool> pair-failed;
+    in-out property <bool> pair-otp-mode;
+    in-out property <string> otp-pin;
+    in-out property <string> otp-passphrase;
+    callback pair-retry();
+    callback pair-use-otp();
+    callback pair-submit-otp(string, string);
+    callback pair-cancel();
+
+    // Apps
+    in property <string> host-name;
+    in property <string> host-detail;
+    in property <[string]> host-chips;
+    in property <[AppCard]> apps;
+    in property <bool> apps-loading;
+    in property <bool> app-running;
+    callback launch-app(int);
+    callback quit-app();
+    callback forget-host();
+    callback back-to-hosts();
+
+    // Session
+    in property <string> session-title;
+    in property <string> session-subtitle;
+    in property <[string]> session-lines;
+    in property <bool> session-busy;
+    callback back-to-apps();
+
+    // Settings
+    in-out property <int> cfg-resolution: 1;
+    in-out property <int> cfg-fps: 1;
+    in-out property <float> cfg-bitrate: 20;
+    in-out property <int> cfg-codec: 0;
+    in-out property <int> cfg-audio: 0;
+    in-out property <bool> cfg-hdr;
+    in-out property <bool> cfg-virtual-display: true;
+    in-out property <bool> cfg-host-audio;
+    in-out property <bool> cfg-gamescope;
+    in-out property <bool> cfg-optimize: true;
+    in-out property <bool> cfg-clipboard;
+    in property <string> client-id;
+    in property <string> data-dir;
+    property <int> settings-return: 0;
+    callback open-settings();
+    callback save-settings();
+
+    if root.screen == 0: HostsPage {
+        width: 100%;
+        height: 100%;
+        hosts: root.hosts;
+        scanning: root.scanning;
+        open-host(id) => {
+            root.open-host(id);
+        }
+        add-host => {
+            root.add-visible = true;
+        }
+        refresh => {
+            root.refresh-hosts();
+        }
+        settings => {
+            root.settings-return = root.screen;
+            root.screen = 3;
+            root.open-settings();
+        }
+    }
+
+    if root.screen == 1: AppsPage {
+        width: 100%;
+        height: 100%;
+        host-name: root.host-name;
+        host-detail: root.host-detail;
+        chips: root.host-chips;
+        apps: root.apps;
+        loading: root.apps-loading;
+        app-running: root.app-running;
+        back => {
+            root.back-to-hosts();
+        }
+        launch(id) => {
+            root.launch-app(id);
+        }
+        quit-app => {
+            root.quit-app();
+        }
+        forget => {
+            root.forget-host();
+        }
+    }
+
+    if root.screen == 2: SessionPage {
+        width: 100%;
+        height: 100%;
+        title: root.session-title;
+        subtitle: root.session-subtitle;
+        lines: root.session-lines;
+        busy: root.session-busy;
+        back => {
+            root.back-to-apps();
+        }
+        quit-app => {
+            root.quit-app();
+        }
+    }
+
+    if root.screen == 3: SettingsPage {
+        width: 100%;
+        height: 100%;
+        resolution <=> root.cfg-resolution;
+        fps <=> root.cfg-fps;
+        bitrate-mbps <=> root.cfg-bitrate;
+        codec <=> root.cfg-codec;
+        audio <=> root.cfg-audio;
+        hdr <=> root.cfg-hdr;
+        virtual-display <=> root.cfg-virtual-display;
+        host-audio <=> root.cfg-host-audio;
+        gamescope <=> root.cfg-gamescope;
+        optimize <=> root.cfg-optimize;
+        clipboard <=> root.cfg-clipboard;
+        client-id: root.client-id;
+        data-dir: root.data-dir;
+        back => {
+            root.screen = root.settings-return;
+        }
+        save => {
+            root.save-settings();
+            root.screen = root.settings-return;
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Add host dialog
+    // ---------------------------------------------------------------
+    if root.add-visible: Dialog {
+        width: 100%;
+        height: 100%;
+        dismissed => {
+            if (!root.add-busy) {
+                root.add-visible = false;
+            }
+        }
+
+        Text {
+            text: "Add a host";
+            color: Theme.text;
+            font-size: 20px;
+            font-weight: 700;
+        }
+        Text {
+            text: "IP address or name of the PC running Hermes. Add :port if it doesn't use the default 47989.";
+            color: Theme.muted;
+            wrap: word-wrap;
+        }
+        LineEdit {
+            placeholder-text: "192.168.0.10";
+            text <=> root.add-address;
+            enabled: !root.add-busy;
+            accepted(text) => {
+                root.add-host(text);
+            }
+        }
+        if root.add-error != "": Text {
+            text: root.add-error;
+            color: Theme.danger;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: end;
+            if root.add-busy: VerticalLayout {
+                alignment: center;
+                Spinner {
+                    width: 22px;
+                    height: 22px;
+                    indeterminate: true;
+                }
+            }
+            PillButton {
+                text: "Cancel";
+                enabled: !root.add-busy;
+                clicked => {
+                    root.add-visible = false;
+                }
+            }
+            PillButton {
+                text: "Add";
+                primary: true;
+                enabled: !root.add-busy && root.add-address != "";
+                clicked => {
+                    root.add-host(root.add-address);
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Pairing dialog
+    // ---------------------------------------------------------------
+    if root.pair-visible: Dialog {
+        width: 100%;
+        height: 100%;
+        card-width: 440px;
+        dismissed => { }
+
+        Text {
+            text: "Pair with " + root.pair-host-name;
+            color: Theme.text;
+            font-size: 20px;
+            font-weight: 700;
+            overflow: elide;
+        }
+
+        if !root.pair-otp-mode: VerticalLayout {
+            spacing: 14px;
+            Text {
+                text: "Open the Hermes web UI on the host, go to PIN and enter:";
+                color: Theme.muted;
+                wrap: word-wrap;
+            }
+            Rectangle {
+                height: 84px;
+                border-radius: 12px;
+                background: Theme.card;
+                Text {
+                    text: root.pair-pin;
+                    color: Theme.accent;
+                    font-size: 44px;
+                    font-weight: 800;
+                    letter-spacing: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            LinkButton {
+                text: "Have a one-time code from the host? Use it instead";
+                clicked => {
+                    root.pair-use-otp();
+                }
+            }
+        }
+
+        if root.pair-otp-mode: VerticalLayout {
+            spacing: 10px;
+            Text {
+                text: "Enter the one-time PIN and passphrase shown by Hermes.";
+                color: Theme.muted;
+                wrap: word-wrap;
+            }
+            LineEdit {
+                placeholder-text: "PIN";
+                input-type: number;
+                text <=> root.otp-pin;
+                enabled: !root.pair-busy;
+            }
+            LineEdit {
+                placeholder-text: "Passphrase";
+                text <=> root.otp-passphrase;
+                enabled: !root.pair-busy;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            if root.pair-busy: VerticalLayout {
+                alignment: center;
+                Spinner {
+                    width: 20px;
+                    height: 20px;
+                    indeterminate: true;
+                }
+            }
+            Text {
+                text: root.pair-status;
+                color: root.pair-failed ? Theme.danger : Theme.muted;
+                wrap: word-wrap;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: end;
+            PillButton {
+                text: "Cancel";
+                clicked => {
+                    root.pair-cancel();
+                }
+            }
+            if root.pair-failed && !root.pair-otp-mode: PillButton {
+                text: "Try again";
+                primary: true;
+                clicked => {
+                    root.pair-retry();
+                }
+            }
+            if root.pair-otp-mode: PillButton {
+                text: "Pair";
+                primary: true;
+                enabled: !root.pair-busy && root.otp-pin != "" && root.otp-passphrase != "";
+                clicked => {
+                    root.pair-submit-otp(root.otp-pin, root.otp-passphrase);
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Toast
+    // ---------------------------------------------------------------
+    if root.toast != "": Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height - 24px;
+        width: Math.min(toast-text.preferred-width + 40px, root.width - 32px);
+        height: toast-text.preferred-height + 24px;
+        border-radius: 12px;
+        background: #2a2f3b;
+        drop-shadow-blur: 20px;
+        drop-shadow-color: #00000080;
+        toast-text := Text {
+            width: parent.width - 40px;
+            text: root.toast;
+            color: Theme.text;
+            wrap: word-wrap;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Startup overlay
+    // ---------------------------------------------------------------
+    if root.starting: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Theme.bg;
+        TouchArea { }
+        VerticalLayout {
+            alignment: center;
+            spacing: 16px;
+            Text {
+                text: "Hestia";
+                color: Theme.text;
+                font-size: 34px;
+                font-weight: 800;
+                horizontal-alignment: center;
+            }
+            HorizontalLayout {
+                alignment: center;
+                Spinner {
+                    width: 30px;
+                    height: 30px;
+                    indeterminate: true;
+                }
+            }
+            Text {
+                text: root.starting-text;
+                color: Theme.muted;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+        }
+    }
+}

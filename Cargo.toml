@@ -1,0 +1,80 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hestia-crypto",
+    "crates/hestia-nvhttp",
+    "crates/hestia-api",
+    "crates/hestia-discovery",
+    "crates/hestia-core",
+    "crates/hestia-stream",
+    "crates/hestia-media",
+    "apps/hestia-cli",
+    "apps/hestia-app",
+]
+default-members = [
+    "crates/hestia-crypto",
+    "crates/hestia-nvhttp",
+    "crates/hestia-api",
+    "crates/hestia-discovery",
+    "crates/hestia-core",
+    "crates/hestia-stream",
+    "crates/hestia-media",
+    "apps/hestia-cli",
+    "apps/hestia-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-only"
+repository = "https://github.com/MrOz59/hestia-rs"
+authors = ["MrOz59"]
+
+[workspace.dependencies]
+# Internal crates
+hestia-crypto = { path = "crates/hestia-crypto" }
+hestia-nvhttp = { path = "crates/hestia-nvhttp" }
+hestia-api = { path = "crates/hestia-api" }
+hestia-discovery = { path = "crates/hestia-discovery" }
+hestia-core = { path = "crates/hestia-core" }
+hestia-stream = { path = "crates/hestia-stream" }
+hestia-media = { path = "crates/hestia-media" }
+
+# Crypto (pure Rust, so Android cross-compiles without OpenSSL)
+rsa = { version = "0.9", features = ["sha2"] }
+sha2 = { version = "0.10", features = ["oid"] }
+sha1 = "0.10"
+aes = "0.8"
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.22"
+
+# Networking
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+
+# Serialization / misc
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+log = "0.4"
+directories = "6"
+
+# Apps
+clap = { version = "4", features = ["derive", "env"] }
+env_logger = "0.11"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+slint = "1"
+slint-build = "1"
+android_logger = "0.14"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# RSA key generation is painfully slow without optimizations; keep the crypto
+# crates optimized even in debug builds so first launch doesn't stall.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+[profile.dev.package.rsa]
+opt-level = 3

@@ -1,0 +1,13 @@
+[package]
+name = "hestia-stream"
+description = "Pure-Rust GameStream data plane (RTSP, control, video, audio, input) for Hestia RS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+aes-gcm.workspace = true
+log.workspace = true

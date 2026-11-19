@@ -1,0 +1,15 @@
+[package]
+name = "hestia-nvhttp"
+description = "GameStream (Sunshine/Apollo/Hermes) HTTP API and pairing for Hestia RS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+hestia-crypto.workspace = true
+rustls.workspace = true
+thiserror.workspace = true
+log.workspace = true

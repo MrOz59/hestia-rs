@@ -1,0 +1,134 @@
+// Visual language: dark, warm "hearth" accent (Hestia), soft cards.
+
+export global Theme {
+    out property <color> bg: #0d0f13;
+    out property <color> surface: #14171d;
+    out property <color> card: #1a1e26;
+    out property <color> card-hover: #222733;
+    out property <color> border: #282e3b;
+    out property <color> text: #eceef3;
+    out property <color> muted: #8e95a3;
+    out property <color> accent: #ff7a3d;
+    out property <color> accent-hover: #ff9160;
+    out property <color> on-accent: #1d0f07;
+    out property <color> ok: #3ecf8e;
+    out property <color> warn: #f2b33d;
+    out property <color> danger: #f06262;
+    out property <color> info: #8ab4ff;
+    out property <length> radius: 16px;
+    out property <length> page-padding: 20px;
+}
+
+export component PillButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> danger: false;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    min-width: label.preferred-width + 32px;
+    preferred-width: label.preferred-width + 32px;
+    horizontal-stretch: 0;
+    height: 40px;
+    border-radius: 20px;
+    border-width: root.primary ? 0px : 1px;
+    border-color: root.danger ? Theme.danger : Theme.border;
+    opacity: root.enabled ? 1.0 : 0.45;
+    background: root.primary
+        ? (touch.has-hover ? Theme.accent-hover : Theme.accent)
+        : (touch.has-hover ? Theme.card-hover : Theme.card);
+    animate background { duration: 120ms; }
+
+    label := Text {
+        text: root.text;
+        color: root.primary ? Theme.on-accent : (root.danger ? Theme.danger : Theme.text);
+        font-size: 14px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component LinkButton inherits Rectangle {
+    in property <string> text;
+    callback clicked;
+    min-width: label.preferred-width + 8px;
+    height: 28px;
+
+    label := Text {
+        text: root.text;
+        color: touch.has-hover ? Theme.accent-hover : Theme.accent;
+        font-size: 13px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component Chip inherits Rectangle {
+    in property <string> text;
+    in property <color> tone: Theme.muted;
+    height: 24px;
+    min-width: label.preferred-width + 18px;
+    preferred-width: label.preferred-width + 18px;
+    horizontal-stretch: 0;
+    border-radius: 12px;
+    background: root.tone.transparentize(0.84);
+
+    label := Text {
+        text: root.text;
+        color: root.tone;
+        font-size: 12px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Translucent backdrop + centered card for dialogs.
+export component Dialog inherits Rectangle {
+    in property <length> card-width: 420px;
+    callback dismissed;
+    background: #000000b0;
+
+    TouchArea {
+        clicked => {
+            root.dismissed();
+        }
+    }
+
+    Rectangle {
+        width: Math.min(root.card-width, root.width - 32px);
+        height: content.preferred-height;
+        border-radius: Theme.radius;
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 30px;
+        drop-shadow-color: #00000088;
+
+        // Swallow clicks so they don't reach the backdrop.
+        TouchArea { }
+
+        content := VerticalLayout {
+            padding: 24px;
+            spacing: 14px;
+            @children
+        }
+    }
+}

@@ -1,0 +1,19 @@
+[package]
+name = "hestia-core"
+description = "UI-agnostic client facade for Hestia RS: identity, host registry, pairing, apps and launch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+hestia-crypto.workspace = true
+hestia-nvhttp.workspace = true
+hestia-api.workspace = true
+hestia-discovery.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+log.workspace = true

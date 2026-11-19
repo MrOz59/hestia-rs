@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux (fmt, clippy, tests, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: System packages for Slint
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libgl1-mesa-dev libegl1-mesa-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: Release build
+        run: cargo build --release -p hestia-app -p hestia-cli
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hestia-rs-linux-x86_64
+          path: |
+            target/release/hestia-app
+            target/release/hestia
+          if-no-files-found: error
+
+  android:
+    name: Android (arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build native library
+        run: cargo ndk -t arm64-v8a --platform 26 build --release -p hestia-app --lib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hestia-rs-android-arm64-lib
+          path: target/aarch64-linux-android/release/libhestia_app.so
+          if-no-files-found: error
+
+      # Packaging is best effort while the Android shell is a prototype.
+      - name: Package APK (cargo-apk)
+        id: apk
+        continue-on-error: true
+        run: |
+          cargo install cargo-apk --locked
+          export ANDROID_NDK_ROOT="${ANDROID_NDK_ROOT:-$ANDROID_NDK_HOME}"
+          cargo apk build --release -p hestia-app --lib
+
+      - uses: actions/upload-artifact@v4
+        if: steps.apk.outcome == 'success'
+        with:
+          name: hestia-rs-android-arm64-apk
+          path: target/release/apk/*.apk

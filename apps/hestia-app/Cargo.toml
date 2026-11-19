@@ -1,0 +1,57 @@
+[package]
+name = "hestia-app"
+description = "Hestia RS graphical client (Slint) for Linux and Android"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+build = "build.rs"
+
+[lib]
+# rlib for the desktop binary, cdylib for the Android NativeActivity.
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "hestia-app"
+path = "src/main.rs"
+
+[dependencies]
+hestia-core.workspace = true
+slint.workspace = true
+image.workspace = true
+log.workspace = true
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+env_logger.workspace = true
+directories.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+slint = { workspace = true, features = ["backend-android-activity-06"] }
+android_logger.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true
+
+# Used by `cargo apk build -p hestia-app --lib`.
+[package.metadata.android]
+package = "com.mroz59.hestia.rs"
+apk_name = "hestia-rs"
+build_targets = ["aarch64-linux-android"]
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 34
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.ACCESS_NETWORK_STATE"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.ACCESS_WIFI_STATE"
+
+[package.metadata.android.application]
+label = "Hestia RS"
