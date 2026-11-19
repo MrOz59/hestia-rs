@@ -72,7 +72,7 @@ enum Command {
     ///
     /// Video is decoded in software by default (`--dump` writes the elementary
     /// stream instead, `--count` only counts frames); audio is received and
-    /// counted. Press Enter to stop.
+    /// counted, or played with `--audio`. Press Enter to stop.
     Stream {
         host: String,
         app: String,
@@ -100,6 +100,9 @@ enum Command {
         /// Quit the app on the host when the stream ends.
         #[arg(long)]
         quit: bool,
+        /// Play the audio on this machine.
+        #[arg(long)]
+        audio: bool,
     },
     /// Quit the app running on the host.
     Quit { host: String },
@@ -264,6 +267,7 @@ fn run(cli: Cli) -> Result<()> {
             count,
             snapshot,
             quit,
+            audio,
         } => {
             let id = resolve(&client, &host)?.id;
             let mut settings = client.settings();
@@ -289,6 +293,7 @@ fn run(cli: Cli) -> Result<()> {
                     dump,
                     snapshot,
                     quit_after: quit,
+                    play_audio: audio,
                 },
             )?;
         }

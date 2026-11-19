@@ -12,8 +12,12 @@ authors.workspace = true
 default = ["openh264"]
 # Software H.264 decoder (Cisco OpenH264, compiled from source).
 openh264 = ["dep:openh264"]
+# Opus decode + playback via cpal (needs libopus and ALSA headers on Linux).
+audio = ["dep:opus", "dep:cpal"]
 
 [dependencies]
 hestia-stream.workspace = true
 log.workspace = true
 openh264 = { workspace = true, optional = true }
+opus = { workspace = true, optional = true }
+cpal = { workspace = true, optional = true }

@@ -30,7 +30,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
-            libgl1-mesa-dev libegl1-mesa-dev
+            libgl1-mesa-dev libegl1-mesa-dev \
+            libopus-dev libasound2-dev
 
       - uses: Swatinem/rust-cache@v2
 

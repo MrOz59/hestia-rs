@@ -1,6 +1,6 @@
 //! `hestia stream`: launch an app and run the full streaming pipeline
 //! headless, printing per-second statistics. Video is decoded (default),
-//! dumped to a file or just counted; audio is counted.
+//! dumped to a file or just counted; audio is counted or played (`--audio`).
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -32,6 +32,8 @@ pub struct Options {
     pub dump: Option<PathBuf>,
     pub snapshot: Option<PathBuf>,
     pub quit_after: bool,
+    /// Play audio (when built with the `audio` feature) instead of counting it.
+    pub play_audio: bool,
 }
 
 enum Msg {
@@ -127,7 +129,11 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
     let session = StreamSession::start(
         config,
         video_sink,
-        Box::new(NullAudioSink::default()),
+        if opts.play_audio {
+            hestia_media::default_audio_sink()
+        } else {
+            Box::new(NullAudioSink::default())
+        },
         Arc::new(Forward(tx.clone())),
     )?;
     let n = session.negotiated();

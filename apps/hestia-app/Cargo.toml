@@ -30,6 +30,8 @@ image.workspace = true
 log.workspace = true
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
+# Audio playback on the desktop (Android audio comes later).
+hestia-media = { workspace = true, features = ["audio"] }
 env_logger.workspace = true
 directories.workspace = true
 

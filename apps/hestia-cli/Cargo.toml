@@ -13,9 +13,11 @@ name = "hestia"
 path = "src/main.rs"
 
 [features]
-default = ["openh264"]
+default = ["openh264", "audio"]
 # Software H.264 decoding for `hestia stream`.
 openh264 = ["hestia-media/openh264"]
+# `hestia stream --audio`: play the stream's audio.
+audio = ["hestia-media/audio"]
 
 [dependencies]
 hestia-core.workspace = true

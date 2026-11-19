@@ -8,12 +8,16 @@
 //!   [`FrameDecoder`] and hands RGBA pictures to a [`FramePresenter`].
 //! * `software_h264` (feature `openh264`, on by default): OpenH264 software
 //!   H.264 decoding, on every platform.
+//! * `audio_out` (feature `audio`): Opus decode + playback through cpal
+//!   (stereo; desktop for now).
 //! * [`null`]: counts frames and packets; for exercising the pipeline.
 //! * [`dump`]: writes the elementary video stream to a file (`ffplay out.h264`).
 //!
 //! Planned: `mediacodec` (Android, `AMediaCodec` into a `Surface`), `vaapi`
-//! (Linux, DMA-BUF into the GL view), Opus decode + AAudio/PipeWire playback.
+//! (Linux, DMA-BUF into the GL view), surround audio, Android audio.
 
+#[cfg(feature = "audio")]
+pub mod audio_out;
 pub mod color;
 pub mod decode;
 pub mod dump;
@@ -72,5 +76,17 @@ pub fn default_decoder(colorimetry: Colorimetry) -> Result<DecoderChoice, String
     {
         let _ = colorimetry;
         Err("this build has no video decoder (enable the `openh264` feature)".into())
+    }
+}
+
+/// Audio playback when this build has it, otherwise a sink that only counts.
+pub fn default_audio_sink() -> Box<dyn AudioSink> {
+    #[cfg(feature = "audio")]
+    {
+        Box::new(audio_out::OpusPlaybackSink::new())
+    }
+    #[cfg(not(feature = "audio"))]
+    {
+        Box::new(null::NullAudioSink::default())
     }
 }

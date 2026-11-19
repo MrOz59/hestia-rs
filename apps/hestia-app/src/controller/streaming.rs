@@ -8,7 +8,6 @@ use std::time::Instant;
 use hestia_core::LaunchedSession;
 use hestia_core::stream::input::{Modifiers, MouseButton};
 use hestia_core::stream::{InputEvent, SessionListener, StreamEvent, StreamSession, StreamStats};
-use hestia_media::null::NullAudioSink;
 use hestia_media::{Colorimetry, DecodeStats, DecodingSink, FramePresenter, RgbaFrame};
 use log::{info, warn};
 use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer, SharedString};
@@ -138,7 +137,7 @@ impl Controller {
             label: size.clone(),
             last: Mutex::new(None),
         });
-        let session = StreamSession::start(config, Box::new(sink), Box::new(NullAudioSink::default()), listener)
+        let session = StreamSession::start(config, Box::new(sink), hestia_media::default_audio_sink(), listener)
             .map_err(|e| e.to_string())?;
         let codec = format!("{:?}", session.negotiated().video_format.codec);
         info!("streaming {size} {codec} from {}", launched.host.name);

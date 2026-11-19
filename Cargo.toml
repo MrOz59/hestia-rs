@@ -70,6 +70,8 @@ android_logger = "0.14"
 
 # Media
 openh264 = "0.9"
+opus = "0.3"
+cpal = "0.15"
 
 [profile.release]
 lto = "thin"
