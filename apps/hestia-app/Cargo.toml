@@ -42,6 +42,8 @@ slint = { workspace = true, features = ["backend-android-activity-06"] }
 android_logger.workspace = true
 # Share sheet for stream reports (same jni version Slint's backend uses).
 jni = "0.21"
+# The (patched) backend Slint uses, for its input hook: game controllers.
+i-slint-backend-android-activity = "=1.19.0"
 
 [dev-dependencies]
 # examples/screenshots.rs renders headless with the software renderer.
@@ -69,6 +71,10 @@ name = "android.permission.ACCESS_NETWORK_STATE"
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.ACCESS_WIFI_STATE"
+
+# Controller rumble on the phone when the controller has no motor.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.VIBRATE"
 
 [package.metadata.android.application]
 label = "Hestia RS"

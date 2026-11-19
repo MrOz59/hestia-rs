@@ -174,6 +174,8 @@ impl Controller {
         let c = self.clone();
         platform::set_ime_sink(move |event| c.stream_ime(event));
         let c = self.clone();
+        platform::set_gamepad_sink(move |state| c.stream_gamepad(state));
+        let c = self.clone();
         ui.on_stream_special_key(move |name| c.stream_special_key(&name));
         let c = self.clone();
         ui.on_stream_toggle_trackpad(move || c.toggle_trackpad());
@@ -393,12 +395,41 @@ impl Controller {
         match snapshot {
             Some(s) if s.online && s.paired => self.show_apps(s),
             Some(s) if s.online => self.start_pairing(id, record.name),
+            Some(_) if record.mac.is_some() => self.wake_host(id, record.name),
             Some(_) => {
-                self.toast(format!("{} is offline", record.name));
+                self.toast(format!(
+                    "{} is offline (Wake-on-LAN needs its MAC address, learned once it's been online)",
+                    record.name
+                ));
                 self.refresh_host(id);
             }
             None => self.toast(format!("Still contacting {}…", record.name)),
         }
+    }
+
+    /// Wake-on-LAN, then check every few seconds for a minute.
+    fn wake_host(self: &Shared, id: String, name: String) {
+        let c = self.clone();
+        spawn("hestia-wake", move || {
+            let Some(core) = c.core() else { return };
+            match core.wake(&id) {
+                Ok(_) => c.toast(format!("Waking {name}… this can take a minute")),
+                Err(e) => return c.toast(format!("Could not wake {name}: {e}")),
+            }
+            for _ in 0..12 {
+                std::thread::sleep(Duration::from_secs(5));
+                if let Ok(snapshot) = core.refresh(&id) {
+                    let online = snapshot.online;
+                    c.state().snapshots.insert(snapshot.record.id.clone(), snapshot);
+                    c.push_hosts();
+                    if online {
+                        c.toast(format!("{name} is awake"));
+                        return;
+                    }
+                }
+            }
+            c.toast(format!("{name} didn't answer; check that Wake-on-LAN is enabled on it"));
+        });
     }
 
     fn forget_current(self: &Shared) {

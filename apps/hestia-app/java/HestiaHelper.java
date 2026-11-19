@@ -4,7 +4,10 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
 import android.os.Build;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.text.InputType;
+import android.view.InputDevice;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -79,6 +82,40 @@ public final class HestiaHelper {
                 window.getDecorView().setSystemUiVisibility(on ? flags : 0);
             }
         });
+    }
+
+    /**
+     * Rumble from the host: on the controller's own motor when it has one,
+     * otherwise on the phone. Strengths are 0-65535; 0 and 0 stops it.
+     * GameStream rumble is a level that holds until changed, hence the
+     * long one-shot that the next call replaces or cancels.
+     */
+    public static void rumble(final Activity activity, final int deviceId, final int low, final int high) {
+        Vibrator vibrator = null;
+        if (deviceId >= 0) {
+            InputDevice device = InputDevice.getDevice(deviceId);
+            if (device != null) {
+                Vibrator own = device.getVibrator();
+                if (own != null && own.hasVibrator()) {
+                    vibrator = own;
+                }
+            }
+        }
+        if (vibrator == null) {
+            vibrator = (Vibrator) activity.getSystemService(Context.VIBRATOR_SERVICE);
+        }
+        if (vibrator == null || !vibrator.hasVibrator()) {
+            return;
+        }
+        int strength = Math.max(low, high) >> 8;
+        if (strength <= 0) {
+            vibrator.cancel();
+            return;
+        }
+        int amplitude = vibrator.hasAmplitudeControl()
+                ? Math.max(1, Math.min(255, strength))
+                : VibrationEffect.DEFAULT_AMPLITUDE;
+        vibrator.vibrate(VibrationEffect.createOneShot(60_000, amplitude));
     }
 
     /** Shows or hides the soft keyboard that types into the host. */

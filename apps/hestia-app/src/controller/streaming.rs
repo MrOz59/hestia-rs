@@ -23,6 +23,8 @@ use crate::typing;
 use crate::{hostinfo, platform};
 
 /// Trackpad speed on top of the on-screen → host pixel ratio.
+/// Wheel units (120 per notch) per logical pixel of two-finger drag.
+const TOUCH_SCROLL_SPEED: f32 = 2.0;
 const TRACKPAD_SPEED: f32 = 1.4;
 
 pub(super) struct ActiveStream {
@@ -310,7 +312,7 @@ impl SessionListener for Listener {
                 report::lock(&self.report).event(format!("{stage:?} failed: {e}"));
             }
             StreamEvent::Connected => report::lock(&self.report).event("connected"),
-            StreamEvent::Rumble { .. } => {}
+            StreamEvent::Rumble { gamepad, low, high } => platform::rumble(gamepad, low, high),
             StreamEvent::Terminated { reason, graceful } => {
                 info!("stream ended (graceful: {graceful}): {reason}");
                 self.controller.end_stream(Some(self.generation), Some(reason), false);
@@ -416,8 +418,9 @@ impl Controller {
             ui.set_stream_stats(format!("{size} {codec}").into());
             ui.set_screen(4);
         });
-        // Landscape, no system bars, screen on (Android).
+        // Landscape, no system bars, screen on (Android); controllers on.
         platform::set_stream_mode(true);
+        platform::set_gamepads_streaming(true);
         Ok(())
     }
 
@@ -484,6 +487,7 @@ impl Controller {
             let show_report = c.finish_report(session_report, &outcome, Some(host_id.clone()));
             platform::set_keyboard_visible(false);
             platform::set_stream_mode(false);
+            platform::set_gamepads_streaming(false);
             c.ui(move |ui| {
                 if ui.get_stream_fullscreen() {
                     ui.window().set_fullscreen(false);
@@ -608,7 +612,16 @@ impl Controller {
                 active.fingers.multi()
             }
             2 => {
-                active.fingers.moved(finger, x, y);
+                let (dx, dy) = active.fingers.moved(finger, x, y);
+                // Two fingers dragging scroll the host, content following
+                // the fingers (as on the phone); the first finger leads.
+                if active.fingers.count() == 2 && active.fingers.primary() == Some(finger) {
+                    let amount = |v: f32| (v * TOUCH_SCROLL_SPEED).round().clamp(-32767.0, 32767.0) as i16;
+                    let (horizontal, vertical) = (amount(-dx), amount(dy));
+                    if horizontal != 0 || vertical != 0 {
+                        active.send([InputEvent::Scroll { vertical, horizontal }]);
+                    }
+                }
                 active.fingers.multi() || active.fingers.primary() != Some(finger)
             }
             1 | 3 => {
@@ -642,6 +655,13 @@ impl Controller {
                 secondary || tap.is_some()
             }
             _ => false,
+        }
+    }
+
+    /// A game controller's new state, for the host.
+    pub(super) fn stream_gamepad(&self, state: hestia_core::stream::input::GamepadState) {
+        if let Some(active) = self.active_stream().as_ref() {
+            active.send([InputEvent::Gamepad(state)]);
         }
     }
 

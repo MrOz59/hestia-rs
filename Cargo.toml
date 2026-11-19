@@ -1,5 +1,7 @@
 [workspace]
 resolver = "2"
+# Vendored crates are used through [patch], not built as members.
+exclude = ["third_party"]
 members = [
     "crates/hestia-crypto",
     "crates/hestia-nvhttp",
@@ -64,8 +66,10 @@ directories = "6"
 clap = { version = "4", features = ["derive", "env"] }
 env_logger = "0.11"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-slint = "1"
-slint-build = "1"
+# Pinned: third_party/i-slint-backend-android-activity patches this exact
+# version (see its PATCHES.md).
+slint = "=1.19.0"
+slint-build = "=1.19.0"
 android_logger = "0.14"
 
 # Media
@@ -82,3 +86,8 @@ lto = "thin"
 opt-level = 3
 [profile.dev.package.rsa]
 opt-level = 3
+
+# Slint's Android backend with Hestia RS's input hook (game controllers)
+# and mouse-wheel fix; see third_party/i-slint-backend-android-activity.
+[patch.crates-io]
+i-slint-backend-android-activity = { path = "third_party/i-slint-backend-android-activity" }

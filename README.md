@@ -74,7 +74,19 @@ server commands) when the host offers them.
   opened in the file manager (desktop) or sent to the host's clipboard.
   Files: `Android/data/com.mroz59.hestia.rs/files/reports/` on Android,
   `~/.local/share/hestia-rs/reports/` on Linux (the CLI writes there too).
-- **Audio**: stereo Opus playback through cpal on desktop Linux.
+- **Audio**: stereo Opus playback through cpal on desktop Linux; on Android,
+  Opus decoded by the system's MediaCodec and played with AAudio (surround
+  mixed down to stereo).
+- **Game controllers on Android**: up to four (buttons, sticks, triggers,
+  d-pad), with rumble on the controller's motor or the phone's. They drive
+  the host only while streaming; otherwise they navigate the app.
+- **Touch extras**: two-finger tap right-clicks, two-finger drag scrolls,
+  three-finger tap opens the keyboard.
+- **Wake-on-LAN**: tapping an offline host wakes it (once its MAC address is
+  known) and waits for it to come up.
+- **Slint patch**: `third_party/i-slint-backend-android-activity` is Slint's
+  Android backend with an input hook (controllers) and a fix for mouse-wheel
+  scrolling, which crashed upstream (see its `PATCHES.md`).
 - **UI** in Slint (dark theme, responsive grid) for desktop Linux and Android
   (NativeActivity), and a `hestia` CLI for scripting and testing.
 

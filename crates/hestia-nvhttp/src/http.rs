@@ -90,6 +90,14 @@ pub fn set_route_hook(hook: fn(&SocketAddr)) {
     let _ = ROUTE_HOOK.set(hook);
 }
 
+/// Runs the route hook for `addr` (for traffic that doesn't go through
+/// [`connect`], such as Wake-on-LAN broadcasts).
+pub fn route(addr: &SocketAddr) {
+    if let Some(hook) = ROUTE_HOOK.get() {
+        hook(addr);
+    }
+}
+
 /// Opens a TCP connection, trying every resolved address in turn. Errors
 /// name the address that failed.
 pub fn connect(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {

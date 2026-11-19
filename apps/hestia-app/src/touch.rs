@@ -188,12 +188,13 @@ impl Trackpad {
 pub const MULTI_TAP_TIME: Duration = Duration::from_millis(350);
 
 /// Recognizes taps with several fingers (as Moonlight/Artemis do: two
-/// fingers right-click, three toggle the keyboard). Fed every touch point
-/// by id; [`FingerTaps::up`] reports the tap when the last finger lifts.
+/// fingers right-click, three toggle the keyboard) and follows two-finger
+/// drags (scrolling). Fed every touch point by id; [`FingerTaps::up`]
+/// reports the tap when the last finger lifts.
 #[derive(Debug, Default)]
 pub struct FingerTaps {
-    /// Fingers down: id and where each started.
-    down: Vec<(i32, f32, f32)>,
+    /// Fingers down: id, where each started, where each is now.
+    down: Vec<(i32, f32, f32, f32, f32)>,
     most: usize,
     started: Option<Instant>,
     moved: bool,
@@ -207,16 +208,26 @@ impl FingerTaps {
             self.moved = false;
         }
         self.down.retain(|f| f.0 != id);
-        self.down.push((id, x, y));
+        self.down.push((id, x, y, x, y));
         self.most = self.most.max(self.down.len());
     }
 
-    pub fn moved(&mut self, id: i32, x: f32, y: f32) {
-        if let Some(&(_, x0, y0)) = self.down.iter().find(|f| f.0 == id)
-            && (x - x0).hypot(y - y0) > SLOP * 2.0
-        {
+    /// The finger moved; returns how far since its last position.
+    pub fn moved(&mut self, id: i32, x: f32, y: f32) -> (f32, f32) {
+        let Some(f) = self.down.iter_mut().find(|f| f.0 == id) else {
+            return (0.0, 0.0);
+        };
+        let delta = (x - f.3, y - f.4);
+        (f.3, f.4) = (x, y);
+        if (x - f.1).hypot(y - f.2) > SLOP * 2.0 {
             self.moved = true;
         }
+        delta
+    }
+
+    /// Fingers down right now.
+    pub fn count(&self) -> usize {
+        self.down.len()
     }
 
     /// The finger went up. When it was the last one, returns how many
@@ -388,7 +399,9 @@ mod tests {
 
         f.down(1, 0.0, 0.0, ms(t0, 2000));
         f.down(2, 50.0, 0.0, ms(t0, 2010));
-        f.moved(2, 120.0, 0.0);
+        assert_eq!(f.moved(2, 80.0, 5.0), (30.0, 5.0));
+        assert_eq!(f.moved(2, 120.0, 0.0), (40.0, -5.0), "relative to the last position");
+        assert_eq!(f.count(), 2);
         f.up(1, ms(t0, 2100));
         assert_eq!(f.up(2, ms(t0, 2110)), None, "moved: a gesture, not a tap");
 

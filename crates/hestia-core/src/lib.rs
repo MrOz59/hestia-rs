@@ -16,6 +16,7 @@ pub mod presets;
 pub mod report;
 pub mod settings;
 pub mod store;
+pub mod wol;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -538,6 +539,27 @@ impl HestiaClient {
             hosts.push(record);
             id
         })
+    }
+
+    /// Sends Wake-on-LAN to a host whose MAC address is known (from an
+    /// earlier `/serverinfo`). Returns how many packets went out.
+    pub fn wake(&self, id: &str) -> Result<usize> {
+        let record = self.host(id)?;
+        let mac = record
+            .mac
+            .as_deref()
+            .and_then(wol::parse_mac)
+            .ok_or_else(|| CoreError::Invalid(format!("no MAC address known for {}", record.name)))?;
+        let address = record
+            .address
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse()
+            .ok();
+        let sent = wol::wake(mac, address, hestia_nvhttp::http::route)
+            .map_err(|e| CoreError::Invalid(format!("Wake-on-LAN: {e}")))?;
+        info!("Wake-on-LAN sent to {} ({sent} packets)", record.name);
+        Ok(sent)
     }
 
     /// Forgets a host locally (the host keeps its own paired-client entry

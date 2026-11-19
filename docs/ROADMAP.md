@@ -23,16 +23,20 @@
 - [x] Software H.264 decode (OpenH264) and a video view inside the Slint window
 - [ ] **Validate against a live Hermes host** (and Sunshine/Apollo)
 - [ ] Linux VA-API decode (HEVC/AV1, DMA-BUF into the renderer)
-- [ ] Android MediaCodec into a Surface
+- [x] Android MediaCodec (H.264/HEVC/AV1) via AImageReader
+- [ ] Android zero-copy output (MediaCodec into a Surface)
 
 ## Milestone 2 — playable
 
 - [x] Audio: AES-CBC, Opus stereo, desktop playback (cpal) with drift control
-- [ ] Audio: surround (multistream), Android AAudio output
+- [x] Audio on Android: Opus via MediaCodec, AAudio output, surround mixed
+      down to stereo
 - [x] Input: keyboard, text, absolute mouse, buttons, scroll, touch as a
       trackpad, keyboard bar with shortcuts (Android on-screen keyboard)
-- [ ] Input: scancode-based keyboard, desktop pointer capture, gamepads (with
-      rumble), native multi-touch and stylus / S Pen
+- [x] Android: game controllers (up to 4; buttons, sticks, triggers, d-pad)
+      with rumble on the controller or the phone; two-finger scroll
+- [ ] Input: scancode-based keyboard, desktop pointer capture, desktop
+      gamepads, native multi-touch and stylus / S Pen, virtual gamepad
 - [x] Stream overlay: stats, full screen, keyframe request, disconnect, quit
 - [x] Hermes host tools: display recovery, server commands, clipboard,
       permissions, diagnostics (app and CLI)
@@ -51,6 +55,6 @@
       mode; picture scale fit / fill / stretch
 - [x] Live bottleneck diagnosis (network / decode / display / host) in the
       overlay and per second in the report
-- [ ] Wake-on-LAN
+- [x] Wake-on-LAN (tap an offline host)
 - [ ] APK signing and release workflow, Arch/CachyOS package
 - [ ] Android multicast lock / NSD fallback if legacy-unicast mDNS misses hosts

@@ -2,6 +2,7 @@
 //! it to `hestia-core` and runs every network call on worker threads.
 
 mod controller;
+mod gamepad;
 mod hostinfo;
 mod keymap;
 mod netroute;
@@ -36,6 +37,8 @@ fn android_main(app: slint::android::AndroidApp) {
     platform::set_android_app(app.clone());
     // Reach LAN hosts over Wi-Fi even when Android prefers mobile data.
     hestia_core::nvhttp::http::set_route_hook(platform::route_for);
+    // Game controllers reach the host through the (patched) backend's hook.
+    i_slint_backend_android_activity::set_input_hook(platform::android_input_hook);
     let data_dir = app
         .internal_data_path()
         .unwrap_or_else(|| PathBuf::from("/data/local/tmp/hestia-rs"));
