@@ -10,6 +10,8 @@
 //! All methods are blocking and thread-safe; call them from worker threads.
 
 pub mod address;
+pub mod logcapture;
+pub mod report;
 pub mod settings;
 pub mod store;
 
@@ -133,6 +135,63 @@ pub struct LaunchedSession {
 }
 
 impl LaunchedSession {
+    /// Adds what was asked for and what `/launch` (and Hermes session
+    /// preparation) answered to a session report.
+    pub fn add_to_report(&self, r: &mut report::StreamReport) {
+        self.settings.add_to_report(r);
+        let info = &self.server_info;
+        r.field("Host", "name", &self.host.name);
+        r.field("Host", "address", &self.host.address);
+        r.field("Host", "version", &info.app_version);
+        if !info.gfe_version.is_empty() {
+            r.field("Host", "GFE version", &info.gfe_version);
+        }
+        r.field(
+            "Host",
+            "codecs",
+            hestia_nvhttp::codecs::describe(info.codec_mode_support).join(", "),
+        );
+        r.field("Launch", "session URL", &self.response.session_url);
+        r.field("Launch", "resumed", self.response.resumed);
+        r.field(
+            "Launch",
+            "requested",
+            format!("{}x{} @ {}", self.request.width, self.request.height, self.request.fps),
+        );
+        match &self.prepared {
+            Some(p) => {
+                let vd = &p.virtual_display;
+                r.field("Launch", "Hermes session", &p.session_id);
+                r.field(
+                    "Launch",
+                    "Hermes display",
+                    format!(
+                        "{} via {}, {}x{} @ {}{}",
+                        vd.name,
+                        vd.backend,
+                        vd.width,
+                        vd.height,
+                        vd.fps,
+                        if vd.hdr { ", HDR" } else { "" }
+                    ),
+                );
+                for w in &p.warnings {
+                    r.field("Launch", "Hermes warning", w);
+                }
+            }
+            None => r.field(
+                "Launch",
+                "Hermes session",
+                "not prepared (not Hermes, or the API was unavailable)",
+            ),
+        }
+        r.event(if self.response.resumed {
+            "app resumed on the host"
+        } else {
+            "app launched on the host"
+        });
+    }
+
     /// Parameters for [`hestia_stream::StreamSession`] matching this launch.
     /// `decoder_formats` are the formats the chosen decoder handles; they are
     /// reordered by the user's codec preference.
@@ -688,6 +747,46 @@ impl HestiaClient {
         client.quit_app()?;
         Ok(())
     }
+}
+
+/// Adds the stream parameters a session asked for to a report.
+pub fn add_stream_config_to_report(c: &hestia_stream::StreamConfig, decoder: &str, r: &mut report::StreamReport) {
+    r.field("Stream", "RTSP", &c.session_url.raw);
+    r.field("Stream", "decoder", decoder);
+    r.field("Stream", "offered formats", format!("{:?}", c.video_formats));
+    r.field("Stream", "packet size", c.packet_size);
+    r.field("Stream", "remote (WAN)", c.streaming_remotely);
+}
+
+/// Adds what the RTSP handshake settled on to a report.
+pub fn add_negotiated_to_report(n: &hestia_stream::rtsp::Negotiated, r: &mut report::StreamReport) {
+    r.field("Negotiated", "video", format!("{:?}", n.video_format));
+    r.field(
+        "Negotiated",
+        "audio",
+        format!(
+            "{} ch, {} streams, {} ms packets{}",
+            n.audio_format.channels,
+            n.audio_format.streams,
+            n.audio_packet_duration_ms,
+            if n.audio_encrypted { ", encrypted" } else { "" }
+        ),
+    );
+    r.field("Negotiated", "encryption flags", format!("{:#x}", n.encryption_enabled));
+    r.field(
+        "Negotiated",
+        "host feature flags",
+        format!("{:#x}", n.host_feature_flags),
+    );
+    r.field(
+        "Negotiated",
+        "ports",
+        format!(
+            "video {} · audio {} · control {}",
+            n.video_port, n.audio_port, n.control_port
+        ),
+    );
+    r.field("Negotiated", "packet size", n.packet_size);
 }
 
 #[cfg(test)]

@@ -136,6 +136,7 @@ pub fn load_settings_into(ui: &AppWindow, s: &StreamSettings) {
     ui.set_cfg_gamescope(s.launch_mode == LaunchMode::Gamescope);
     ui.set_cfg_optimize(s.optimize_game_settings);
     ui.set_cfg_clipboard(s.clipboard_sync);
+    ui.set_cfg_show_report(s.show_stream_report);
 }
 
 pub fn read_settings_from(ui: &AppWindow, base: &StreamSettings) -> StreamSettings {
@@ -158,6 +159,7 @@ pub fn read_settings_from(ui: &AppWindow, base: &StreamSettings) -> StreamSettin
         },
         optimize_game_settings: ui.get_cfg_optimize(),
         clipboard_sync: ui.get_cfg_clipboard(),
+        show_stream_report: ui.get_cfg_show_report(),
         ..base.clone()
     }
 }

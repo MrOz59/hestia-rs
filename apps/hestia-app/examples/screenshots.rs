@@ -148,6 +148,25 @@ fn fill_sample_data(ui: &AppWindow) {
         "display.hdr: no",
         "sessions: 1 items",
     ]));
+    ui.set_report_title("Cyberpunk 2077 on cachy-desktop".into());
+    ui.set_report_summary(strings(&[
+        "Result: the app was closed on the host",
+        "Duration: 12m 04s",
+        "First frame after 1.8s",
+        "Video: 59.6 fps average (lowest 41.0), 18.2 Mbps",
+        "Network: RTT 3 ms average, max 21 ms",
+        "Losses: 2 frames lost, 148 packets recovered by FEC",
+        "Decoder: 4.1 ms per frame, 0 frames dropped",
+    ]));
+    ui.set_report_path(
+        "/storage/emulated/0/Android/data/com.mroz59.hestia.rs/files/reports/stream-20261119-062410.txt".into(),
+    );
+    ui.set_report_log_tail(strings(&[
+        "06:36:12.004 INFO  hestia_stream::session: host ended the stream (code 0x80030023)",
+        "06:36:12.010 INFO  hestia_app::controller::streaming: stream ended (graceful: true)",
+        "06:36:12.231 INFO  hestia_app::controller::report: stream report saved",
+    ]));
+    ui.set_report_can_send(true);
     ui.set_pair_host_name("cachy-desktop".into());
     ui.set_pair_pin("4821".into());
     ui.set_pair_status("Waiting for the host…".into());
@@ -187,7 +206,8 @@ fn main() {
         window.set_size(size);
 
         // (file name, screen, pairing dialog, stream keyboard bar)
-        let shots: [(&str, i32, bool, bool); 8] = [
+        let shots: [(&str, i32, bool, bool); 9] = [
+            ("report", 6, false, false),
             ("hosts", 0, false, false),
             ("apps", 1, false, false),
             ("launching", 2, false, false),

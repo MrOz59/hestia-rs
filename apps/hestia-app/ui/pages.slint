@@ -712,8 +712,10 @@ export component SettingsPage inherits Rectangle {
     in property <string> client-id;
     in property <string> data-dir;
     in property <string> version;
+    in-out property <bool> show-report;
     callback back;
     callback save;
+    callback open-last-report;
 
     // Pickers get at most ~45% of the row so labels keep their room.
     property <length> picker-w: Math.min(Theme.compact ? 160px : 170px, (root.width - 2 * Theme.page-padding) * 0.45);
@@ -853,6 +855,27 @@ export component SettingsPage inherits Rectangle {
                         hint: "Let the host adjust its display mode for the stream";
                         Switch {
                             checked <=> root.optimize;
+                        }
+                    }
+
+                    SectionTitle {
+                        text: "Diagnostics";
+                    }
+                    SettingRow {
+                        label: "Report after each stream";
+                        hint: "Statistics and every log line, ready to share";
+                        Switch {
+                            checked <=> root.show-report;
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        padding-bottom: 4px;
+                        PillButton {
+                            text: "Open last stream report";
+                            clicked => {
+                                root.open-last-report();
+                            }
                         }
                     }
 
@@ -1103,6 +1126,114 @@ export component ToolsPage inherits Rectangle {
                             text: line;
                             color: Theme.muted;
                             font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Shown when a stream ends (or fails to start): what happened, where the
+// full report with every log line was saved, and ways to get it out.
+export component ReportPage inherits Rectangle {
+    in property <string> title;
+    in property <[string]> summary;
+    in property <string> path;
+    in property <[string]> log-tail;
+    in property <string> export-label: "Share";
+    in property <bool> can-send-to-host;
+    in property <bool> busy;
+    callback done;
+    callback export;
+    callback send-to-host;
+
+    VerticalLayout {
+        PageHeader {
+            title: "Stream report";
+            subtitle: root.title;
+            show-back: Theme.compact;
+            back => {
+                root.done();
+            }
+            if root.busy: VerticalLayout {
+                alignment: center;
+                Spinner {
+                    width: 22px;
+                    height: 22px;
+                    indeterminate: true;
+                }
+            }
+            if !Theme.compact: VerticalLayout {
+                alignment: center;
+                PillButton {
+                    text: "Done";
+                    clicked => {
+                        root.done();
+                    }
+                }
+            }
+        }
+
+        Flickable {
+            vertical-stretch: 1;
+            content-width: self.width;
+            content-height: report-form.preferred-height;
+            report-form := HorizontalLayout {
+                width: root.width;
+                alignment: center;
+                VerticalLayout {
+                    width: Math.min(720px, root.width - 2 * Theme.page-padding);
+                    padding-top: 8px;
+                    padding-bottom: 32px;
+                    spacing: 12px;
+
+                    ToolCard {
+                        title: "Summary";
+                        for line in root.summary: Text {
+                            text: line;
+                            color: Theme.text;
+                            font-size: Theme.body-size;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    ToolCard {
+                        title: "Full report";
+                        Text {
+                            text: root.path == "" ? "Not saved to a file." : "Saved with every log line to:\n" + root.path;
+                            color: Theme.muted;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            PillButton {
+                                text: root.export-label;
+                                primary: true;
+                                enabled: !root.busy;
+                                clicked => {
+                                    root.export();
+                                }
+                            }
+                            if root.can-send-to-host: PillButton {
+                                text: "Send to host clipboard";
+                                enabled: !root.busy;
+                                clicked => {
+                                    root.send-to-host();
+                                }
+                            }
+                        }
+                    }
+
+                    if root.log-tail.length > 0: ToolCard {
+                        title: "Last log lines";
+                        for line in root.log-tail: Text {
+                            text: line;
+                            color: Theme.muted;
+                            font-size: 11px;
                             wrap: word-wrap;
                         }
                     }

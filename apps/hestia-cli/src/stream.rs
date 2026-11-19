@@ -10,8 +10,9 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
+use hestia_core::report::{StatsSample, StreamReport};
 use hestia_core::stream::{SessionListener, StreamEvent, StreamSession, VideoCodec, VideoFormat, VideoSink};
-use hestia_core::{DeviceInfo, HestiaClient};
+use hestia_core::{DeviceInfo, HestiaClient, logcapture};
 use hestia_media::null::{NullAudioSink, NullVideoSink};
 use hestia_media::{Colorimetry, DecodeStats, DecodingSink, RgbaFrame, dump::DumpVideoSink};
 
@@ -70,7 +71,17 @@ fn write_ppm(path: &Path, frame: &RgbaFrame) -> std::io::Result<()> {
     out.flush()
 }
 
+/// Saves the session report next to the app's (`<data dir>/reports`).
+fn save_report(client: &HestiaClient, report: &mut StreamReport, outcome: &str) {
+    report.finish(outcome);
+    match report.save(&client.data_dir().join("reports")) {
+        Ok(path) => eprintln!("report: {}", path.display()),
+        Err(e) => eprintln!("could not save the report: {e}"),
+    }
+}
+
 pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
+    let log_mark = logcapture::mark();
     let apps = client.apps(host_id)?;
     let app = apps
         .iter()
@@ -108,7 +119,23 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
     };
 
     let launched = client.launch_with(host_id, app.id, &DeviceInfo::default(), opts.settings.clone())?;
-    let config = launched.stream_config(&formats)?;
+    let mut report = StreamReport::new(format!("{} on {}", app.title, launched.host.name), log_mark);
+    report.field("Client", "version", format!("hestia CLI {}", env!("CARGO_PKG_VERSION")));
+    report.field(
+        "Client",
+        "platform",
+        format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+    );
+    report.field("Client", "video", format!("{:?}", opts.mode));
+    launched.add_to_report(&mut report);
+    let config = match launched.stream_config(&formats) {
+        Ok(config) => config,
+        Err(e) => {
+            save_report(client, &mut report, &format!("no usable stream configuration: {e}"));
+            return Err(e.into());
+        }
+    };
+    hestia_core::add_stream_config_to_report(&config, &format!("{:?}", opts.mode), &mut report);
     eprintln!(
         "{} '{}' on {} — {}x{}@{} {} kbps via {}",
         if launched.response.resumed {
@@ -135,7 +162,16 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
             Box::new(NullAudioSink::default())
         },
         Arc::new(Forward(tx.clone())),
-    )?;
+    );
+    let session = match session {
+        Ok(session) => session,
+        Err(e) => {
+            // Events emitted while starting (stage failures) are in the log.
+            save_report(client, &mut report, &format!("the stream could not start: {e}"));
+            return Err(e.into());
+        }
+    };
+    hestia_core::add_negotiated_to_report(session.negotiated(), &mut report);
     let n = session.negotiated();
     eprintln!(
         "streaming {:?} video, {} audio channels, encryption {:#x}{}",
@@ -173,6 +209,17 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
                 let decoded = decode_stats.as_ref().map_or(0, |d| d.decoded.load(Ordering::Relaxed));
                 if let Some((at, prev, prev_decoded)) = &last {
                     let secs = at.elapsed().as_secs_f64().max(0.001);
+                    report.sample(StatsSample {
+                        fps: (stats.frames - prev.frames) as f64 / secs,
+                        mbps: (stats.bytes - prev.bytes) as f64 * 8.0 / secs / 1e6,
+                        rtt_ms: stats.rtt_ms,
+                        rtt_variance_ms: stats.rtt_variance_ms,
+                        fec_recovered: stats.recovered_packets,
+                        lost_frames: stats.lost_frames,
+                        decoded_fps: decode_stats.as_ref().map(|_| (decoded - prev_decoded) as f64 / secs),
+                        decode_ms: decode_stats.as_ref().map(|d| d.mean_decode_ms()),
+                        dropped: decode_stats.as_ref().map(|d| d.dropped.load(Ordering::Relaxed)),
+                    });
                     let mut line = format!(
                         "{:5.1} fps  {:6.2} Mbps  rtt {:3} ms (±{})  fec-recovered {}  lost frames {}",
                         (stats.frames - prev.frames) as f64 / secs,
@@ -196,9 +243,18 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
                 last = Some((Instant::now(), stats, decoded));
             }
             Ok(Msg::Event(StreamEvent::Terminated { reason, graceful })) => break Some((reason, graceful)),
-            Ok(Msg::Event(StreamEvent::StageFailed(stage, e))) => eprintln!("{stage:?} failed: {e}"),
-            Ok(Msg::Event(StreamEvent::FirstFrame)) => eprintln!("first video frame received"),
-            Ok(Msg::Event(StreamEvent::HdrMode(on))) => eprintln!("host HDR mode: {on}"),
+            Ok(Msg::Event(StreamEvent::StageFailed(stage, e))) => {
+                eprintln!("{stage:?} failed: {e}");
+                report.event(format!("{stage:?} failed: {e}"));
+            }
+            Ok(Msg::Event(StreamEvent::FirstFrame)) => {
+                eprintln!("first video frame received");
+                report.first_frame();
+            }
+            Ok(Msg::Event(StreamEvent::HdrMode(on))) => {
+                eprintln!("host HDR mode: {on}");
+                report.event(format!("host HDR mode: {on}"));
+            }
             Ok(Msg::Event(_)) => {}
             Err(RecvTimeoutError::Timeout) => {
                 if deadline.is_some_and(|d| Instant::now() >= d) {
@@ -209,6 +265,18 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
         }
     };
     session.stop();
+    if let Some(d) = &decode_stats {
+        report.field("Decoder totals", "decoded", d.decoded.load(Ordering::Relaxed));
+        report.field("Decoder totals", "dropped", d.dropped.load(Ordering::Relaxed));
+        report.field("Decoder totals", "errors", d.errors.load(Ordering::Relaxed));
+        report.field("Decoder totals", "mean decode", format!("{:.2} ms", d.mean_decode_ms()));
+    }
+    let ending = match &outcome {
+        Some((reason, _)) => reason.clone(),
+        None if deadline.is_some_and(|d| Instant::now() >= d) => format!("stopped after {} s", opts.seconds),
+        None => "stopped by the user".to_owned(),
+    };
+    save_report(client, &mut report, &ending);
 
     if opts.quit_after {
         client.quit(host_id)?;

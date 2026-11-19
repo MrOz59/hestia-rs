@@ -74,6 +74,8 @@ pub struct StreamSettings {
     /// Touch drives the host cursor like a trackpad (relative); otherwise
     /// a touch clicks where the finger lands.
     pub touch_trackpad: bool,
+    /// Show the session report (stats + logs) when a stream ends.
+    pub show_stream_report: bool,
 }
 
 impl Default for StreamSettings {
@@ -93,11 +95,32 @@ impl Default for StreamSettings {
             optimize_game_settings: true,
             clipboard_sync: false,
             touch_trackpad: true,
+            show_stream_report: true,
         }
     }
 }
 
 impl StreamSettings {
+    /// Adds these settings to a session report.
+    pub fn add_to_report(&self, r: &mut crate::report::StreamReport) {
+        r.field(
+            "Settings",
+            "resolution",
+            format!("{}x{} @ {} fps", self.width, self.height, self.fps),
+        );
+        r.field("Settings", "bitrate", format!("{} kbps", self.bitrate_kbps));
+        r.field("Settings", "codec preference", self.codec.label());
+        r.field("Settings", "audio", format!("{:?}", self.audio));
+        r.field("Settings", "HDR", self.hdr);
+        r.field("Settings", "virtual display", self.virtual_display);
+        r.field("Settings", "launch mode", format!("{:?}", self.launch_mode));
+        r.field(
+            "Settings",
+            "touch",
+            if self.touch_trackpad { "trackpad" } else { "direct" },
+        );
+    }
+
     /// Rough default bitrate (kbps) for a resolution/frame rate, in the spirit
     /// of Moonlight's defaults.
     pub fn suggested_bitrate_kbps(width: u32, height: u32, fps: u32) -> u32 {

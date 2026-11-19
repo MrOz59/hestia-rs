@@ -1,6 +1,6 @@
 import { LineEdit, Spinner } from "std-widgets.slint";
 import { Theme, PillButton, LinkButton, Dialog } from "theme.slint";
-import { HostCard, AppCard, CommandRow, HostsPage, AppsPage, SessionPage, SettingsPage, ToolsPage } from "pages.slint";
+import { HostCard, AppCard, CommandRow, HostsPage, AppsPage, SessionPage, SettingsPage, ToolsPage, ReportPage } from "pages.slint";
 import { StreamView } from "stream.slint";
 
 export { HostCard, AppCard, CommandRow } from "pages.slint";
@@ -23,7 +23,8 @@ export component AppWindow inherits Window {
         Theme.compact = self.width < 640px;
     }
 
-    // 0 = hosts, 1 = apps, 2 = session (launching / errors), 3 = settings, 4 = stream, 5 = host tools
+    // 0 = hosts, 1 = apps, 2 = session (launching / errors), 3 = settings, 4 = stream, 5 = host tools,
+    // 6 = stream report
     in-out property <int> screen: 0;
 
     // Startup (identity generation on first run)
@@ -80,6 +81,18 @@ export component AppWindow inherits Window {
     in property <bool> session-busy;
     callback back-to-apps();
 
+    // Stream report
+    in property <string> report-title;
+    in property <[string]> report-summary;
+    in property <string> report-path;
+    in property <[string]> report-log-tail;
+    in property <string> report-export-label: "Share";
+    in property <bool> report-can-send;
+    in property <bool> report-busy;
+    callback report-export();
+    callback report-send-to-host();
+    callback open-last-report();
+
     // Host tools (Hermes)
     in property <bool> tools-loading;
     in property <bool> tools-busy;
@@ -131,6 +144,7 @@ export component AppWindow inherits Window {
     in-out property <bool> cfg-gamescope;
     in-out property <bool> cfg-optimize: true;
     in-out property <bool> cfg-clipboard;
+    in-out property <bool> cfg-show-report: true;
     in property <string> client-id;
     in property <string> data-dir;
     in property <string> version-text;
@@ -155,7 +169,7 @@ export component AppWindow inherits Window {
             root.screen = root.settings-return;
             return true;
         }
-        if (root.screen == 5) {
+        if (root.screen == 5 || root.screen == 6) {
             root.screen = 1;
             return true;
         }
@@ -308,6 +322,27 @@ export component AppWindow inherits Window {
         }
     }
 
+    if root.screen == 6: ReportPage {
+        width: 100%;
+        height: 100%;
+        title: root.report-title;
+        summary: root.report-summary;
+        path: root.report-path;
+        log-tail: root.report-log-tail;
+        export-label: root.report-export-label;
+        can-send-to-host: root.report-can-send;
+        busy: root.report-busy;
+        done => {
+            root.back-to-apps();
+        }
+        export => {
+            root.report-export();
+        }
+        send-to-host => {
+            root.report-send-to-host();
+        }
+    }
+
     if root.screen == 5: ToolsPage {
         width: 100%;
         height: 100%;
@@ -360,6 +395,10 @@ export component AppWindow inherits Window {
         client-id: root.client-id;
         data-dir: root.data-dir;
         version: root.version-text;
+        show-report <=> root.cfg-show-report;
+        open-last-report => {
+            root.open-last-report();
+        }
         back => {
             root.screen = root.settings-return;
         }

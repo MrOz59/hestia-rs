@@ -146,7 +146,10 @@ fn default_data_dir() -> PathBuf {
 }
 
 fn main() -> ExitCode {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    // Console logging as before; the capture feeds `hestia stream` reports.
+    let console = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).build();
+    let level = console.filter();
+    let _ = hestia_core::logcapture::install(Box::new(console), level);
     let cli = Cli::parse();
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,

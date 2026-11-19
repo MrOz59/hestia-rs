@@ -4,6 +4,7 @@
 mod controller;
 mod hostinfo;
 mod keymap;
+mod platform;
 mod touch;
 mod typing;
 mod view;
@@ -24,11 +25,14 @@ pub fn run(data_dir: PathBuf) -> Result<(), slint::PlatformError> {
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: slint::android::AndroidApp) {
-    android_logger::init_once(
+    // logcat as before; the capture keeps lines for stream reports.
+    let logcat = android_logger::AndroidLogger::new(
         android_logger::Config::default()
             .with_max_level(log::LevelFilter::Info)
             .with_tag("hestia"),
     );
+    let _ = hestia_core::logcapture::install(Box::new(logcat), log::LevelFilter::Info);
+    platform::set_android_app(app.clone());
     let data_dir = app
         .internal_data_path()
         .unwrap_or_else(|| PathBuf::from("/data/local/tmp/hestia-rs"));

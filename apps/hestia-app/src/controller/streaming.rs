@@ -6,12 +6,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use hestia_core::LaunchedSession;
+use hestia_core::report::StatsSample;
 use hestia_core::stream::input::{Modifiers, MouseButton};
 use hestia_core::stream::{InputEvent, SessionListener, StreamEvent, StreamSession, StreamStats};
 use hestia_media::{Colorimetry, DecodeStats, DecodingSink, FramePresenter, RgbaFrame};
 use log::{info, warn};
 use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer, SharedString};
 
+use super::report::{self, SharedReport};
 use super::{Controller, Shared, spawn};
 use crate::AppWindow;
 use crate::keymap::{self, Mapped};
@@ -32,6 +34,8 @@ pub(super) struct ActiveStream {
     touch_id: u64,
     /// Current content of the keyboard bar.
     typed: String,
+    report: SharedReport,
+    decode: Arc<DecodeStats>,
 }
 
 impl ActiveStream {
@@ -88,26 +92,43 @@ struct Listener {
     /// "1920×1080 H264" etc.
     label: String,
     last: Mutex<Option<(Instant, StreamStats, u64)>>,
+    report: SharedReport,
 }
 
 impl Listener {
-    fn stats_line(&self, stats: StreamStats) -> Option<String> {
+    /// Per-second rates from the running totals.
+    fn sample(&self, stats: StreamStats) -> Option<StatsSample> {
         let decoded = self.decode.decoded.load(Ordering::Relaxed);
         let mut last = self.last.lock().unwrap_or_else(|p| p.into_inner());
         let previous = last.replace((Instant::now(), stats, decoded));
         let (at, prev, prev_decoded) = previous?;
         let secs = at.elapsed().as_secs_f64().max(0.001);
-        Some(format!(
+        let decoded_fps = decoded.saturating_sub(prev_decoded) as f64 / secs;
+        Some(StatsSample {
+            fps: stats.frames.saturating_sub(prev.frames) as f64 / secs,
+            mbps: stats.bytes.saturating_sub(prev.bytes) as f64 * 8.0 / secs / 1e6,
+            rtt_ms: stats.rtt_ms,
+            rtt_variance_ms: stats.rtt_variance_ms,
+            fec_recovered: stats.recovered_packets,
+            lost_frames: stats.lost_frames,
+            decoded_fps: Some(decoded_fps),
+            decode_ms: Some(self.decode.mean_decode_ms()),
+            dropped: Some(self.decode.dropped.load(Ordering::Relaxed)),
+        })
+    }
+
+    fn stats_line(&self, s: &StatsSample) -> String {
+        format!(
             "{}  ·  {:.0} fps  ·  {:.1} Mbps  ·  RTT {} ms  ·  decode {:.1} ms  ·  FEC {}  ·  lost {}  ·  dropped {}",
             self.label,
-            (decoded.saturating_sub(prev_decoded)) as f64 / secs,
-            stats.bytes.saturating_sub(prev.bytes) as f64 * 8.0 / secs / 1e6,
-            stats.rtt_ms,
-            self.decode.mean_decode_ms(),
-            stats.recovered_packets,
-            stats.lost_frames,
-            self.decode.dropped.load(Ordering::Relaxed),
-        ))
+            s.decoded_fps.unwrap_or(s.fps),
+            s.mbps,
+            s.rtt_ms,
+            s.decode_ms.unwrap_or(0.0),
+            s.fec_recovered,
+            s.lost_frames,
+            s.dropped.unwrap_or(0),
+        )
     }
 }
 
@@ -115,21 +136,32 @@ impl SessionListener for Listener {
     fn on_event(&self, event: StreamEvent) {
         match event {
             StreamEvent::Stats(stats) => {
-                if let Some(line) = self.stats_line(stats) {
+                if let Some(sample) = self.sample(stats) {
+                    let line = self.stats_line(&sample);
+                    report::lock(&self.report).sample(sample);
                     self.controller.ui(move |ui| ui.set_stream_stats(line.into()));
                 }
             }
             StreamEvent::FirstFrame => {
+                report::lock(&self.report).first_frame();
                 self.controller
                     .ui(|ui| ui.set_stream_status("Decoding the first frame…".into()));
             }
-            StreamEvent::HdrMode(on) => info!("host HDR mode: {on}"),
-            StreamEvent::StageFailed(stage, e) => warn!("{stage:?} failed: {e}"),
+            StreamEvent::HdrMode(on) => {
+                info!("host HDR mode: {on}");
+                report::lock(&self.report).event(format!("host HDR mode: {on}"));
+            }
+            StreamEvent::StageStarting(stage) => report::lock(&self.report).event(format!("starting {stage:?}")),
+            StreamEvent::StageFailed(stage, e) => {
+                warn!("{stage:?} failed: {e}");
+                report::lock(&self.report).event(format!("{stage:?} failed: {e}"));
+            }
+            StreamEvent::Connected => report::lock(&self.report).event("connected"),
+            StreamEvent::Rumble { .. } => {}
             StreamEvent::Terminated { reason, graceful } => {
                 info!("stream ended (graceful: {graceful}): {reason}");
                 self.controller.end_stream(Some(self.generation), Some(reason), false);
             }
-            _ => {}
         }
     }
 }
@@ -141,9 +173,15 @@ impl Controller {
 
     /// Opens the stream for a launched app; runs on a worker thread (the RTSP
     /// handshake blocks). On success the window switches to the stream view.
-    pub(super) fn start_stream(self: &Shared, host_id: String, launched: &LaunchedSession) -> Result<(), String> {
+    pub(super) fn start_stream(
+        self: &Shared,
+        host_id: String,
+        launched: &LaunchedSession,
+        session_report: SharedReport,
+    ) -> Result<(), String> {
         let (decoder, formats) = hestia_media::default_decoder(Colorimetry::default())?;
         let config = launched.stream_config(&formats).map_err(|e| e.to_string())?;
+        hestia_core::add_stream_config_to_report(&config, decoder.name(), &mut report::lock(&session_report));
         let generation = self.stream_generation.fetch_add(1, Ordering::Relaxed) + 1;
         let weak = self.weak.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let sink = DecodingSink::new(
@@ -161,14 +199,16 @@ impl Controller {
         let listener = Arc::new(Listener {
             controller: self.clone(),
             generation,
-            decode,
+            decode: decode.clone(),
             label: size.clone(),
             last: Mutex::new(None),
+            report: session_report.clone(),
         });
         let session = StreamSession::start(config, Box::new(sink), hestia_media::default_audio_sink(), listener)
             .map_err(|e| e.to_string())?;
         let codec = format!("{:?}", session.negotiated().video_format.codec);
         info!("streaming {size} {codec} from {}", launched.host.name);
+        hestia_core::add_negotiated_to_report(session.negotiated(), &mut report::lock(&session_report));
 
         let previous = self.active_stream().replace(ActiveStream {
             generation,
@@ -178,6 +218,8 @@ impl Controller {
             trackpad: Trackpad::new(),
             touch_id: 0,
             typed: String::new(),
+            report: session_report,
+            decode,
         });
         if let Some(previous) = previous {
             spawn("hestia-stream-stop", move || previous.session.stop());
@@ -202,15 +244,38 @@ impl Controller {
         let Some(active) = active else { return };
         let c = self.clone();
         spawn("hestia-stream-stop", move || {
-            let host_id = active.host_id.clone();
-            active.session.stop();
-            c.ui(|ui| {
+            let ActiveStream {
+                session,
+                host_id,
+                report: session_report,
+                decode,
+                ..
+            } = active;
+            session.stop();
+            {
+                let mut r = report::lock(&session_report);
+                r.field("Decoder totals", "decoded", decode.decoded.load(Ordering::Relaxed));
+                r.field("Decoder totals", "dropped", decode.dropped.load(Ordering::Relaxed));
+                r.field("Decoder totals", "errors", decode.errors.load(Ordering::Relaxed));
+                r.field(
+                    "Decoder totals",
+                    "mean decode",
+                    format!("{:.2} ms", decode.mean_decode_ms()),
+                );
+            }
+            let outcome = match (&reason, quit) {
+                (Some(reason), _) => reason.clone(),
+                (None, true) => "quit by the user".to_owned(),
+                (None, false) => "disconnected by the user".to_owned(),
+            };
+            let show_report = c.finish_report(session_report, &outcome, Some(host_id.clone()));
+            c.ui(move |ui| {
                 if ui.get_stream_fullscreen() {
                     ui.window().set_fullscreen(false);
                     ui.set_stream_fullscreen(false);
                 }
                 if ui.get_screen() == 4 {
-                    ui.set_screen(1);
+                    ui.set_screen(if show_report { 6 } else { 1 });
                 }
                 ui.set_stream_frame(Image::default());
                 ui.set_stream_stats(SharedString::new());

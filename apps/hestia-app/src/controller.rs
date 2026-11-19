@@ -19,6 +19,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use crate::AppWindow;
 use crate::view;
 
+mod report;
 mod streaming;
 mod tools;
 
@@ -46,6 +47,8 @@ pub struct Controller {
     stream_generation: AtomicU64,
     /// Touch acts as a trackpad in the stream (persisted in the settings).
     trackpad: AtomicBool,
+    /// The report screen's content.
+    last_report: Mutex<Option<report::LastReport>>,
 }
 
 type Shared = Arc<Controller>;
@@ -65,6 +68,7 @@ impl Controller {
             stream: Mutex::new(None),
             stream_generation: AtomicU64::new(0),
             trackpad: AtomicBool::new(true),
+            last_report: Mutex::new(None),
         })
     }
 
@@ -132,9 +136,17 @@ impl Controller {
         });
         let c = self.clone();
         ui.on_back_to_apps(move || {
-            c.ui(|ui| ui.set_screen(1));
+            // The report screen can be opened from Settings with no host open.
+            let screen = if c.state().current_host.is_some() { 1 } else { 0 };
+            c.ui(move |ui| ui.set_screen(screen));
             c.refresh_current_running();
         });
+        let c = self.clone();
+        ui.on_report_export(move || c.report_export());
+        let c = self.clone();
+        ui.on_report_send_to_host(move || c.report_send_to_host());
+        let c = self.clone();
+        ui.on_open_last_report(move || c.open_last_report());
 
         let c = self.clone();
         ui.on_stream_key(move |text, pressed, repeat, ctrl, alt, shift, meta| {
@@ -627,7 +639,7 @@ impl Controller {
         let Some(id) = self.state().current_host.clone() else {
             return;
         };
-        let (title, host_name, other_running) = {
+        let (title, host_name, address, other_running) = {
             let st = self.state();
             let title = st
                 .apps
@@ -638,7 +650,8 @@ impl Controller {
             let snapshot = st.snapshots.get(&id);
             let current = snapshot.and_then(|s| s.info.as_ref()).map_or(0, |i| i.current_game);
             let host_name = snapshot.map(|s| s.record.name.clone()).unwrap_or_default();
-            (title, host_name, current != 0 && current != app_id)
+            let address = snapshot.map(|s| s.record.address.clone()).unwrap_or_default();
+            (title, host_name, address, current != 0 && current != app_id)
         };
         if other_running {
             self.toast("Another app is running on this host. Quit it first.");
@@ -647,8 +660,8 @@ impl Controller {
 
         let c = self.clone();
         self.ui(move |ui| {
-            ui.set_session_title(title.into());
-            ui.set_session_subtitle(host_name.into());
+            ui.set_session_title(title.as_str().into());
+            ui.set_session_subtitle(host_name.as_str().into());
             ui.set_session_lines(lines(&["Starting on the host…"]));
             ui.set_session_busy(true);
             ui.set_screen(2);
@@ -661,16 +674,20 @@ impl Controller {
             }
             spawn("hestia-launch", move || {
                 let Some(core) = c.core() else { return };
+                let session_report = report::begin(&title, &host_name, &device);
+                let mut failure = String::new();
                 let text: Vec<String> = match core.launch(&id, app_id, &device) {
                     Ok(session) => {
+                        report::launched(&session_report, &session);
                         c.ui(|ui| ui.set_session_lines(lines(&["Connecting to the stream…"])));
-                        match c.start_stream(id.clone(), &session) {
+                        match c.start_stream(id.clone(), &session, session_report.clone()) {
                             Ok(()) => {
                                 c.ui(|ui| ui.set_session_busy(false));
                                 c.refresh_current_running();
                                 return;
                             }
                             Err(e) => {
+                                failure = format!("the stream could not start: {e}");
                                 let mut out = vec![format!(
                                     "{} on {}, but the stream could not start: {e}",
                                     if session.response.resumed { "Resumed" } else { "Started" },
@@ -694,12 +711,24 @@ impl Controller {
                             }
                         }
                     }
-                    Err(e) => vec![format!("Could not start the app: {e}")],
+                    Err(e) => {
+                        report::settings(&session_report, &core.settings());
+                        session_report
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .field("Host", "address", &address);
+                        failure = format!("could not start the app: {e}");
+                        vec![format!("Could not start the app: {e}")]
+                    }
                 };
+                let show_report = c.finish_report(session_report, &failure, Some(id.clone()));
                 let model_lines: Vec<SharedString> = text.into_iter().map(SharedString::from).collect();
                 c.ui(move |ui| {
                     ui.set_session_lines(ModelRc::new(VecModel::from(model_lines)));
                     ui.set_session_busy(false);
+                    if show_report && ui.get_screen() == 2 {
+                        ui.set_screen(6);
+                    }
                 });
                 c.refresh_current_running();
             });

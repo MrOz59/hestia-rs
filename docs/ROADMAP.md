@@ -29,10 +29,14 @@
 
 - [x] Audio: AES-CBC, Opus stereo, desktop playback (cpal) with drift control
 - [ ] Audio: surround (multistream), Android AAudio output
-- [x] Input: keyboard, text, absolute mouse, buttons, scroll, touch-as-mouse
-- [ ] Input: scancode-based keyboard, relative mouse / pointer capture,
-      gamepads (with rumble), native touch and stylus / S Pen, Android keyboard
-- [x] Stream overlay: stats, full screen, disconnect, quit
+- [x] Input: keyboard, text, absolute mouse, buttons, scroll, touch as a
+      trackpad, keyboard bar with shortcuts (Android on-screen keyboard)
+- [ ] Input: scancode-based keyboard, desktop pointer capture, gamepads (with
+      rumble), native multi-touch and stylus / S Pen
+- [x] Stream overlay: stats, full screen, keyframe request, disconnect, quit
+- [x] Hermes host tools: display recovery, server commands, clipboard,
+      permissions, diagnostics (app and CLI)
+- [x] Session reports with every log line (share sheet / file / host clipboard)
 - [ ] Control-stream loss statistics to the host (adaptive bitrate)
 - [ ] Hermes clipboard sync during the stream
 

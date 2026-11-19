@@ -41,6 +41,22 @@ server commands) when the host offers them.
   mapping, text fallback for other characters), absolute mouse, buttons,
   scroll, touch as mouse, stats overlay, full screen, disconnect / quit.
   `Ctrl+Alt+Shift+Q` disconnects, `Ctrl+Alt+Shift+S` toggles statistics.
+- **Touch as a trackpad** (default on phones): the finger moves the host
+  cursor relatively; tap = click, hold = right click, tap then drag = drag.
+  "Touch: direct" in the stream menu clicks where you touch instead.
+- **Keyboard bar** in the stream menu: a text field (opens the on-screen
+  keyboard) replayed on the host, plus Esc, Tab, Enter, Backspace, Win,
+  Alt+Tab and Alt+F4; "Fix picture" asks the host for a fresh keyframe.
+- **Host tools** (Hermes): display status and recovery, server commands,
+  clipboard send/fetch, this device's permissions, diagnostics.
+- **Stream reports**: every session (including one that fails to start)
+  writes a report with the client, host and launch details, what was
+  negotiated, events, per-second statistics and every log line from launch
+  to end. It opens when the stream ends (Settings → Diagnostics turns that
+  off or reopens the last one), and can be shared (Android share sheet),
+  opened in the file manager (desktop) or sent to the host's clipboard.
+  Files: `Android/data/com.mroz59.hestia.rs/files/reports/` on Android,
+  `~/.local/share/hestia-rs/reports/` on Linux (the CLI writes there too).
 - **Audio**: stereo Opus playback through cpal on desktop Linux.
 - **UI** in Slint (dark theme, responsive grid) for desktop Linux and Android
   (NativeActivity), and a `hestia` CLI for scripting and testing.
@@ -51,8 +67,7 @@ server commands) when the host offers them.
 - No audio on Android yet; surround layouts are not played (stereo only).
 - Keys are mapped by the character they produce (US layout), not by physical
   scancode; characters without a US key are sent as text.
-- Mouse is absolute only (no pointer capture / relative mode), no gamepads in
-  the UI yet.
+- Desktop mouse is absolute only (no pointer capture), no gamepads yet.
 
 ## Layout
 
@@ -146,6 +161,10 @@ hestia stream cachy Desktop --snapshot frame.ppm --seconds 5     # save a decode
 hestia stream cachy Desktop --dump capture --seconds 10          # raw capture.h264
 hestia quit cachy
 hestia diagnostics cachy        # Hermes diagnostics JSON
+hestia commands cachy           # Hermes server commands
+hestia run cachy "Restart Steam" [--yes]
+hestia clipboard cachy [--set "text"]
+hestia display cachy [--recover [--force]]
 ```
 
 The CLI and the GUI share the same data directory (`~/.local/share/hestia-rs`,
