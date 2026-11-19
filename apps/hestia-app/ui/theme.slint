@@ -201,17 +201,20 @@ export component PillButton inherits Rectangle {
     }
 }
 
+// Text link; wraps instead of overflowing narrow dialogs.
 export component LinkButton inherits Rectangle {
     in property <string> text;
     callback clicked;
-    min-width: label.preferred-width + 8px;
-    height: Theme.compact ? 40px : 28px;
+    min-height: Theme.compact ? 40px : 28px;
+    preferred-height: label.preferred-height + 12px;
 
     label := Text {
+        width: parent.width;
         text: root.text;
         color: touch.has-hover ? Theme.accent-hover : Theme.accent;
         font-size: 13px;
         font-weight: 600;
+        wrap: word-wrap;
         horizontal-alignment: center;
         vertical-alignment: center;
     }

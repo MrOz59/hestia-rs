@@ -666,10 +666,16 @@ component SettingRow inherits HorizontalLayout {
     }
 }
 
-component SectionTitle inherits Text {
-    color: Theme.accent;
-    font-size: 13px;
-    font-weight: 700;
+component SectionTitle inherits VerticalLayout {
+    in property <string> text;
+    padding-top: 18px;
+    padding-bottom: 4px;
+    Text {
+        text: root.text;
+        color: Theme.accent;
+        font-size: 13px;
+        font-weight: 700;
+    }
 }
 
 export component SettingsPage inherits Rectangle {
