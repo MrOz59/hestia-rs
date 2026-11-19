@@ -83,14 +83,16 @@ jobs:
 
       - uses: android-actions/setup-android@v3
         with:
-          packages: "platform-tools platforms;android-34 build-tools;34.0.0 ndk;29.0.14206865"
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0 ndk;30.0.16248370"
 
-      # The runner ships several NDKs. Every tool (cargo-ndk, cargo-apk, the
-      # cc crate) must use the same one, or C++ code gets compiled against
-      # one libc++'s headers and linked against another's library.
+      # Slint renders with Skia on Android, and skia-bindings downloads a
+      # prebuilt libskia.a built with a recent NDK: its libc++ calls
+      # std::__hash_memory, which older NDKs' libc++ (r27, r29) lacks, so the
+      # app would fail to load ("cannot locate symbol"). Build with the same
+      # NDK, and point every tool (cargo-ndk, cargo-apk, cc) at it.
       - name: Android environment
         run: |
-          ndk="$ANDROID_HOME/ndk/29.0.14206865"
+          ndk="$ANDROID_HOME/ndk/30.0.16248370"
           for v in ANDROID_NDK_HOME ANDROID_NDK_ROOT ANDROID_NDK ANDROID_NDK_LATEST_HOME ANDROID_NDK_PATH NDK_HOME; do
             echo "$v=$ndk" >> "$GITHUB_ENV"
           done
@@ -98,7 +100,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: android-ndk29
+          key: android-ndk30
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
