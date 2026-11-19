@@ -985,6 +985,12 @@ impl Controller {
         });
     }
 
+    pub(super) fn stream_special_key(&self, name: &str) {
+        if let Some(active) = self.active_stream().as_ref() {
+            active.send(typing::special_key_events(name));
+        }
+    }
+
     pub(super) fn request_keyframe(self: &Shared) {
         if let Some(active) = self.active_stream().as_ref() {
             active.session.request_keyframe();
