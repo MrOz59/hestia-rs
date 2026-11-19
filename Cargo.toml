@@ -69,7 +69,6 @@ android_logger = "0.14"
 
 [profile.release]
 lto = "thin"
-codegen-units = 1
 
 # RSA key generation is painfully slow without optimizations; keep the crypto
 # crates optimized even in debug builds so first launch doesn't stall.
