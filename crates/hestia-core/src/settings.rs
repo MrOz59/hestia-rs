@@ -121,6 +121,8 @@ pub struct StreamSettings {
     /// Keep the menu button on the stream (otherwise Back/Escape open the
     /// menu). Off on phones, where the button only covers the picture.
     pub show_menu_button: bool,
+    /// Use the platform's hardware decoder when there is one.
+    pub hardware_decoding: bool,
 }
 
 impl Default for StreamSettings {
@@ -144,6 +146,7 @@ impl Default for StreamSettings {
             preset: crate::Preset::Custom,
             video_scale: VideoScale::Fit,
             show_menu_button: !cfg!(target_os = "android"),
+            hardware_decoding: true,
         }
     }
 }
@@ -169,6 +172,11 @@ impl StreamSettings {
         );
         r.field("Settings", "preset", self.preset.label());
         r.field("Settings", "video scale", self.video_scale.label());
+        r.field(
+            "Settings",
+            "hardware decoding",
+            if self.hardware_decoding { "on" } else { "off" },
+        );
     }
 
     /// Rough default bitrate (kbps) for a resolution/frame rate, in the spirit

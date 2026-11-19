@@ -21,3 +21,7 @@ log.workspace = true
 openh264 = { workspace = true, optional = true }
 opus = { workspace = true, optional = true }
 cpal = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# AMediaCodec + AImageReader (hardware decoding).
+ndk = { version = "0.9", default-features = false, features = ["media", "api-level-26"] }

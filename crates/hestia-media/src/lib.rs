@@ -13,14 +13,19 @@
 //! * [`null`]: counts frames and packets; for exercising the pipeline.
 //! * [`dump`]: writes the elementary video stream to a file (`ffplay out.h264`).
 //!
-//! Planned: `mediacodec` (Android, `AMediaCodec` into a `Surface`), `vaapi`
-//! (Linux, DMA-BUF into the GL view), surround audio, Android audio.
+//! * `mediacodec` (Android): hardware H.264/HEVC through `AMediaCodec`,
+//!   read back via an `AImageReader`; falls back to OpenH264 for H.264.
+//!
+//! Planned: `vaapi` (Linux, DMA-BUF into the GL view), zero-copy Android
+//! output, surround audio, Android audio.
 
 #[cfg(feature = "audio")]
 pub mod audio_out;
 pub mod color;
 pub mod decode;
 pub mod dump;
+#[cfg(target_os = "android")]
+pub mod mediacodec;
 pub mod null;
 #[cfg(feature = "openh264")]
 pub mod software_h264;
@@ -47,7 +52,7 @@ pub fn video_backends() -> Vec<BackendInfo> {
                 "VA-API"
             },
             hardware: true,
-            available: false,
+            available: cfg!(target_os = "android"),
         },
         BackendInfo {
             name: "OpenH264 (software H.264)",
@@ -67,6 +72,22 @@ pub type DecoderChoice = (Box<dyn FrameDecoder>, Vec<VideoFormat>);
 
 /// The best video decoder this build offers.
 pub fn default_decoder(colorimetry: Colorimetry) -> Result<DecoderChoice, String> {
+    decoder_with(colorimetry, true)
+}
+
+/// Like [`default_decoder`]; `hardware: false` skips hardware decoders.
+pub fn decoder_with(colorimetry: Colorimetry, hardware: bool) -> Result<DecoderChoice, String> {
+    #[cfg(target_os = "android")]
+    if hardware && let Some(decoder) = mediacodec::MediaCodecDecoder::probe(colorimetry) {
+        let formats = decoder.formats();
+        return Ok((Box::new(decoder), formats));
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = hardware;
+    software_decoder(colorimetry)
+}
+
+fn software_decoder(colorimetry: Colorimetry) -> Result<DecoderChoice, String> {
     #[cfg(feature = "openh264")]
     {
         let decoder = software_h264::OpenH264Decoder::new(colorimetry)?;

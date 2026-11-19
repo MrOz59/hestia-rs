@@ -162,6 +162,7 @@ export component AppWindow inherits Window {
     in-out property <bool> cfg-clipboard;
     in-out property <bool> cfg-show-report: true;
     in-out property <bool> cfg-show-menu-button: false;
+    in-out property <bool> cfg-hardware-decoding: true;
     in property <string> client-id;
     in property <string> data-dir;
     in property <string> version-text;
@@ -454,6 +455,7 @@ export component AppWindow inherits Window {
             version: root.version-text;
             show-report <=> root.cfg-show-report;
         show-menu-button <=> root.cfg-show-menu-button;
+        hardware-decoding <=> root.cfg-hardware-decoding;
             open-last-report => {
                 root.open-last-report();
             }

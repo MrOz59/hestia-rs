@@ -96,6 +96,62 @@ pub fn i420_to_rgba(src: &I420<'_>, colorimetry: Colorimetry, out: &mut [u8]) {
     }
 }
 
+/// Borrowed 4:2:0 picture in Android's `YUV_420_888` layout: chroma
+/// samples `uv_pixel_stride` bytes apart (1 = planar like I420, 2 = the
+/// U and V planes interleave, as NV12/NV21 do).
+#[derive(Debug, Clone, Copy)]
+pub struct Yuv420<'a> {
+    pub y: &'a [u8],
+    pub u: &'a [u8],
+    pub v: &'a [u8],
+    pub y_stride: usize,
+    pub u_stride: usize,
+    pub v_stride: usize,
+    pub uv_pixel_stride: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+/// Writes `width * height` RGBA pixels (alpha 255) into `out`. Chroma
+/// samples outside the planes (short last rows) read as neutral grey.
+pub fn yuv420_to_rgba(src: &Yuv420<'_>, colorimetry: Colorimetry, out: &mut [u8]) {
+    if src.uv_pixel_stride == 1 && src.u_stride == src.v_stride {
+        return i420_to_rgba(
+            &I420 {
+                y: src.y,
+                u: src.u,
+                v: src.v,
+                y_stride: src.y_stride,
+                uv_stride: src.u_stride,
+                width: src.width,
+                height: src.height,
+            },
+            colorimetry,
+            out,
+        );
+    }
+    let [y_off, ys, rv, gu, gv, bu] = colorimetry.coefficients();
+    let (w, h) = (src.width, src.height);
+    assert!(out.len() >= w * h * 4, "RGBA buffer too small");
+    let ps = src.uv_pixel_stride.max(1);
+
+    for (row, out_row) in out.chunks_exact_mut(w * 4).take(h).enumerate() {
+        let y_row = &src.y[row * src.y_stride..row * src.y_stride + w];
+        let u_row = src.u.get((row / 2) * src.u_stride..).unwrap_or_default();
+        let v_row = src.v.get((row / 2) * src.v_stride..).unwrap_or_default();
+        for (x, (p, &l)) in out_row.chunks_exact_mut(4).zip(y_row).enumerate() {
+            let c = (x / 2) * ps;
+            let u = i32::from(u_row.get(c).copied().unwrap_or(128)) - 128;
+            let v = i32::from(v_row.get(c).copied().unwrap_or(128)) - 128;
+            let l = (i32::from(l) - y_off) * ys;
+            p[0] = clamp8((l + rv * v + 128) >> 8);
+            p[1] = clamp8((l + gu * u + gv * v + 128) >> 8);
+            p[2] = clamp8((l + bu * u + 128) >> 8);
+            p[3] = 255;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +224,53 @@ mod tests {
             out,
             [0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255]
         );
+    }
+
+    #[test]
+    fn semi_planar_matches_planar() {
+        // 4x2 picture: distinct chroma per 2x2 block.
+        let y = [16u8, 100, 180, 235, 50, 120, 200, 90];
+        let (u, v) = ([90u8, 240], [240u8, 110]);
+        let planar = I420 {
+            y: &y,
+            u: &u,
+            v: &v,
+            y_stride: 4,
+            uv_stride: 2,
+            width: 4,
+            height: 2,
+        };
+        let mut expected = [0u8; 32];
+        i420_to_rgba(&planar, Colorimetry::Bt601Limited, &mut expected);
+
+        // NV12: U V U V, with the V plane starting one byte later.
+        let nv12 = [90u8, 240, 240, 110];
+        let semi = Yuv420 {
+            y: &y,
+            u: &nv12,
+            v: &nv12[1..],
+            y_stride: 4,
+            u_stride: 4,
+            v_stride: 4,
+            uv_pixel_stride: 2,
+            width: 4,
+            height: 2,
+        };
+        let mut got = [0u8; 32];
+        yuv420_to_rgba(&semi, Colorimetry::Bt601Limited, &mut got);
+        assert_eq!(got, expected);
+
+        // Planar input takes the I420 path and gives the same pixels.
+        let mut again = [0u8; 32];
+        let as_888 = Yuv420 {
+            u: &u,
+            v: &v,
+            u_stride: 2,
+            v_stride: 2,
+            uv_pixel_stride: 1,
+            ..semi
+        };
+        yuv420_to_rgba(&as_888, Colorimetry::Bt601Limited, &mut again);
+        assert_eq!(again, expected);
     }
 }

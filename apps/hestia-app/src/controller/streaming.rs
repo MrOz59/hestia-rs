@@ -315,7 +315,8 @@ impl Controller {
         session_report: SharedReport,
         launch_seq: u64,
     ) -> Result<(), String> {
-        let (decoder, formats) = hestia_media::default_decoder(Colorimetry::default())?;
+        let (decoder, formats) =
+            hestia_media::decoder_with(Colorimetry::default(), launched.settings.hardware_decoding)?;
         let config = launched.stream_config(&formats).map_err(|e| e.to_string())?;
         hestia_core::add_stream_config_to_report(&config, decoder.name(), &mut report::lock(&session_report));
         let generation = self.stream_generation.fetch_add(1, Ordering::Relaxed) + 1;

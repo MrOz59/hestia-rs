@@ -54,6 +54,11 @@ impl RgbaFrame {
 pub trait FrameDecoder: Send {
     fn name(&self) -> &'static str;
     fn supports(&self, format: VideoFormat) -> bool;
+    /// Called once the stream's format and size are known, before the
+    /// first frame (hardware decoders are created here).
+    fn configure(&mut self, _format: VideoFormat, _width: u32, _height: u32, _fps: u32) -> Result<(), String> {
+        Ok(())
+    }
     /// Decodes one access unit; `Ok(true)` when `out` now holds a picture.
     fn decode(&mut self, frame: &EncodedFrame, out: &mut RgbaFrame) -> Result<bool, String>;
 }
@@ -135,10 +140,11 @@ impl DecodingSink {
 
 impl VideoSink for DecodingSink {
     fn setup(&mut self, format: VideoFormat, width: u32, height: u32, fps: u32) -> Result<(), String> {
-        let decoder = self.decoder.take().ok_or("decoder already set up")?;
+        let mut decoder = self.decoder.take().ok_or("decoder already set up")?;
         if !decoder.supports(format) {
             return Err(format!("{} cannot decode {format:?}", decoder.name()));
         }
+        decoder.configure(format, width, height, fps)?;
         info!(
             "video decoder: {} for {format:?} {width}x{height}@{fps}",
             decoder.name()

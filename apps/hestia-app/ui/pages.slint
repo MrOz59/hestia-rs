@@ -726,6 +726,7 @@ export component SettingsPage inherits Rectangle {
     in property <string> version;
     in-out property <bool> show-report;
     in-out property <bool> show-menu-button;
+    in-out property <bool> hardware-decoding;
     callback back;
     callback save;
     callback open-last-report;
@@ -846,6 +847,13 @@ export component SettingsPage inherits Rectangle {
                             width: root.picker-w;
                             model: ["Auto", "H.264", "HEVC", "AV1"];
                             current-index <=> root.codec;
+                        }
+                    }
+                    SettingRow {
+                        label: "Hardware decoding";
+                        hint: "Faster and lighter on the battery; turn off to compare with the software decoder (H.264 only)";
+                        Switch {
+                            checked <=> root.hardware-decoding;
                         }
                     }
                     SettingRow {

@@ -202,6 +202,7 @@ pub fn load_settings_into(ui: &AppWindow, s: &StreamSettings, native: Option<(u3
     ui.set_cfg_clipboard(s.clipboard_sync);
     ui.set_cfg_show_report(s.show_stream_report);
     ui.set_cfg_show_menu_button(s.show_menu_button);
+    ui.set_cfg_hardware_decoding(s.hardware_decoding);
     ui.set_stream_show_menu_button(s.show_menu_button);
 }
 
@@ -242,6 +243,7 @@ pub fn read_settings_from(ui: &AppWindow, base: &StreamSettings) -> StreamSettin
         clipboard_sync: ui.get_cfg_clipboard(),
         show_stream_report: ui.get_cfg_show_report(),
         show_menu_button: ui.get_cfg_show_menu_button(),
+        hardware_decoding: ui.get_cfg_hardware_decoding(),
         ..base.clone()
     }
 }
