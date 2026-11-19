@@ -97,8 +97,14 @@ jobs:
       - name: Package APK (cargo-apk)
         id: apk
         continue-on-error: true
+        # Signed with a throwaway key generated per run (uninstall before
+        # installing a newer CI APK). Swap in repository secrets for releases.
         run: |
           cargo install cargo-apk --locked
+          keytool -genkeypair -keystore "$RUNNER_TEMP/ci.keystore" -storepass android -keypass android \
+            -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Hestia RS CI"
+          export CARGO_APK_RELEASE_KEYSTORE="$RUNNER_TEMP/ci.keystore"
+          export CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android
           cargo apk build --release -p hestia-app --lib
 
       - uses: actions/upload-artifact@v4
