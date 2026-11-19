@@ -18,6 +18,7 @@ audio = ["dep:opus", "dep:cpal"]
 [dependencies]
 hestia-stream.workspace = true
 log.workspace = true
+rayon = "1.10"
 openh264 = { workspace = true, optional = true }
 opus = { workspace = true, optional = true }
 cpal = { workspace = true, optional = true }

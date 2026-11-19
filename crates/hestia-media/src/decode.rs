@@ -6,11 +6,11 @@
 //! queue overflows or the decoder fails, frames are dropped until the next
 //! keyframe and an IDR is requested from the host.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use hestia_stream::{EncodedFrame, KeyframeRequester, SubmitResult, VideoFormat, VideoSink};
 use log::{info, warn};
@@ -50,7 +50,30 @@ impl RgbaFrame {
     }
 }
 
-/// Turns access units into RGBA pictures.
+/// Timing and identity carried from input to its corresponding decoder output.
+#[derive(Debug, Clone, Copy)]
+pub struct FrameTiming {
+    pub frame_number: u32,
+    pub received_at: Instant,
+    pub queued_at: Instant,
+    pub decode_started_at: Instant,
+    pub codec_output_at: Instant,
+}
+
+impl FrameTiming {
+    pub(crate) fn new(frame: &EncodedFrame, queued_at: Instant, started_at: Instant) -> Self {
+        Self {
+            frame_number: frame.frame_number,
+            received_at: frame.received_at,
+            queued_at,
+            decode_started_at: started_at,
+            codec_output_at: started_at,
+        }
+    }
+}
+
+/// Consumes compressed access units. Decoders with asynchronous output can
+/// return the timing of a previous input when that picture becomes available.
 pub trait FrameDecoder: Send {
     fn name(&self) -> &'static str;
     fn supports(&self, format: VideoFormat) -> bool;
@@ -61,17 +84,77 @@ pub trait FrameDecoder: Send {
     }
     /// Decodes one access unit; `Ok(true)` when `out` now holds a picture.
     fn decode(&mut self, frame: &EncodedFrame, out: &mut RgbaFrame) -> Result<bool, String>;
+
+    /// Discards pending output and references before decoding a recovery IDR.
+    fn reset(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn decode_timed(
+        &mut self,
+        frame: &EncodedFrame,
+        out: &mut RgbaFrame,
+        mut timing: FrameTiming,
+    ) -> Result<Option<FrameTiming>, String> {
+        if !self.decode(frame, out)? {
+            return Ok(None);
+        }
+        timing.codec_output_at = Instant::now();
+        Ok(Some(timing))
+    }
 }
 
-/// Receives decoded pictures on the decoder thread. Implementations that hand
-/// the picture to another thread should copy what they need and return fast.
+/// Receives pictures on the decoder thread. A presenter handing a picture to
+/// another thread can take the buffer and return an older one for reuse.
 pub trait FramePresenter: Send {
-    fn present(&mut self, frame: &RgbaFrame);
+    fn present(&mut self, frame: &mut RgbaFrame);
 }
 
 impl<F: FnMut(&RgbaFrame) + Send> FramePresenter for F {
-    fn present(&mut self, frame: &RgbaFrame) {
+    fn present(&mut self, frame: &mut RgbaFrame) {
         self(frame)
+    }
+}
+
+/// Per-stage latency with 0.25 ms buckets up to 64 ms. The overflow bucket
+/// is reported as a lower bound, so high tail latency is visible in reports.
+#[derive(Debug)]
+pub struct LatencyHistogram {
+    buckets: [AtomicU64; 257],
+}
+
+impl Default for LatencyHistogram {
+    fn default() -> Self {
+        Self { buckets: std::array::from_fn(|_| AtomicU64::new(0)) }
+    }
+}
+
+impl LatencyHistogram {
+    pub fn record(&self, elapsed: Duration) {
+        let bucket = (elapsed.as_micros().div_ceil(250)).min(256) as usize;
+        self.buckets[bucket].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn summary(&self) -> Option<String> {
+        let counts = self.buckets.each_ref().map(|n| n.load(Ordering::Relaxed));
+        let total: u64 = counts.iter().sum();
+        if total == 0 {
+            return None;
+        }
+        let percentile = |p: u64| {
+            let target = (total * p).div_ceil(100);
+            let mut cumulative = 0;
+            let bucket = counts.iter().position(|n| {
+                cumulative += *n;
+                cumulative >= target
+            }).unwrap_or(256);
+            if bucket == 256 {
+                "≥63.75".to_owned()
+            } else {
+                format!("{:.2}", bucket as f64 * 0.25)
+            }
+        };
+        Some(format!("p50 {} / p95 {} / p99 {} ms ({total} samples)", percentile(50), percentile(95), percentile(99)))
     }
 }
 
@@ -82,9 +165,23 @@ pub struct DecodeStats {
     pub errors: AtomicU64,
     /// Sum of decode + conversion time, microseconds.
     pub decode_time_us: AtomicU64,
+    pub dropped_backlog: AtomicU64,
+    pub receive_to_queue: LatencyHistogram,
+    pub queue_wait: LatencyHistogram,
+    pub codec: LatencyHistogram,
+    pub frame_conversion: LatencyHistogram,
 }
 
 impl DecodeStats {
+    pub fn latency_stages(&self) -> [(&'static str, &LatencyHistogram); 4] {
+        [
+            ("first packet to decode queue", &self.receive_to_queue),
+            ("decoder queue", &self.queue_wait),
+            ("decoder output", &self.codec),
+            ("output to RGBA ready", &self.frame_conversion),
+        ]
+    }
+
     /// Mean decode time in milliseconds over everything decoded so far.
     pub fn mean_decode_ms(&self) -> f64 {
         let n = self.decoded.load(Ordering::Relaxed);
@@ -95,21 +192,53 @@ impl DecodeStats {
     }
 }
 
-/// Frames waiting for the decoder; beyond this the decoder is too slow.
-/// Deep enough to absorb a keyframe that takes several frame times to
-/// decode (each overflow costs a new keyframe, which is slower still).
 const QUEUE_DEPTH: usize = 6;
 
+struct QueuedFrame {
+    frame: EncodedFrame,
+    queued_at: Instant,
+    generation: u64,
+}
+
+struct Queue {
+    frames: VecDeque<QueuedFrame>,
+    waiting_for_keyframe: bool,
+    generation: u64,
+    max_age: Duration,
+    closed: bool,
+}
+
+impl Queue {
+    fn invalidate(&mut self) -> u64 {
+        let dropped = self.frames.len() as u64;
+        self.frames.clear();
+        self.waiting_for_keyframe = true;
+        self.generation += 1;
+        dropped
+    }
+}
+
 struct Shared {
-    waiting_for_keyframe: AtomicBool,
+    queue: Mutex<Queue>,
+    ready: Condvar,
     stats: Arc<DecodeStats>,
+}
+
+impl Shared {
+    fn queue(&self) -> std::sync::MutexGuard<'_, Queue> {
+        self.queue.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn dropped_backlog(&self, count: u64) {
+        self.stats.dropped.fetch_add(count, Ordering::Relaxed);
+        self.stats.dropped_backlog.fetch_add(count, Ordering::Relaxed);
+    }
 }
 
 pub struct DecodingSink {
     decoder: Option<Box<dyn FrameDecoder>>,
     presenter: Option<Box<dyn FramePresenter>>,
     requester: Option<KeyframeRequester>,
-    queue: Option<SyncSender<EncodedFrame>>,
     thread: Option<JoinHandle<()>>,
     shared: Arc<Shared>,
 }
@@ -120,10 +249,16 @@ impl DecodingSink {
             decoder: Some(decoder),
             presenter: Some(presenter),
             requester: None,
-            queue: None,
             thread: None,
             shared: Arc::new(Shared {
-                waiting_for_keyframe: AtomicBool::new(true),
+                queue: Mutex::new(Queue {
+                    frames: VecDeque::with_capacity(QUEUE_DEPTH),
+                    waiting_for_keyframe: true,
+                    generation: 0,
+                    max_age: Duration::ZERO,
+                    closed: false,
+                }),
+                ready: Condvar::new(),
                 stats: Arc::new(DecodeStats::default()),
             }),
         }
@@ -131,10 +266,6 @@ impl DecodingSink {
 
     pub fn stats(&self) -> Arc<DecodeStats> {
         self.shared.stats.clone()
-    }
-
-    fn need_keyframe(&self) {
-        self.shared.waiting_for_keyframe.store(true, Ordering::Relaxed);
     }
 }
 
@@ -150,16 +281,18 @@ impl VideoSink for DecodingSink {
             decoder.name()
         );
         let presenter = self.presenter.take().ok_or("decoder already set up")?;
-        let (tx, rx) = mpsc::sync_channel(QUEUE_DEPTH);
+        // Allow a short burst around a keyframe, then recover instead of
+        // decoding a backlog. Cap the wait independently of frame rate.
+        self.shared.queue().max_age = Duration::from_micros(2_000_000 / u64::from(fps.max(1)))
+            .clamp(Duration::from_millis(8), Duration::from_millis(45));
         let shared = self.shared.clone();
         let requester = self.requester.clone();
         self.thread = Some(
             std::thread::Builder::new()
                 .name("hestia-decode".into())
-                .spawn(move || decode_loop(rx, decoder, presenter, shared, requester))
+                .spawn(move || decode_loop(decoder, presenter, shared, requester))
                 .map_err(|e| e.to_string())?,
         );
-        self.queue = Some(tx);
         Ok(())
     }
 
@@ -168,29 +301,37 @@ impl VideoSink for DecodingSink {
     }
 
     fn submit(&mut self, frame: EncodedFrame) -> SubmitResult {
-        let Some(queue) = &self.queue else {
+        if self.thread.is_none() {
             return SubmitResult::Ok;
-        };
-        if frame.keyframe {
-            self.shared.waiting_for_keyframe.store(false, Ordering::Relaxed);
-        } else if self.shared.waiting_for_keyframe.load(Ordering::Relaxed) {
+        }
+        let now = Instant::now();
+        let mut queue = self.shared.queue();
+        let overloaded = queue.frames.len() == QUEUE_DEPTH
+            || queue.frames.front().is_some_and(|f| now.duration_since(f.queued_at) > queue.max_age);
+        if overloaded {
+            let dropped = queue.invalidate();
+            self.shared.dropped_backlog(dropped);
+        }
+        if queue.waiting_for_keyframe && !frame.keyframe {
+            if overloaded {
+                self.shared.dropped_backlog(1);
+                return SubmitResult::NeedKeyframe;
+            }
             self.shared.stats.dropped.fetch_add(1, Ordering::Relaxed);
             return SubmitResult::Ok;
         }
-        match queue.try_send(frame) {
-            Ok(()) => SubmitResult::Ok,
-            Err(TrySendError::Full(_)) => {
-                warn!("decoder is falling behind; dropping until the next keyframe");
-                self.shared.stats.dropped.fetch_add(1, Ordering::Relaxed);
-                self.need_keyframe();
-                SubmitResult::NeedKeyframe
-            }
-            Err(TrySendError::Disconnected(_)) => SubmitResult::Ok,
-        }
+        queue.waiting_for_keyframe = false;
+        let generation = queue.generation;
+        self.shared.stats.receive_to_queue.record(now.saturating_duration_since(frame.received_at));
+        queue.frames.push_back(QueuedFrame { frame, queued_at: now, generation });
+        drop(queue);
+        self.shared.ready.notify_one();
+        SubmitResult::Ok
     }
 
     fn cleanup(&mut self) {
-        self.queue = None;
+        self.shared.queue().closed = true;
+        self.shared.ready.notify_one();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -204,7 +345,6 @@ impl Drop for DecodingSink {
 }
 
 fn decode_loop(
-    rx: Receiver<EncodedFrame>,
     mut decoder: Box<dyn FrameDecoder>,
     mut presenter: Box<dyn FramePresenter>,
     shared: Arc<Shared>,
@@ -212,34 +352,67 @@ fn decode_loop(
 ) {
     let mut picture = RgbaFrame::default();
     let mut logged_size = (0, 0);
-    for frame in rx {
-        // Frames queued before an error depend on the broken reference.
-        if !frame.keyframe && shared.waiting_for_keyframe.load(Ordering::Relaxed) {
-            shared.stats.dropped.fetch_add(1, Ordering::Relaxed);
+    let mut decoder_generation = 0;
+    loop {
+        let mut queue = shared.ready.wait_while(shared.queue(), |q| q.frames.is_empty() && !q.closed)
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(QueuedFrame { frame, queued_at, generation }) = queue.frames.pop_front() else {
+            break;
+        };
+        let started = Instant::now();
+        if started.duration_since(queued_at) > queue.max_age {
+            let dropped = queue.invalidate();
+            drop(queue);
+            shared.dropped_backlog(dropped + 1);
+            if let Some(r) = &requester {
+                r.request();
+            }
             continue;
         }
-        let started = Instant::now();
-        match decoder.decode(&frame, &mut picture) {
-            Ok(true) => {
-                picture.frame_number = frame.frame_number;
-                picture.received_at = frame.received_at;
+        drop(queue);
+        let timing = FrameTiming::new(&frame, queued_at, started);
+        let result = if decoder_generation != generation {
+            let reset = decoder.reset();
+            if reset.is_ok() {
+                decoder_generation = generation;
+            }
+            reset.and_then(|()| decoder.decode_timed(&frame, &mut picture, timing))
+        } else {
+            decoder.decode_timed(&frame, &mut picture, timing)
+        };
+
+        let mut queue = shared.queue();
+        if queue.generation != generation {
+            // A newer keyframe may already be queued. Its generation owns recovery.
+            shared.dropped_backlog(1);
+            continue;
+        }
+        match result {
+            Ok(Some(timing)) => {
+                drop(queue);
+                picture.frame_number = timing.frame_number;
+                picture.received_at = timing.received_at;
                 picture.decoded_at = Instant::now();
-                shared.stats.decoded.fetch_add(1, Ordering::Relaxed);
-                shared
-                    .stats
-                    .decode_time_us
-                    .fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+                let stats = &shared.stats;
+                let decode_time = picture.decoded_at.duration_since(timing.decode_started_at);
+                stats.decode_time_us.fetch_add(decode_time.as_micros() as u64, Ordering::Relaxed);
+                stats.queue_wait.record(timing.decode_started_at.duration_since(timing.queued_at));
+                stats.codec.record(timing.codec_output_at.duration_since(timing.decode_started_at));
+                stats.frame_conversion.record(picture.decoded_at.duration_since(timing.codec_output_at));
+                stats.decoded.fetch_add(1, Ordering::Relaxed);
                 if (picture.width, picture.height) != logged_size {
                     logged_size = (picture.width, picture.height);
                     info!("decoding {}x{}", picture.width, picture.height);
                 }
-                presenter.present(&picture);
+                presenter.present(&mut picture);
             }
-            Ok(false) => {}
+            Ok(None) => {}
             Err(e) => {
+                let dropped = queue.invalidate();
+                drop(queue);
                 warn!("decode error on frame {}: {e}", frame.frame_number);
                 shared.stats.errors.fetch_add(1, Ordering::Relaxed);
-                shared.waiting_for_keyframe.store(true, Ordering::Relaxed);
+                shared.stats.dropped.fetch_add(dropped, Ordering::Relaxed);
                 if let Some(r) = &requester {
                     r.request();
                 }
@@ -252,8 +425,7 @@ fn decode_loop(
 mod tests {
     use super::*;
     use hestia_stream::VideoCodec;
-    use std::sync::Mutex;
-    use std::time::Duration;
+    use std::sync::mpsc;
 
     /// "Decodes" a frame into a 2x1 picture whose red channel is the frame
     /// number; fails on frames listed in `fail`.
@@ -297,23 +469,24 @@ mod tests {
     #[test]
     fn decodes_and_recovers_from_errors() {
         let shown = Arc::new(Mutex::new(Vec::new()));
-        let requests = Arc::new(AtomicU64::new(0));
+        let (requested, request) = mpsc::channel();
         let s = shown.clone();
         let mut sink = DecodingSink::new(
             Box::new(Fake { fail: vec![3] }),
             Box::new(move |f: &RgbaFrame| s.lock().unwrap().push(f.data[0] as u32)),
         );
-        let r = requests.clone();
         sink.attach_keyframe_requester(KeyframeRequester::new(move || {
-            r.fetch_add(1, Ordering::Relaxed);
+            requested.send(()).unwrap();
         }));
         sink.setup(H264, 1280, 720, 60).unwrap();
 
         // P-frame before the first keyframe is dropped.
         assert_eq!(sink.submit(frame(1, false)), SubmitResult::Ok);
-        for n in 2..=6 {
-            sink.submit(frame(n, n == 2));
-            std::thread::sleep(Duration::from_millis(20));
+        sink.submit(frame(2, true));
+        sink.submit(frame(3, false));
+        request.recv_timeout(Duration::from_secs(1)).unwrap();
+        for n in 4..=6 {
+            sink.submit(frame(n, false));
         }
         sink.submit(frame(7, true));
         sink.submit(frame(8, false));
@@ -321,7 +494,7 @@ mod tests {
 
         // 3 fails → 4..6 are dropped until keyframe 7.
         assert_eq!(*shown.lock().unwrap(), vec![2, 7, 8]);
-        assert_eq!(requests.load(Ordering::Relaxed), 1);
+        assert!(request.try_recv().is_err());
         let stats = sink.stats();
         assert_eq!(stats.errors.load(Ordering::Relaxed), 1);
         assert_eq!(stats.decoded.load(Ordering::Relaxed), 3);

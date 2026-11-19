@@ -143,6 +143,61 @@ pub struct LaunchedSession {
     pub settings: StreamSettings,
 }
 
+/// Owns the host-side preparation while the data plane is being opened.
+pub struct StreamHost {
+    // Keep the already paired client so cleanup needs only one API call.
+    hermes: Option<NvHttpClient>,
+}
+
+impl StreamHost {
+    pub fn connect(
+        self,
+        config: stream::StreamConfig,
+        video: Box<dyn stream::VideoSink>,
+        audio: Box<dyn stream::AudioSink>,
+        listener: Arc<dyn stream::SessionListener>,
+    ) -> std::result::Result<ManagedStream, stream::StreamError> {
+        let stream = stream::StreamSession::start(config, video, audio, listener)?;
+        Ok(ManagedStream { _host: self, stream })
+    }
+}
+
+impl Drop for StreamHost {
+    fn drop(&mut self) {
+        if let Some(client) = &self.hermes {
+            release_hermes_session(client);
+        }
+    }
+}
+
+/// A local stream and the Hermes resources it owns. Field order releases the
+/// host resources before tearing down the GameStream connection.
+pub struct ManagedStream {
+    _host: StreamHost,
+    stream: stream::StreamSession,
+}
+
+impl std::ops::Deref for ManagedStream {
+    type Target = stream::StreamSession;
+
+    fn deref(&self) -> &Self::Target {
+        &self.stream
+    }
+}
+
+impl ManagedStream {
+    pub fn stop(self) {
+        drop(self);
+    }
+}
+
+fn release_hermes_session(client: &NvHttpClient) {
+    match HestiaApi::new(client).stop_session() {
+        Ok(()) => info!("Hermes session released"),
+        Err(e) => warn!("Hermes session release failed: {e}"),
+    }
+}
+
 impl LaunchedSession {
     /// Adds what was asked for and what `/launch` (and Hermes session
     /// preparation) answered to a session report.
@@ -719,10 +774,15 @@ impl HestiaClient {
         };
 
         let response = if server_info.is_busy() {
-            client.resume(&request)?
+            client.resume(&request)
         } else {
-            client.launch(&request)?
-        };
+            client.launch(&request)
+        }
+        .inspect_err(|_| {
+            if prepared.is_some() {
+                release_hermes_session(&client);
+            }
+        })?;
         info!("session started on {}: {}", record.name, response.session_url);
 
         Ok(LaunchedSession {
@@ -808,6 +868,12 @@ impl HestiaClient {
                 Some(Err(why))
             }
         }
+    }
+
+    /// Claims the preparation for a streaming launch. Dropping this before
+    /// connecting also rolls back a launch cancelled by the local client.
+    pub fn stream_host(&self, launch: &LaunchedSession) -> StreamHost {
+        StreamHost { hermes: launch.prepared.as_ref().map(|_| self.nvhttp(&launch.host)) }
     }
 
     /// Hermes: releases this client's prepared session (virtual display,

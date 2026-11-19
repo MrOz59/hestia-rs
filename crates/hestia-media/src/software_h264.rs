@@ -3,12 +3,14 @@
 //! libraries). The prototype's portable decoder: hardware backends
 //! (MediaCodec, VA-API) slot in behind the same [`FrameDecoder`] trait.
 
+use std::time::Instant;
+
 use hestia_stream::{EncodedFrame, VideoCodec, VideoFormat};
 use openh264::decoder::Decoder;
 use openh264::formats::YUVSource;
 
 use crate::color::{Colorimetry, I420, i420_to_rgba};
-use crate::decode::{FrameDecoder, RgbaFrame};
+use crate::decode::{FrameDecoder, FrameTiming, RgbaFrame};
 
 pub struct OpenH264Decoder {
     decoder: Decoder,
@@ -43,13 +45,29 @@ impl FrameDecoder for OpenH264Decoder {
     }
 
     fn decode(&mut self, frame: &EncodedFrame, out: &mut RgbaFrame) -> Result<bool, String> {
+        let now = Instant::now();
+        self.decode_timed(frame, out, FrameTiming::new(frame, now, now)).map(|t| t.is_some())
+    }
+
+    fn reset(&mut self) -> Result<(), String> {
+        self.decoder = Decoder::new().map_err(|e| format!("OpenH264 reset: {e}"))?;
+        Ok(())
+    }
+
+    fn decode_timed(
+        &mut self,
+        frame: &EncodedFrame,
+        out: &mut RgbaFrame,
+        mut timing: FrameTiming,
+    ) -> Result<Option<FrameTiming>, String> {
         // One access unit (SPS/PPS + slice for IDRs) per call; the host sends
         // a single slice per frame.
         let yuv = match self.decoder.decode(&frame.data) {
             Ok(Some(yuv)) => yuv,
-            Ok(None) => return Ok(false),
+            Ok(None) => return Ok(None),
             Err(e) => return Err(e.to_string()),
         };
+        timing.codec_output_at = Instant::now();
         let (width, height) = yuv.dimensions();
         let (y_stride, uv_stride, _) = yuv.strides();
         out.reshape(width as u32, height as u32);
@@ -66,6 +84,6 @@ impl FrameDecoder for OpenH264Decoder {
             self.colorimetry,
             &mut out.data,
         );
-        Ok(true)
+        Ok(Some(timing))
     }
 }

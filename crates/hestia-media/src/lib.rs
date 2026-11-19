@@ -36,7 +36,7 @@ pub mod null;
 pub mod software_h264;
 
 pub use color::Colorimetry;
-pub use decode::{DecodeStats, DecodingSink, FrameDecoder, FramePresenter, RgbaFrame};
+pub use decode::{DecodeStats, DecodingSink, FrameDecoder, FramePresenter, LatencyHistogram, RgbaFrame};
 pub use hestia_stream::sink::{AudioFormat, AudioSink, EncodedFrame, SubmitResult, VideoFormat, VideoSink};
 
 /// Description of a decoder backend, for settings screens and logs.
