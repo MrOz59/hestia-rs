@@ -10,6 +10,8 @@ use hestia_core::nvhttp::{PairingOutcome, PairingPin, codecs};
 use hestia_core::{DeviceInfo, HestiaClient, HostRecord, HostSnapshot};
 use sha2::{Digest, Sha256};
 
+mod stream;
+
 #[derive(Parser)]
 #[command(
     name = "hestia",
@@ -55,7 +57,7 @@ enum Command {
     },
     /// List the host's apps.
     Apps { host: String },
-    /// Launch (or resume) an app by id or name. Streaming itself is not wired yet.
+    /// Launch (or resume) an app by id or name, without streaming it.
     Launch {
         host: String,
         app: String,
@@ -65,6 +67,39 @@ enum Command {
         height: Option<u32>,
         #[arg(long)]
         fps: Option<u32>,
+    },
+    /// Launch an app and stream it headless, printing statistics every second.
+    ///
+    /// Video is decoded in software by default (`--dump` writes the elementary
+    /// stream instead, `--count` only counts frames); audio is received and
+    /// counted. Press Enter to stop.
+    Stream {
+        host: String,
+        app: String,
+        #[arg(long)]
+        width: Option<u32>,
+        #[arg(long)]
+        height: Option<u32>,
+        #[arg(long)]
+        fps: Option<u32>,
+        /// Video bitrate in kbps.
+        #[arg(long)]
+        bitrate: Option<u32>,
+        /// Stop after this many seconds (0: until Enter or the host ends it).
+        #[arg(long, default_value_t = 0)]
+        seconds: u64,
+        /// Write the received video to FILE.h264/.h265/.obu instead of decoding.
+        #[arg(long, value_name = "FILE", conflicts_with = "count")]
+        dump: Option<PathBuf>,
+        /// Only count frames (no decoder).
+        #[arg(long)]
+        count: bool,
+        /// Save one decoded frame (PPM) a couple of seconds in.
+        #[arg(long, value_name = "FILE.ppm", conflicts_with_all = ["dump", "count"])]
+        snapshot: Option<PathBuf>,
+        /// Quit the app on the host when the stream ends.
+        #[arg(long)]
+        quit: bool,
     },
     /// Quit the app running on the host.
     Quit { host: String },
@@ -190,8 +225,7 @@ fn run(cli: Cli) -> Result<()> {
             settings.width = width.unwrap_or(settings.width);
             settings.height = height.unwrap_or(settings.height);
             settings.fps = fps.unwrap_or(settings.fps);
-            client.set_settings(settings)?;
-            let session = client.launch(&id, app.id, &DeviceInfo::default())?;
+            let session = client.launch_with(&id, app.id, &DeviceInfo::default(), settings)?;
             println!(
                 "{} '{}' on {}",
                 if session.response.resumed {
@@ -217,6 +251,46 @@ fn run(cli: Cli) -> Result<()> {
                 );
             }
             println!("Note: the streaming pipeline is still in development; use `hestia quit` to stop the app.");
+        }
+        Command::Stream {
+            host,
+            app,
+            width,
+            height,
+            fps,
+            bitrate,
+            seconds,
+            dump,
+            count,
+            snapshot,
+            quit,
+        } => {
+            let id = resolve(&client, &host)?.id;
+            let mut settings = client.settings();
+            settings.width = width.unwrap_or(settings.width);
+            settings.height = height.unwrap_or(settings.height);
+            settings.fps = fps.unwrap_or(settings.fps);
+            settings.bitrate_kbps = bitrate.unwrap_or(settings.bitrate_kbps);
+            let mode = if dump.is_some() {
+                stream::VideoMode::Dump
+            } else if count {
+                stream::VideoMode::Count
+            } else {
+                stream::VideoMode::Decode
+            };
+            stream::run(
+                &client,
+                &id,
+                stream::Options {
+                    app,
+                    settings,
+                    seconds,
+                    mode,
+                    dump,
+                    snapshot,
+                    quit_after: quit,
+                },
+            )?;
         }
         Command::Quit { host } => {
             let id = resolve(&client, &host)?.id;

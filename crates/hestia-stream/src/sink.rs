@@ -2,6 +2,8 @@
 //! (in `hestia-media` or platform code) implement these traits, which keeps
 //! the network stack independent of any codec or graphics API.
 
+use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,8 +40,33 @@ pub enum SubmitResult {
     NeedKeyframe,
 }
 
+/// Lets a sink that decodes on its own thread ask the host for an IDR frame
+/// after the fact (a decode error a few frames after `submit` returned).
+#[derive(Clone)]
+pub struct KeyframeRequester(Arc<dyn Fn() + Send + Sync>);
+
+impl KeyframeRequester {
+    pub fn new(f: impl Fn() + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+
+    pub fn request(&self) {
+        (self.0)()
+    }
+}
+
+impl fmt::Debug for KeyframeRequester {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("KeyframeRequester")
+    }
+}
+
+/// `submit` runs on the network receive thread: implementations must not
+/// block on decoding there (queue the frame and decode elsewhere).
 pub trait VideoSink: Send {
     fn setup(&mut self, format: VideoFormat, width: u32, height: u32, fps: u32) -> Result<(), String>;
+    /// Called once before `setup` with a handle for asynchronous IDR requests.
+    fn attach_keyframe_requester(&mut self, _requester: KeyframeRequester) {}
     fn submit(&mut self, frame: EncodedFrame) -> SubmitResult;
     fn cleanup(&mut self) {}
 }

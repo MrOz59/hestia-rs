@@ -21,7 +21,7 @@ use hestia_crypto::stream::gcm_decrypt;
 use log::{debug, info, warn};
 
 use crate::fec;
-use crate::sink::{EncodedFrame, SubmitResult, VideoCodec, VideoFormat, VideoSink};
+use crate::sink::{EncodedFrame, KeyframeRequester, SubmitResult, VideoCodec, VideoFormat, VideoSink};
 
 pub const RTP_HEADER_LEN: usize = 12;
 pub const MAX_RTP_HEADER_LEN: usize = 16;
@@ -425,6 +425,12 @@ pub fn ping_packet(payload: Option<&[u8; 16]>, seq: u32) -> Vec<u8> {
 
 impl VideoReceiver {
     pub fn start(cfg: VideoConfig, mut sink: Box<dyn VideoSink>, feedback: Sender<VideoFeedback>) -> io::Result<Self> {
+        {
+            let feedback = feedback.clone();
+            sink.attach_keyframe_requester(KeyframeRequester::new(move || {
+                let _ = feedback.send(VideoFeedback::NeedIdr);
+            }));
+        }
         sink.setup(cfg.format, cfg.width, cfg.height, cfg.fps)
             .map_err(|e| io::Error::other(format!("video decoder setup failed: {e}")))?;
         let socket = bind_udp(&cfg.remote)?;

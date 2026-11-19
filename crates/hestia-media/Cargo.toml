@@ -8,6 +8,12 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = ["openh264"]
+# Software H.264 decoder (Cisco OpenH264, compiled from source).
+openh264 = ["dep:openh264"]
+
 [dependencies]
 hestia-stream.workspace = true
 log.workspace = true
+openh264 = { workspace = true, optional = true }

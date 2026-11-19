@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -17,6 +18,8 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::AppWindow;
 use crate::view;
+
+mod streaming;
 
 #[derive(Default)]
 struct State {
@@ -34,6 +37,8 @@ pub struct Controller {
     weak: Mutex<slint::Weak<AppWindow>>,
     core: OnceLock<Arc<HestiaClient>>,
     state: Mutex<State>,
+    stream: Mutex<Option<streaming::ActiveStream>>,
+    stream_generation: AtomicU64,
 }
 
 type Shared = Arc<Controller>;
@@ -50,6 +55,8 @@ impl Controller {
             weak: Mutex::new(ui.as_weak()),
             core: OnceLock::new(),
             state: Mutex::new(State::default()),
+            stream: Mutex::new(None),
+            stream_generation: AtomicU64::new(0),
         })
     }
 
@@ -120,6 +127,24 @@ impl Controller {
             c.ui(|ui| ui.set_screen(1));
             c.refresh_current_running();
         });
+
+        let c = self.clone();
+        ui.on_stream_key(move |text, pressed, repeat, ctrl, alt, shift, meta| {
+            let modifiers = hestia_core::stream::input::Modifiers { shift, ctrl, alt, meta };
+            c.stream_key(&text, pressed, repeat, modifiers);
+        });
+        let c = self.clone();
+        ui.on_stream_pointer(move |x, y, w, h| c.stream_pointer(x, y, w, h));
+        let c = self.clone();
+        ui.on_stream_button(move |button, pressed| c.stream_button(button, pressed));
+        let c = self.clone();
+        ui.on_stream_scroll(move |dx, dy| c.stream_scroll(dx, dy));
+        let c = self.clone();
+        ui.on_stream_toggle_fullscreen(move || c.toggle_fullscreen());
+        let c = self.clone();
+        ui.on_stream_disconnect(move || c.end_stream(None, None, false));
+        let c = self.clone();
+        ui.on_stream_quit(move || c.end_stream(None, None, true));
 
         let c = self.clone();
         ui.on_open_settings(move || {
@@ -604,31 +629,36 @@ impl Controller {
                 let Some(core) = c.core() else { return };
                 let text: Vec<String> = match core.launch(&id, app_id, &device) {
                     Ok(session) => {
-                        let mut out = vec![format!(
-                            "{} on {}.",
-                            if session.response.resumed { "Resumed" } else { "Started" },
-                            session.host.name
-                        )];
-                        out.push(format!("RTSP session: {}", session.response.session_url));
-                        if let Some(p) = &session.prepared {
-                            let vd = &p.virtual_display;
-                            out.push(format!(
-                                "Hermes display: {} via {}, {}×{} @ {}{}",
-                                vd.name,
-                                vd.backend,
-                                vd.width,
-                                vd.height,
-                                vd.fps,
-                                if vd.hdr { ", HDR" } else { "" }
-                            ));
-                            out.extend(p.warnings.iter().map(|w| format!("Warning: {w}")));
+                        c.ui(|ui| ui.set_session_lines(lines(&["Connecting to the stream…"])));
+                        match c.start_stream(id.clone(), &session) {
+                            Ok(()) => {
+                                c.ui(|ui| ui.set_session_busy(false));
+                                c.refresh_current_running();
+                                return;
+                            }
+                            Err(e) => {
+                                let mut out = vec![format!(
+                                    "{} on {}, but the stream could not start: {e}",
+                                    if session.response.resumed { "Resumed" } else { "Started" },
+                                    session.host.name
+                                )];
+                                if let Some(p) = &session.prepared {
+                                    let vd = &p.virtual_display;
+                                    out.push(format!(
+                                        "Hermes display: {} via {}, {}×{} @ {}{}",
+                                        vd.name,
+                                        vd.backend,
+                                        vd.width,
+                                        vd.height,
+                                        vd.fps,
+                                        if vd.hdr { ", HDR" } else { "" }
+                                    ));
+                                    out.extend(p.warnings.iter().map(|w| format!("Warning: {w}")));
+                                }
+                                out.push("The app keeps running on the host until you quit it.".into());
+                                out
+                            }
                         }
-                        out.push(
-                            "Video, audio and input streaming are the next milestone of Hestia RS. \
-                             The app keeps running on the host until you quit it."
-                                .into(),
-                        );
-                        out
                     }
                     Err(e) => vec![format!("Could not start the app: {e}")],
                 };

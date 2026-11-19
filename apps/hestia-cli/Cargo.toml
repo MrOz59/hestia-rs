@@ -12,8 +12,14 @@ authors.workspace = true
 name = "hestia"
 path = "src/main.rs"
 
+[features]
+default = ["openh264"]
+# Software H.264 decoding for `hestia stream`.
+openh264 = ["hestia-media/openh264"]
+
 [dependencies]
 hestia-core.workspace = true
+hestia-media.workspace = true
 clap.workspace = true
 env_logger.workspace = true
 log.workspace = true

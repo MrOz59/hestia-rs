@@ -37,7 +37,9 @@ use std::fmt;
 pub use input::InputEvent;
 pub use rtsp::SessionUrl;
 pub use session::StreamSession;
-pub use sink::{AudioFormat, AudioSink, EncodedFrame, SubmitResult, VideoCodec, VideoFormat, VideoSink};
+pub use sink::{
+    AudioFormat, AudioSink, EncodedFrame, KeyframeRequester, SubmitResult, VideoCodec, VideoFormat, VideoSink,
+};
 
 /// Everything needed to open the stream, taken from the launch request and
 /// the host's `/launch` answer.

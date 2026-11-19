@@ -13,6 +13,7 @@ hestia-crypto.workspace = true
 hestia-nvhttp.workspace = true
 hestia-api.workspace = true
 hestia-discovery.workspace = true
+hestia-stream.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

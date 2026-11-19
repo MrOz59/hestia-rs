@@ -1,6 +1,7 @@
 import { LineEdit, Spinner } from "std-widgets.slint";
 import { Theme, PillButton, LinkButton, Dialog } from "theme.slint";
 import { HostCard, AppCard, HostsPage, AppsPage, SessionPage, SettingsPage } from "pages.slint";
+import { StreamView } from "stream.slint";
 
 export { HostCard, AppCard } from "pages.slint";
 
@@ -13,7 +14,7 @@ export component AppWindow inherits Window {
     background: Theme.bg;
     default-font-size: 14px;
 
-    // 0 = hosts, 1 = apps, 2 = session, 3 = settings
+    // 0 = hosts, 1 = apps, 2 = session (launching / errors), 3 = settings, 4 = stream
     in-out property <int> screen: 0;
 
     // Startup (identity generation on first run)
@@ -68,6 +69,20 @@ export component AppWindow inherits Window {
     in property <[string]> session-lines;
     in property <bool> session-busy;
     callback back-to-apps();
+
+    // Stream
+    in property <image> stream-frame;
+    in property <string> stream-stats;
+    in property <string> stream-status;
+    in-out property <bool> stream-show-stats: true;
+    in property <bool> stream-fullscreen;
+    callback stream-key(string, bool, bool, bool, bool, bool, bool);
+    callback stream-pointer(float, float, float, float);
+    callback stream-button(int, bool);
+    callback stream-scroll(float, float);
+    callback stream-toggle-fullscreen();
+    callback stream-disconnect();
+    callback stream-quit();
 
     // Settings
     in-out property <int> cfg-resolution: 1;
@@ -143,6 +158,40 @@ export component AppWindow inherits Window {
         }
         quit-app => {
             root.quit-app();
+        }
+    }
+
+    if root.screen == 4: StreamView {
+        width: 100%;
+        height: 100%;
+        frame: root.stream-frame;
+        stats: root.stream-stats;
+        status: root.stream-status;
+        show-stats: root.stream-show-stats;
+        fullscreen: root.stream-fullscreen;
+        key-event(text, pressed, repeat, ctrl, alt, shift, meta) => {
+            root.stream-key(text, pressed, repeat, ctrl, alt, shift, meta);
+        }
+        pointer-moved(x, y, w, h) => {
+            root.stream-pointer(x, y, w, h);
+        }
+        pointer-button(button, pressed) => {
+            root.stream-button(button, pressed);
+        }
+        scrolled(dx, dy) => {
+            root.stream-scroll(dx, dy);
+        }
+        toggle-stats => {
+            root.stream-show-stats = !root.stream-show-stats;
+        }
+        toggle-fullscreen => {
+            root.stream-toggle-fullscreen();
+        }
+        disconnect => {
+            root.stream-disconnect();
+        }
+        quit-app => {
+            root.stream-quit();
         }
     }
 

@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 pub use hestia_api as api;
 pub use hestia_discovery as discovery;
 pub use hestia_nvhttp as nvhttp;
+pub use hestia_stream as stream;
 pub use settings::{AudioLayout, CodecPreference, LaunchMode, StreamSettings};
 pub use store::Store;
 
@@ -127,6 +128,67 @@ pub struct LaunchedSession {
     pub server_info: ServerInfo,
     /// Hermes session preparation result, when the host supports it.
     pub prepared: Option<SessionPrepareResponse>,
+    /// Settings in effect when the app was launched.
+    pub settings: StreamSettings,
+}
+
+impl LaunchedSession {
+    /// Parameters for [`hestia_stream::StreamSession`] matching this launch.
+    /// `decoder_formats` are the formats the chosen decoder handles; they are
+    /// reordered by the user's codec preference.
+    pub fn stream_config(&self, decoder_formats: &[hestia_stream::VideoFormat]) -> Result<hestia_stream::StreamConfig> {
+        use hestia_stream::{SessionUrl, StreamConfig, VideoCodec, is_private_address};
+
+        let session_url = SessionUrl::parse(&self.response.session_url, &self.host.address)
+            .map_err(|e| CoreError::Invalid(format!("bad session URL {:?}: {e}", self.response.session_url)))?;
+        let remote_ip = session_url.host.parse::<std::net::IpAddr>().ok().or_else(|| {
+            use std::net::ToSocketAddrs;
+            (session_url.host.as_str(), session_url.port)
+                .to_socket_addrs()
+                .ok()?
+                .next()
+                .map(|a| a.ip())
+        });
+        let streaming_remotely = remote_ip.is_some_and(|ip| !is_private_address(ip));
+
+        let preferred = match self.settings.codec {
+            CodecPreference::Auto => None,
+            CodecPreference::H264 => Some(VideoCodec::H264),
+            CodecPreference::Hevc => Some(VideoCodec::Hevc),
+            CodecPreference::Av1 => Some(VideoCodec::Av1),
+        };
+        let mut video_formats: Vec<_> = decoder_formats
+            .iter()
+            .copied()
+            .filter(|f| self.request.hdr || !f.ten_bit)
+            .collect();
+        if let Some(codec) = preferred {
+            video_formats.sort_by_key(|f| f.codec != codec);
+        }
+        if video_formats.is_empty() {
+            return Err(CoreError::Invalid("the decoder supports no usable video format".into()));
+        }
+
+        Ok(StreamConfig {
+            session_url,
+            server_codec_modes: self.server_info.codec_mode_support,
+            width: self.request.width,
+            height: self.request.height,
+            fps: self.request.fps,
+            bitrate_kbps: self.settings.bitrate_kbps,
+            packet_size: if streaming_remotely {
+                StreamConfig::WAN_PACKET_SIZE
+            } else {
+                StreamConfig::LAN_PACKET_SIZE
+            },
+            video_formats,
+            audio_channels: self.request.audio.channel_count() as u8,
+            audio_channel_mask: self.request.audio.channel_mask(),
+            remote_input_key: self.request.remote_input_key,
+            remote_input_key_id: self.request.remote_input_key_id,
+            streaming_remotely,
+        })
+    }
 }
 
 /// Facts about this device that go into Hermes' session preparation.
@@ -490,11 +552,21 @@ impl HestiaClient {
     /// Starts (or resumes) an app with the current settings. On Hermes the
     /// session is prepared first through the Hestia API.
     pub fn launch(&self, id: &str, app_id: u32, device: &DeviceInfo) -> Result<LaunchedSession> {
+        self.launch_with(id, app_id, device, self.settings())
+    }
+
+    /// Like [`launch`](Self::launch) with one-off settings (not persisted).
+    pub fn launch_with(
+        &self,
+        id: &str,
+        app_id: u32,
+        device: &DeviceInfo,
+        settings: StreamSettings,
+    ) -> Result<LaunchedSession> {
         let record = self.host(id)?;
         if !record.is_paired() {
             return Err(CoreError::Host(hestia_nvhttp::NvHttpError::NotPaired));
         }
-        let settings = self.settings();
         let mut client = self.nvhttp(&record);
         let server_info = client.server_info()?;
         if !server_info.paired {
@@ -535,6 +607,7 @@ impl HestiaClient {
             response,
             server_info,
             prepared,
+            settings,
         })
     }
 
@@ -614,5 +687,88 @@ impl HestiaClient {
         }
         client.quit_app()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hestia_stream::{StreamConfig, VideoCodec, VideoFormat};
+
+    fn session(url: &str, codec: CodecPreference) -> LaunchedSession {
+        let mut request = LaunchRequest::new(7, 1280, 720, 120);
+        request.audio = AudioConfig::Surround51;
+        request.remote_input_key = [9; 16];
+        request.remote_input_key_id = 42;
+        LaunchedSession {
+            host: HostRecord {
+                address: "192.168.1.20".into(),
+                ..Default::default()
+            },
+            request,
+            response: LaunchResponse {
+                session_url: url.into(),
+                resumed: false,
+            },
+            server_info: ServerInfo {
+                codec_mode_support: 0x0101,
+                ..Default::default()
+            },
+            prepared: None,
+            settings: StreamSettings {
+                bitrate_kbps: 15_000,
+                codec,
+                ..Default::default()
+            },
+        }
+    }
+
+    const H264: VideoFormat = VideoFormat {
+        codec: VideoCodec::H264,
+        ten_bit: false,
+        yuv444: false,
+    };
+    const HEVC: VideoFormat = VideoFormat {
+        codec: VideoCodec::Hevc,
+        ten_bit: false,
+        yuv444: false,
+    };
+    const HEVC10: VideoFormat = VideoFormat {
+        codec: VideoCodec::Hevc,
+        ten_bit: true,
+        yuv444: false,
+    };
+
+    #[test]
+    fn stream_config_from_launch() {
+        let s = session("rtspenc://192.168.1.20:48010", CodecPreference::Auto);
+        let c = s.stream_config(&[HEVC10, HEVC, H264]).unwrap();
+        assert!(c.session_url.encrypted);
+        assert_eq!((c.width, c.height, c.fps, c.bitrate_kbps), (1280, 720, 120, 15_000));
+        assert_eq!((c.audio_channels, c.audio_channel_mask), (6, 0x3f));
+        assert_eq!((c.remote_input_key, c.remote_input_key_id), ([9; 16], 42));
+        assert_eq!(c.server_codec_modes, 0x0101);
+        assert!(!c.streaming_remotely);
+        assert_eq!(c.packet_size, StreamConfig::LAN_PACKET_SIZE);
+        // No HDR requested: 10-bit formats are not offered.
+        assert_eq!(c.video_formats, vec![HEVC, H264]);
+    }
+
+    #[test]
+    fn stream_config_preferences_and_fallbacks() {
+        let s = session("rtsp://203.0.113.9:48010", CodecPreference::H264);
+        let c = s.stream_config(&[HEVC, H264]).unwrap();
+        assert_eq!(c.video_formats, vec![H264, HEVC]);
+        assert!(c.streaming_remotely);
+        assert_eq!(c.packet_size, StreamConfig::WAN_PACKET_SIZE);
+
+        // Old hosts send no session URL: use the stored address.
+        let c = session("", CodecPreference::Auto).stream_config(&[H264]).unwrap();
+        assert_eq!(
+            (c.session_url.host.as_str(), c.session_url.port),
+            ("192.168.1.20", 48010)
+        );
+
+        assert!(session("", CodecPreference::Auto).stream_config(&[HEVC10]).is_err());
     }
 }

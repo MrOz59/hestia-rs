@@ -2,6 +2,7 @@
 //! it to `hestia-core` and runs every network call on worker threads.
 
 mod controller;
+mod keymap;
 mod view;
 
 use std::path::PathBuf;

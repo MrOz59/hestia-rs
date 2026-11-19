@@ -17,8 +17,14 @@ crate-type = ["rlib", "cdylib"]
 name = "hestia-app"
 path = "src/main.rs"
 
+[features]
+default = ["openh264"]
+# Software H.264 decoding (the only video decoder so far).
+openh264 = ["hestia-media/openh264"]
+
 [dependencies]
 hestia-core.workspace = true
+hestia-media.workspace = true
 slint.workspace = true
 image.workspace = true
 log.workspace = true

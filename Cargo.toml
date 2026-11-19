@@ -39,6 +39,7 @@ hestia-api = { path = "crates/hestia-api" }
 hestia-discovery = { path = "crates/hestia-discovery" }
 hestia-core = { path = "crates/hestia-core" }
 hestia-stream = { path = "crates/hestia-stream" }
+hestia-media = { path = "crates/hestia-media", default-features = false }
 
 # Crypto (pure Rust, so Android cross-compiles without OpenSSL)
 rsa = { version = "0.9", features = ["sha2"] }
@@ -66,6 +67,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 slint = "1"
 slint-build = "1"
 android_logger = "0.14"
+
+# Media
+openh264 = "0.9"
 
 [profile.release]
 lto = "thin"

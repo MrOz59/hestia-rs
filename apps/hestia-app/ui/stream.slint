@@ -1,0 +1,191 @@
+import { Spinner } from "std-widgets.slint";
+import { Theme, PillButton } from "theme.slint";
+
+// Full-window video with input capture. Keyboard, mouse and touch go to the
+// host; Ctrl+Alt+Shift+Q disconnects, Ctrl+Alt+Shift+S toggles statistics.
+export component StreamView inherits Rectangle {
+    in property <image> frame;
+    in property <string> stats;
+    // Shown over the video while there is no picture yet.
+    in property <string> status;
+    in property <bool> show-stats: true;
+    in property <bool> fullscreen;
+
+    // text, pressed, repeat, ctrl, alt, shift, meta
+    callback key-event(string, bool, bool, bool, bool, bool, bool);
+    // x, y inside the video, video width, height (logical pixels)
+    callback pointer-moved(float, float, float, float);
+    // 1 = left, 2 = middle, 3 = right; pressed
+    callback pointer-button(int, bool);
+    callback scrolled(float, float);
+    callback toggle-stats();
+    callback toggle-fullscreen();
+    callback disconnect();
+    callback quit-app();
+
+    property <bool> menu-open: false;
+    property <float> frame-w: root.frame.width > 0 ? root.frame.width : 16;
+    property <float> frame-h: root.frame.height > 0 ? root.frame.height : 9;
+    property <float> scale: min(root.width / 1px / root.frame-w, root.height / 1px / root.frame-h);
+
+    background: black;
+
+    focus := FocusScope {
+        width: 100%;
+        height: 100%;
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            root.key-event(event.text, true, event.repeat, event.modifiers.control, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta);
+            accept
+        }
+        key-released(event) => {
+            root.key-event(event.text, false, false, event.modifiers.control, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta);
+            accept
+        }
+
+        video := Rectangle {
+            width: root.frame-w * root.scale * 1px;
+            height: root.frame-h * root.scale * 1px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+
+            Image {
+                width: 100%;
+                height: 100%;
+                source: root.frame;
+                image-fit: fill;
+            }
+
+            TouchArea {
+                mouse-cursor: none;
+                pointer-event(event) => {
+                    root.pointer-moved(self.mouse-x / 1px, self.mouse-y / 1px, self.width / 1px, self.height / 1px);
+                    if (event.kind == PointerEventKind.down || event.kind == PointerEventKind.up) {
+                        root.pointer-button(
+                            event.button == PointerEventButton.left ? 1
+                                : event.button == PointerEventButton.middle ? 2
+                                : event.button == PointerEventButton.right ? 3 : 0,
+                            event.kind == PointerEventKind.down);
+                    }
+                }
+                scroll-event(event) => {
+                    root.scrolled(event.delta-x / 1px, event.delta-y / 1px);
+                    accept
+                }
+            }
+        }
+    }
+
+    if root.status != "": VerticalLayout {
+        width: 100%;
+        height: 100%;
+        alignment: center;
+        spacing: 14px;
+        HorizontalLayout {
+            alignment: center;
+            Spinner {
+                width: 36px;
+                height: 36px;
+                indeterminate: true;
+            }
+        }
+        Text {
+            horizontal-alignment: center;
+            text: root.status;
+            color: Theme.text;
+            font-size: 15px;
+        }
+    }
+
+    if root.show-stats && root.stats != "": Rectangle {
+        x: 12px;
+        y: 12px;
+        width: stats-text.preferred-width + 20px;
+        height: stats-text.preferred-height + 12px;
+        border-radius: 10px;
+        background: #000000a8;
+        stats-text := Text {
+            x: 10px;
+            y: 6px;
+            text: root.stats;
+            color: #e6e8ee;
+            font-size: 12px;
+        }
+    }
+
+    // Menu handle, top right.
+    Rectangle {
+        x: parent.width - self.width - 12px;
+        y: 12px;
+        width: 40px;
+        height: 40px;
+        border-radius: 20px;
+        background: handle.has-hover || root.menu-open ? #ffffff30 : #00000070;
+        animate background { duration: 120ms; }
+        Text {
+            text: "☰";
+            color: white;
+            font-size: 18px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        handle := TouchArea {
+            clicked => {
+                root.menu-open = !root.menu-open;
+            }
+        }
+    }
+
+    if root.menu-open: Rectangle {
+        x: parent.width - self.width - 12px;
+        y: 60px;
+        width: 220px;
+        height: menu.preferred-height;
+        border-radius: Theme.radius;
+        background: Theme.card;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        menu := VerticalLayout {
+            width: 100%;
+            padding: 12px;
+            spacing: 8px;
+            PillButton {
+                text: root.show-stats ? "Hide statistics" : "Show statistics";
+                clicked => {
+                    root.toggle-stats();
+                }
+            }
+            PillButton {
+                text: root.fullscreen ? "Leave full screen" : "Full screen";
+                clicked => {
+                    root.toggle-fullscreen();
+                    root.menu-open = false;
+                }
+            }
+            PillButton {
+                text: "Disconnect";
+                clicked => {
+                    root.menu-open = false;
+                    root.disconnect();
+                }
+            }
+            PillButton {
+                text: "Quit app";
+                danger: true;
+                clicked => {
+                    root.menu-open = false;
+                    root.quit-app();
+                }
+            }
+            Text {
+                text: "Ctrl+Alt+Shift+Q disconnects";
+                color: Theme.muted;
+                font-size: 11px;
+                horizontal-alignment: center;
+            }
+        }
+    }
+}
