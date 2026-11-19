@@ -10,10 +10,54 @@ mod platform;
 mod touch;
 mod typing;
 mod view;
+mod virtual_pad;
 
 use std::path::PathBuf;
 
 slint::include_modules!();
+
+/// The on-screen controller as the stream view draws it: layout, what is
+/// held, where the stick knobs are.
+fn pad_controls(pad: &virtual_pad::VirtualPad) -> Vec<PadControl> {
+    use hestia_core::stream::input::buttons;
+    use virtual_pad::Kind;
+    pad.controls()
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let (pressed, (knob_x, knob_y), dpad) = pad.view(i);
+            PadControl {
+                kind: match c.kind {
+                    Kind::Round(_) => 0,
+                    Kind::Rect(_) | Kind::Trigger(_) => 1,
+                    Kind::Stick(_) => 2,
+                    Kind::Dpad => 3,
+                },
+                label: c.label.into(),
+                x: c.x,
+                y: c.y,
+                w: c.w,
+                h: c.h,
+                pressed,
+                knob_x,
+                knob_y,
+                up: dpad & buttons::UP != 0,
+                down: dpad & buttons::DOWN != 0,
+                left: dpad & buttons::LEFT != 0,
+                right: dpad & buttons::RIGHT != 0,
+            }
+        })
+        .collect()
+}
+
+/// The on-screen controller, untouched, for a `width`×`height` stream view
+/// (the screenshot example draws it).
+#[doc(hidden)]
+pub fn pad_preview(width: f32, height: f32) -> Vec<PadControl> {
+    let mut pad = virtual_pad::VirtualPad::default();
+    pad.resize(width, height);
+    pad_controls(&pad)
+}
 
 /// Builds the window and runs the event loop until it closes.
 pub fn run(data_dir: PathBuf) -> Result<(), slint::PlatformError> {

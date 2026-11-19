@@ -5,14 +5,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use hestia_core::TouchMode;
 use hestia_core::diagnosis::{self, Bottleneck, SpikeHistory};
 use hestia_core::report::StatsSample;
-use hestia_core::stream::input::{Modifiers, MouseButton};
+use hestia_core::stream::input::{Modifiers, MouseButton, TouchPhase};
 use hestia_core::stream::{InputEvent, SessionListener, StreamEvent, StreamStats};
 use hestia_core::{LaunchedSession, ManagedStream, StreamHost};
 use hestia_media::{DecodeStats, DecoderChoice, DecodingSink, FramePresenter, LatencyHistogram, RgbaFrame};
 use log::{info, warn};
-use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer, SharedString};
+use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 
 use super::report::{self, SharedReport};
 use super::{Controller, Shared, spawn};
@@ -20,12 +21,37 @@ use crate::AppWindow;
 use crate::keymap::{self, Mapped};
 use crate::touch::{self, Trackpad};
 use crate::typing;
+use crate::virtual_pad::{PadState, VirtualPad};
 use crate::{hostinfo, platform};
 
-/// Trackpad speed on top of the on-screen → host pixel ratio.
 /// Wheel units (120 per notch) per logical pixel of two-finger drag.
 const TOUCH_SCROLL_SPEED: f32 = 2.0;
+/// Trackpad speed on top of the on-screen → host pixel ratio.
 const TRACKPAD_SPEED: f32 = 1.4;
+/// Most a pinch magnifies the stream.
+const MAX_ZOOM: f32 = 4.0;
+
+/// Pinch-to-zoom state (Artemis' pan/zoom).
+#[derive(Debug, Clone, Copy)]
+struct Zoom {
+    /// Zoom mode on: two fingers pinch and pan instead of scrolling.
+    on: bool,
+    factor: f32,
+    pan: (f32, f32),
+    /// Finger distance, midpoint, zoom and pan when the pinch started.
+    pinch: Option<(f32, (f32, f32), f32, (f32, f32))>,
+}
+
+impl Default for Zoom {
+    fn default() -> Self {
+        Self {
+            on: false,
+            factor: 1.0,
+            pan: (0.0, 0.0),
+            pinch: None,
+        }
+    }
+}
 
 pub(super) struct ActiveStream {
     generation: u64,
@@ -38,6 +64,12 @@ pub(super) struct ActiveStream {
     touch_id: u64,
     /// Multi-finger taps (2: right click, 3: keyboard).
     fingers: touch::FingerTaps,
+    /// On-screen controller (drawn when `pad_visible`).
+    pad: VirtualPad,
+    pad_visible: bool,
+    /// The stream view's size (logical px).
+    view: (f32, f32),
+    zoom: Zoom,
     report: SharedReport,
     decode: Arc<DecodeStats>,
     present: Arc<PresentStats>,
@@ -398,6 +430,11 @@ impl Controller {
         *listener.video.lock().unwrap_or_else(|p| p.into_inner()) = format!("{size}@{} {codec}", launched.request.fps);
         hestia_core::add_negotiated_to_report(session.negotiated(), &mut report::lock(&session_report));
 
+        // A stream replacing another keeps the laid-out view (no new layout
+        // event comes for it).
+        let view = self.active_stream().as_ref().map_or((0.0, 0.0), |a| a.view);
+        let mut pad = VirtualPad::default();
+        pad.resize(view.0, view.1);
         let previous = self.active_stream().replace(ActiveStream {
             generation,
             session,
@@ -406,6 +443,10 @@ impl Controller {
             trackpad: Trackpad::new(),
             touch_id: 0,
             fingers: touch::FingerTaps::default(),
+            pad,
+            pad_visible: launched.settings.onscreen_controller,
+            view,
+            zoom: Zoom::default(),
             report: session_report,
             decode,
             present,
@@ -414,13 +455,22 @@ impl Controller {
             previous.present.closed.store(true, Ordering::Release);
             spawn("hestia-stream-stop", move || previous.session.stop());
         }
+        let pad = launched.settings.onscreen_controller;
         self.ui(move |ui| {
             ui.set_stream_stats(format!("{size} {codec}").into());
+            ui.set_stream_pad_visible(pad);
+            ui.set_stream_zoom_mode(false);
+            ui.set_stream_zoom(1.0);
+            ui.set_stream_pan_x(0.0);
+            ui.set_stream_pan_y(0.0);
             ui.set_screen(4);
         });
-        // Landscape, no system bars, screen on (Android); controllers on.
-        platform::set_stream_mode(true);
+        // Orientation, no system bars, screen on (Android); controllers on.
+        platform::set_stream_mode(true, launched.settings.orientation);
         platform::set_gamepads_streaming(true);
+        if pad && view.0 > 0.0 {
+            self.push_pad_view();
+        }
         Ok(())
     }
 
@@ -486,7 +536,7 @@ impl Controller {
             };
             let show_report = c.finish_report(session_report, &outcome, Some(host_id.clone()));
             platform::set_keyboard_visible(false);
-            platform::set_stream_mode(false);
+            platform::set_stream_mode(false, hestia_core::StreamOrientation::default());
             platform::set_gamepads_streaming(false);
             c.ui(move |ui| {
                 if ui.get_stream_fullscreen() {
@@ -541,25 +591,32 @@ impl Controller {
         }
     }
 
-    /// `kind`: 0 down, 1 up, 2 move, 3 cancel. Touch goes through the
-    /// trackpad when it is enabled; mice (and direct touch) position the
-    /// host cursor absolutely inside the video.
-    #[allow(clippy::too_many_arguments)]
+    /// `kind`: 0 down, 1 up, 2 move, 3 cancel. `(x, y)` is relative to the
+    /// video, `size` its size, `screen` the point in the stream view. Touch
+    /// goes to the on-screen controller when it lands on it; otherwise it
+    /// follows the touch mode (trackpad, mouse or real touches). Mice
+    /// position the host cursor absolutely inside the video.
     pub(super) fn stream_pointer(
         self: &Shared,
         kind: i32,
         button: i32,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
+        (x, y): (f32, f32),
+        (width, height): (f32, f32),
         finger: i32,
+        screen: (f32, f32),
     ) {
         let touch = finger != 0;
-        if touch && self.multi_finger(kind, finger, x, y) {
+        if touch && self.pad_event(kind, finger, screen) {
+            return;
+        }
+        let mode = self.touch_mode();
+        if touch && mode == TouchMode::Touchscreen {
+            return self.native_touch(kind, finger, (x, y), (width, height));
+        }
+        if touch && self.multi_finger(kind, finger, screen.0, screen.1) {
             return; // part of a multi-finger gesture, not a pointer action
         }
-        if touch && self.trackpad.load(Ordering::Relaxed) {
+        if touch && mode == TouchMode::Trackpad {
             return self.trackpad_event(kind, x, y, width);
         }
         if width < 1.0 || height < 1.0 {
@@ -613,6 +670,18 @@ impl Controller {
             }
             2 => {
                 let (dx, dy) = active.fingers.moved(finger, x, y);
+                if active.zoom.on && active.fingers.count() == 2 {
+                    let update = Self::pinch(active);
+                    drop(guard);
+                    if let Some((factor, (px, py))) = update {
+                        self.ui(move |ui| {
+                            ui.set_stream_zoom(factor);
+                            ui.set_stream_pan_x(px);
+                            ui.set_stream_pan_y(py);
+                        });
+                    }
+                    return true;
+                }
                 // Two fingers dragging scroll the host, content following
                 // the fingers (as on the phone); the first finger leads.
                 if active.fingers.count() == 2 && active.fingers.primary() == Some(finger) {
@@ -625,6 +694,7 @@ impl Controller {
                 active.fingers.multi() || active.fingers.primary() != Some(finger)
             }
             1 | 3 => {
+                active.zoom.pinch = None;
                 let secondary = active.fingers.multi() || active.fingers.primary() != Some(finger);
                 let tap = if kind == 1 {
                     active.fingers.up(finger, now)
@@ -655,6 +725,186 @@ impl Controller {
                 secondary || tap.is_some()
             }
             _ => false,
+        }
+    }
+
+    /// Pinch-zoom from the first two fingers: zooms about their midpoint
+    /// and pans with it. Returns the new zoom and pan when they changed.
+    fn pinch(active: &mut ActiveStream) -> Option<(f32, (f32, f32))> {
+        let ((ax, ay), (bx, by)) = active.fingers.pair()?;
+        let distance = (bx - ax).hypot(by - ay).max(1.0);
+        let mid = ((ax + bx) / 2.0, (ay + by) / 2.0);
+        let z = &mut active.zoom;
+        let (d0, mid0, zoom0, pan0) = *z.pinch.get_or_insert((distance, mid, z.factor, z.pan));
+        let factor = (zoom0 * distance / d0).clamp(1.0, MAX_ZOOM);
+        // Keep the point under the fingers' midpoint under it.
+        let (w, h) = active.view;
+        let centre = (w / 2.0, h / 2.0);
+        let anchor = (
+            (mid0.0 - centre.0 - pan0.0) / zoom0,
+            (mid0.1 - centre.1 - pan0.1) / zoom0,
+        );
+        let limit = |size: f32| size * (factor - 1.0) / 2.0;
+        let pan = (
+            (mid.0 - centre.0 - anchor.0 * factor).clamp(-limit(w), limit(w)),
+            (mid.1 - centre.1 - anchor.1 * factor).clamp(-limit(h), limit(h)),
+        );
+        if (factor, pan) == (z.factor, z.pan) {
+            return None;
+        }
+        (z.factor, z.pan) = (factor, pan);
+        Some((factor, pan))
+    }
+
+    /// Menu → Zoom: two fingers pinch and pan; turning it off resets.
+    pub(super) fn toggle_zoom(self: &Shared) {
+        let on = {
+            let mut guard = self.active_stream();
+            let Some(active) = guard.as_mut() else { return };
+            active.zoom = Zoom {
+                on: !active.zoom.on,
+                ..Zoom::default()
+            };
+            active.zoom.on
+        };
+        self.ui(move |ui| {
+            ui.set_stream_zoom_mode(on);
+            ui.set_stream_zoom(1.0);
+            ui.set_stream_pan_x(0.0);
+            ui.set_stream_pan_y(0.0);
+        });
+        if on {
+            self.toast("Zoom: pinch to zoom, drag with two fingers to move around");
+        }
+    }
+
+    fn touch_mode(&self) -> TouchMode {
+        TouchMode::ALL
+            .get(usize::from(self.touch_mode.load(Ordering::Relaxed)))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Touchscreen mode: every finger goes to the host as a touch, at its
+    /// place in the video (Sunshine/Hermes touch events).
+    fn native_touch(&self, kind: i32, finger: i32, (x, y): (f32, f32), (w, h): (f32, f32)) {
+        if w < 1.0 || h < 1.0 {
+            return;
+        }
+        let phase = match kind {
+            0 => TouchPhase::Down,
+            1 => TouchPhase::Up,
+            2 => TouchPhase::Move,
+            _ => TouchPhase::Cancel,
+        };
+        self.send_input(InputEvent::Touch {
+            pointer_id: finger as u32,
+            phase,
+            x: (x / w).clamp(0.0, 1.0),
+            y: (y / h).clamp(0.0, 1.0),
+            pressure: if kind == 1 { 0.0 } else { 1.0 },
+        });
+    }
+
+    /// Touches on the on-screen controller; true when the pad took it.
+    fn pad_event(self: &Shared, kind: i32, finger: i32, (x, y): (f32, f32)) -> bool {
+        let now = Instant::now();
+        let (state, click) = {
+            let mut guard = self.active_stream();
+            let Some(active) = guard.as_mut() else { return false };
+            if !active.pad_visible {
+                return false;
+            }
+            let took = match kind {
+                0 => active.pad.down(finger, x, y, now),
+                2 if active.pad.owns(finger) => {
+                    active.pad.moved(finger, x, y);
+                    true
+                }
+                1 | 3 if active.pad.owns(finger) => {
+                    active.pad.up(finger, now);
+                    true
+                }
+                _ => false,
+            };
+            if !took {
+                return false;
+            }
+            (active.pad.state(), active.pad.take_click())
+        };
+        Self::send_pad(state, click);
+        if click != 0 {
+            // A stick tap clicks it: release shortly after.
+            let c = self.clone();
+            slint::Timer::single_shot(std::time::Duration::from_millis(60), move || {
+                if let Some(active) = c.active_stream().as_ref() {
+                    Self::send_pad(active.pad.state(), 0);
+                }
+            });
+        }
+        self.push_pad_view();
+        true
+    }
+
+    fn send_pad(state: PadState, extra_buttons: u32) {
+        platform::onscreen_gamepad(
+            state.buttons | extra_buttons,
+            state.left_stick,
+            state.right_stick,
+            (state.left_trigger, state.right_trigger),
+        );
+    }
+
+    /// Redraws the on-screen controller (layout, what's held, stick knobs).
+    fn push_pad_view(self: &Shared) {
+        let controls = {
+            let guard = self.active_stream();
+            let Some(active) = guard.as_ref() else { return };
+            crate::pad_controls(&active.pad)
+        };
+        self.ui(move |ui| ui.set_stream_pad_controls(ModelRc::new(VecModel::from(controls))));
+    }
+
+    /// Menu → On-screen controller (remembered for next time).
+    pub(super) fn toggle_pad(self: &Shared) {
+        let on = {
+            let mut guard = self.active_stream();
+            let Some(active) = guard.as_mut() else { return };
+            active.pad_visible = !active.pad_visible;
+            let (w, h) = active.view;
+            active.pad.resize(w, h);
+            active.pad_visible
+        };
+        if on {
+            self.push_pad_view();
+        } else {
+            platform::onscreen_gamepad_off();
+        }
+        self.ui(move |ui| ui.set_stream_pad_visible(on));
+        let Some(core) = self.core() else { return };
+        spawn("hestia-settings", move || {
+            let mut settings = core.settings();
+            settings.onscreen_controller = on;
+            if let Err(e) = core.set_settings(settings) {
+                warn!("saving the controller setting failed: {e}");
+            }
+        });
+    }
+
+    /// The stream view was laid out (or resized): re-lay the controller.
+    pub(super) fn stream_view_size(self: &Shared, width: f32, height: f32) {
+        let visible = {
+            let mut guard = self.active_stream();
+            let Some(active) = guard.as_mut() else { return };
+            if active.view == (width, height) {
+                return;
+            }
+            active.view = (width, height);
+            active.pad.resize(width, height);
+            active.pad_visible
+        };
+        if visible {
+            self.push_pad_view();
         }
     }
 
@@ -710,33 +960,29 @@ impl Controller {
         }
     }
 
-    pub(super) fn toggle_trackpad(self: &Shared) {
-        let on = !self.trackpad.load(Ordering::Relaxed);
-        self.trackpad.store(on, Ordering::Relaxed);
+    /// Menu → Touch: trackpad → mouse → touchscreen (remembered).
+    pub(super) fn cycle_touch_mode(self: &Shared) {
+        let mode = self.touch_mode().next();
+        self.touch_mode.store(mode.index() as u8, Ordering::Relaxed);
         if let Some(active) = self.active_stream().as_mut() {
             let released = active.trackpad.cancel();
             active.send(trackpad_events(released));
+            active.fingers.reset();
         }
-        self.ui(move |ui| ui.set_stream_trackpad(on));
-        self.toast(if on {
-            "Touch: trackpad. Tap to click, hold to right-click, tap then drag to drag."
-        } else {
-            "Touch: direct. The cursor goes where you touch."
+        self.ui(move |ui| ui.set_stream_touch_mode(mode.index()));
+        self.toast(match mode {
+            TouchMode::Trackpad => "Touch: trackpad. Tap to click, hold to right-click, tap then drag to drag.",
+            TouchMode::Mouse => "Touch: mouse. The cursor goes where you touch.",
+            TouchMode::Touchscreen => "Touch: touchscreen. Every finger reaches the host as a real touch.",
         });
         let Some(core) = self.core() else { return };
         spawn("hestia-settings", move || {
             let mut settings = core.settings();
-            settings.touch_trackpad = on;
+            settings.set_touch(mode);
             if let Err(e) = core.set_settings(settings) {
                 warn!("saving the touch mode failed: {e}");
             }
         });
-    }
-
-    pub(super) fn stream_special_key(&self, name: &str) {
-        if let Some(active) = self.active_stream().as_ref() {
-            active.send(typing::special_key_events(name));
-        }
     }
 
     pub(super) fn request_keyframe(self: &Shared) {

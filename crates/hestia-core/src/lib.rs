@@ -40,7 +40,9 @@ pub use hestia_discovery as discovery;
 pub use hestia_nvhttp as nvhttp;
 pub use hestia_stream as stream;
 pub use presets::Preset;
-pub use settings::{AudioLayout, CodecPreference, LaunchMode, StreamSettings, VideoScale};
+pub use settings::{
+    AudioLayout, CodecPreference, LaunchMode, StreamOrientation, StreamSettings, TouchMode, VideoScale,
+};
 pub use store::Store;
 
 #[derive(Debug, thiserror::Error)]

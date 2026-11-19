@@ -1,4 +1,4 @@
-import { ComboBox, Slider, Switch, Spinner, TextEdit } from "std-widgets.slint";
+import { ComboBox, LineEdit, Slider, Switch, Spinner, TextEdit } from "std-widgets.slint";
 import { Theme, PillButton, LinkButton, Chip, IconButton, Fab, MenuItem } from "theme.slint";
 
 export struct HostCard {
@@ -727,6 +727,9 @@ export component SettingsPage inherits Rectangle {
     in-out property <bool> show-report;
     in-out property <bool> show-menu-button;
     in-out property <bool> hardware-decoding;
+    // 0 landscape, 1 portrait, 2 follow the device
+    in-out property <int> orientation;
+    callback custom-resolution(string);
     callback back;
     callback save;
     callback open-last-report;
@@ -802,6 +805,28 @@ export component SettingsPage inherits Rectangle {
                             // Editing the mode by hand leaves the preset.
                             selected(value) => {
                                 root.preset = 0;
+                            }
+                        }
+                    }
+                    SettingRow {
+                        label: "Custom resolution";
+                        hint: "Width × height, e.g. 2560x1080";
+                        HorizontalLayout {
+                            spacing: 6px;
+                            width: root.picker-w;
+                            custom-res := LineEdit {
+                                placeholder-text: "2560x1080";
+                                accepted(text) => {
+                                    root.custom-resolution(text);
+                                    self.text = "";
+                                }
+                            }
+                            PillButton {
+                                text: "Use";
+                                clicked => {
+                                    root.custom-resolution(custom-res.text);
+                                    custom-res.text = "";
+                                }
                             }
                         }
                     }
@@ -915,6 +940,15 @@ export component SettingsPage inherits Rectangle {
 
                     SectionTitle {
                         text: "Stream screen";
+                    }
+                    SettingRow {
+                        label: "Orientation";
+                        hint: "While streaming on a phone or tablet";
+                        ComboBox {
+                            width: root.picker-w;
+                            model: ["Landscape", "Portrait", "Follow the device"];
+                            current-index <=> root.orientation;
+                        }
                     }
                     SettingRow {
                         label: "Menu button";

@@ -11,6 +11,9 @@ use hestia_core::stream::input::{GamepadState, buttons};
 /// Most controllers GameStream addresses.
 pub const MAX_CONTROLLERS: usize = 4;
 
+/// Device id used for the on-screen controller's slot.
+pub const ON_SCREEN: i32 = i32::MIN;
+
 /// Stick travel ignored around the centre (a worn stick rests off-centre).
 const DEADZONE: f32 = 0.07;
 
@@ -181,6 +184,36 @@ impl Controllers {
         (slot.state != before).then_some(slot.state)
     }
 
+    /// The whole state of a controller at once (the on-screen one); the
+    /// new state if it changed.
+    pub fn set(
+        &mut self,
+        device: i32,
+        buttons: u32,
+        left_stick: (i16, i16),
+        right_stick: (i16, i16),
+        triggers: (u8, u8),
+    ) -> Option<GamepadState> {
+        let slot = self.slot(device)?;
+        let before = slot.state;
+        slot.keys = buttons;
+        slot.hat = 0;
+        Self::apply_buttons(slot);
+        slot.state.left_stick = left_stick;
+        slot.state.right_stick = right_stick;
+        (slot.state.left_trigger, slot.state.right_trigger) = triggers;
+        (slot.state != before).then_some(slot.state)
+    }
+
+    /// Forgets one controller (the on-screen one, when it's hidden).
+    pub fn remove(&mut self, device: i32) {
+        self.slots.retain(|s| s.device != device);
+        let mask = self.mask();
+        for s in &mut self.slots {
+            s.state.active_mask = mask;
+        }
+    }
+
     /// New joystick axes; the new state if it changed.
     pub fn motion(&mut self, device: i32, a: Axes) -> Option<GamepadState> {
         let slot = self.slot(device)?;
@@ -323,6 +356,20 @@ mod tests {
             "analog 0 doesn't release a held digital trigger"
         );
         assert_eq!(c.key(1, 104, false).unwrap().left_trigger, 0);
+    }
+
+    #[test]
+    fn whole_state_and_removal() {
+        let mut c = Controllers::default();
+        c.key(5, 96, true);
+        let s = c.set(ON_SCREEN, buttons::B, (100, -100), (0, 0), (0, 255)).unwrap();
+        assert_eq!(
+            (s.index, s.buttons, s.active_mask, s.right_trigger),
+            (1, buttons::B, 0b11, 255)
+        );
+        assert!(c.set(ON_SCREEN, buttons::B, (100, -100), (0, 0), (0, 255)).is_none());
+        c.remove(ON_SCREEN);
+        assert_eq!(c.key(5, 96, false).unwrap().active_mask, 0b1);
     }
 
     #[test]

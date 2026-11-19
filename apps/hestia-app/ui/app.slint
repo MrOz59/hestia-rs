@@ -1,9 +1,10 @@
 import { LineEdit, Spinner } from "std-widgets.slint";
 import { Theme, PillButton, LinkButton, Dialog } from "theme.slint";
 import { HostCard, AppCard, CommandRow, PreflightRow, HostsPage, AppsPage, SessionPage, SettingsPage, ToolsPage, ReportPage } from "pages.slint";
-import { StreamView } from "stream.slint";
+import { StreamView, PadControl } from "stream.slint";
 
 export { HostCard, AppCard, CommandRow, PreflightRow } from "pages.slint";
+export { PadControl } from "stream.slint";
 
 export component AppWindow inherits Window {
     title: "Hestia";
@@ -123,18 +124,27 @@ export component AppWindow inherits Window {
     in property <string> stream-status;
     in-out property <bool> stream-show-stats: true;
     in property <bool> stream-fullscreen;
-    in property <bool> stream-trackpad: true;
+    in property <int> stream-touch-mode: 0;
+    in property <bool> stream-pad-visible: false;
+    in property <[PadControl]> stream-pad-controls;
+    in property <bool> stream-zoom-mode: false;
+    in property <float> stream-zoom: 1;
+    in property <float> stream-pan-x: 0;
+    in property <float> stream-pan-y: 0;
+    callback stream-toggle-pad();
+    callback stream-toggle-zoom();
+    callback stream-view-size(float, float);
     in-out property <bool> stream-keyboard-open: false;
     in property <string> stream-banner;
     callback stream-key(string, bool, bool, bool, bool, bool, bool);
-    callback stream-pointer(int, int, float, float, float, float, int);
+    callback stream-pointer(int, int, float, float, float, float, int, float, float);
     callback stream-scroll(float, float);
     // The on-screen keyboard was opened or closed in the stream.
     callback stream-keyboard(bool);
     in-out property <bool> stream-show-menu-button: true;
     in property <bool> stream-soft-keyboard: false;
     callback stream-special-key(string);
-    callback stream-toggle-trackpad();
+    callback stream-cycle-touch-mode();
     callback stream-request-keyframe();
     in-out property <int> stream-video-scale: 0;
     callback stream-cycle-scale();
@@ -163,6 +173,8 @@ export component AppWindow inherits Window {
     in-out property <bool> cfg-show-report: true;
     in-out property <bool> cfg-show-menu-button: false;
     in-out property <bool> cfg-hardware-decoding: true;
+    in-out property <int> cfg-orientation: 0;
+    callback settings-custom-resolution(string);
     in property <string> client-id;
     in property <string> data-dir;
     in property <string> version-text;
@@ -323,7 +335,22 @@ export component AppWindow inherits Window {
             status: root.stream-status;
             show-stats: root.stream-show-stats;
             fullscreen: root.stream-fullscreen;
-            trackpad: root.stream-trackpad;
+            touch-mode: root.stream-touch-mode;
+            pad-visible: root.stream-pad-visible;
+            pad-controls: root.stream-pad-controls;
+            zoom-mode: root.stream-zoom-mode;
+            zoom: root.stream-zoom;
+            pan-x: root.stream-pan-x;
+            pan-y: root.stream-pan-y;
+            toggle-pad => {
+                root.stream-toggle-pad();
+            }
+            toggle-zoom => {
+                root.stream-toggle-zoom();
+            }
+            view-size(w, h) => {
+                root.stream-view-size(w, h);
+            }
             video-scale: root.stream-video-scale;
             keyboard-open <=> root.stream-keyboard-open;
             show-menu-button: root.stream-show-menu-button;
@@ -332,8 +359,8 @@ export component AppWindow inherits Window {
             key-event(text, pressed, repeat, ctrl, alt, shift, meta) => {
                 root.stream-key(text, pressed, repeat, ctrl, alt, shift, meta);
             }
-            pointer(kind, button, x, y, w, h, finger) => {
-                root.stream-pointer(kind, button, x, y, w, h, finger);
+            pointer(kind, button, x, y, w, h, finger, sx, sy) => {
+                root.stream-pointer(kind, button, x, y, w, h, finger, sx, sy);
             }
             scrolled(dx, dy) => {
                 root.stream-scroll(dx, dy);
@@ -341,8 +368,8 @@ export component AppWindow inherits Window {
             special-key(name) => {
                 root.stream-special-key(name);
             }
-            toggle-trackpad => {
-                root.stream-toggle-trackpad();
+            cycle-touch-mode => {
+                root.stream-cycle-touch-mode();
             }
             cycle-scale => {
                 root.stream-cycle-scale();
@@ -456,6 +483,10 @@ export component AppWindow inherits Window {
             show-report <=> root.cfg-show-report;
         show-menu-button <=> root.cfg-show-menu-button;
         hardware-decoding <=> root.cfg-hardware-decoding;
+        orientation <=> root.cfg-orientation;
+        custom-resolution(text) => {
+            root.settings-custom-resolution(text);
+        }
             open-last-report => {
                 root.open-last-report();
             }

@@ -91,6 +91,68 @@ impl VideoScale {
     }
 }
 
+/// What a finger on the stream does (Artemis' mouse modes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TouchMode {
+    /// Relative cursor, tap = click, hold = right click.
+    #[default]
+    Trackpad,
+    /// The cursor goes where the finger is.
+    Mouse,
+    /// Real touches, every finger, for touch-aware apps.
+    Touchscreen,
+}
+
+impl TouchMode {
+    pub const ALL: [Self; 3] = [Self::Trackpad, Self::Mouse, Self::Touchscreen];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Trackpad => "trackpad",
+            Self::Mouse => "mouse",
+            Self::Touchscreen => "touchscreen",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Trackpad => Self::Mouse,
+            Self::Mouse => Self::Touchscreen,
+            Self::Touchscreen => Self::Trackpad,
+        }
+    }
+
+    pub fn index(self) -> i32 {
+        Self::ALL.iter().position(|&m| m == self).unwrap_or(0) as i32
+    }
+}
+
+/// Screen orientation while streaming (Android).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StreamOrientation {
+    /// Landscape, either way up.
+    #[default]
+    Landscape,
+    /// Portrait, either way up.
+    Portrait,
+    /// Whatever the device and its rotation lock say.
+    Auto,
+}
+
+impl StreamOrientation {
+    pub const ALL: [Self; 3] = [Self::Landscape, Self::Portrait, Self::Auto];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Landscape => "landscape",
+            Self::Portrait => "portrait",
+            Self::Auto => "auto",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StreamSettings {
@@ -123,6 +185,12 @@ pub struct StreamSettings {
     pub show_menu_button: bool,
     /// Use the platform's hardware decoder when there is one.
     pub hardware_decoding: bool,
+    /// Touch mode; unset in settings saved before it existed, which only
+    /// had `touch_trackpad` (see [`StreamSettings::touch`]).
+    pub touch_mode: Option<TouchMode>,
+    /// Show the on-screen controller over the stream.
+    pub onscreen_controller: bool,
+    pub orientation: StreamOrientation,
 }
 
 impl Default for StreamSettings {
@@ -147,11 +215,28 @@ impl Default for StreamSettings {
             video_scale: VideoScale::Fit,
             show_menu_button: !cfg!(target_os = "android"),
             hardware_decoding: true,
+            touch_mode: None,
+            onscreen_controller: false,
+            orientation: StreamOrientation::Landscape,
         }
     }
 }
 
 impl StreamSettings {
+    /// The touch mode, from the old trackpad switch when never chosen.
+    pub fn touch(&self) -> TouchMode {
+        self.touch_mode.unwrap_or(if self.touch_trackpad {
+            TouchMode::Trackpad
+        } else {
+            TouchMode::Mouse
+        })
+    }
+
+    pub fn set_touch(&mut self, mode: TouchMode) {
+        self.touch_mode = Some(mode);
+        self.touch_trackpad = mode == TouchMode::Trackpad;
+    }
+
     /// Adds these settings to a session report.
     pub fn add_to_report(&self, r: &mut crate::report::StreamReport) {
         r.field(
@@ -165,10 +250,12 @@ impl StreamSettings {
         r.field("Settings", "HDR", self.hdr);
         r.field("Settings", "virtual display", self.virtual_display);
         r.field("Settings", "launch mode", format!("{:?}", self.launch_mode));
+        r.field("Settings", "touch", self.touch().label());
+        r.field("Settings", "orientation", self.orientation.label());
         r.field(
             "Settings",
-            "touch",
-            if self.touch_trackpad { "trackpad" } else { "direct" },
+            "on-screen controller",
+            if self.onscreen_controller { "on" } else { "off" },
         );
         r.field("Settings", "preset", self.preset.label());
         r.field("Settings", "video scale", self.video_scale.label());

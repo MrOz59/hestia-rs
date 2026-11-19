@@ -241,5 +241,22 @@ fn main() {
         }
         ui.set_stream_keyboard_open(false);
         ui.set_pair_visible(false);
+
+        // The on-screen controller over the stream.
+        ui.set_stream_pad_controls(model(hestia_app::pad_preview(lw as f32, lh as f32)));
+        ui.set_stream_pad_visible(true);
+        ui.set_screen(4);
+        save(&window, size, &out.join(format!("{form}-stream-pad.png")));
+        ui.set_stream_pad_visible(false);
     }
+
+    // Phones stream in landscape: the controller as most people see it.
+    let (lw, lh, scale) = (915u32, 412u32, 2.0f32);
+    window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
+    let size = PhysicalSize::new((lw as f32 * scale) as u32, (lh as f32 * scale) as u32);
+    window.set_size(size);
+    ui.set_stream_pad_controls(model(hestia_app::pad_preview(lw as f32, lh as f32)));
+    ui.set_stream_pad_visible(true);
+    ui.set_screen(4);
+    save(&window, size, &out.join("phone-landscape-stream-pad.png"));
 }

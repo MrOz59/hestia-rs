@@ -28,6 +28,36 @@ component KeyChip inherits Rectangle {
     }
 }
 
+// One control of the on-screen controller, laid out by the app (Rust also
+// decides which finger presses what; these are only drawn).
+// kind: 0 round button, 1 rectangular button, 2 stick, 3 d-pad.
+export struct PadControl {
+    kind: int,
+    label: string,
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+    pressed: bool,
+    knob-x: length,
+    knob-y: length,
+    // d-pad: held directions
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
+}
+
+component PadArrow inherits Rectangle {
+    in property <bool> lit;
+    width: 34%;
+    height: 34%;
+    border-radius: 6px;
+    background: root.lit ? #ffffff80 : #ffffff22;
+    border-width: 1.5px;
+    border-color: #ffffffa0;
+}
+
 // Full-window video with input capture. Keyboard, mouse and touch go to the
 // host; Ctrl+Alt+Shift+Q disconnects, Ctrl+Alt+Shift+S toggles statistics.
 // Touch acts as a trackpad (relative cursor, tap = click, hold = right
@@ -39,7 +69,21 @@ export component StreamView inherits Rectangle {
     in property <string> status;
     in property <bool> show-stats: true;
     in property <bool> fullscreen;
-    in property <bool> trackpad: true;
+    // 0 trackpad, 1 mouse, 2 touchscreen
+    in property <int> touch-mode: 0;
+    callback cycle-touch-mode();
+    // On-screen controller.
+    in property <bool> pad-visible: false;
+    in property <[PadControl]> pad-controls;
+    callback toggle-pad();
+    // The view's size, for the controller's layout.
+    callback view-size(float, float);
+    // Pinch-to-zoom and pan (two fingers) while zoom mode is on.
+    in property <bool> zoom-mode: false;
+    in property <float> zoom: 1;
+    in property <float> pan-x: 0;
+    in property <float> pan-y: 0;
+    callback toggle-zoom();
     // 0 fit, 1 fill (crop), 2 stretch.
     in property <int> video-scale: 0;
     callback cycle-scale();
@@ -56,13 +100,12 @@ export component StreamView inherits Rectangle {
     callback key-event(string, bool, bool, bool, bool, bool, bool);
     // kind (0 down, 1 up, 2 move, 3 cancel), button (1 left, 2 middle,
     // 3 right), x, y relative to the video, video width, height, finger id
-    // (0 = mouse)
-    callback pointer(int, int, float, float, float, float, int);
+    // (0 = mouse), x, y relative to the view
+    callback pointer(int, int, float, float, float, float, int, float, float);
     callback scrolled(float, float);
     callback special-key(string);
     callback toggle-stats();
     callback toggle-fullscreen();
-    callback toggle-trackpad();
     callback request-keyframe();
     callback disconnect();
     callback quit-app();
@@ -86,6 +129,16 @@ export component StreamView inherits Rectangle {
     background: black;
     // Fill mode makes the picture larger than the view.
     clip: true;
+
+    init => {
+        root.view-size(self.width / 1px, self.height / 1px);
+    }
+    changed width => {
+        root.view-size(self.width / 1px, self.height / 1px);
+    }
+    changed height => {
+        root.view-size(self.width / 1px, self.height / 1px);
+    }
 
     changed keyboard-open => {
         if (!root.keyboard-open) {
@@ -121,10 +174,10 @@ export component StreamView inherits Rectangle {
         }
 
         video := Rectangle {
-            width: root.video-scale == 2 ? parent.width : root.frame-w * root.scale * 1px;
-            height: root.video-scale == 2 ? parent.height : root.frame-h * root.scale * 1px;
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
+            width: (root.video-scale == 2 ? parent.width : root.frame-w * root.scale * 1px) * root.zoom;
+            height: (root.video-scale == 2 ? parent.height : root.frame-h * root.scale * 1px) * root.zoom;
+            x: (parent.width - self.width) / 2 + root.pan-x * 1px;
+            y: (parent.height - self.height) / 2 + root.pan-y * 1px;
 
             Image {
                 width: 100%;
@@ -150,11 +203,84 @@ export component StreamView inherits Rectangle {
                     (self.mouse-y - video.y) / 1px,
                     video.width / 1px,
                     video.height / 1px,
-                    event.touch-finger-id);
+                    event.touch-finger-id,
+                    self.mouse-x / 1px,
+                    self.mouse-y / 1px);
             }
             scroll-event(event) => {
                 root.scrolled(event.delta-x / 1px, event.delta-y / 1px);
                 accept
+            }
+        }
+    }
+
+    // On-screen controller (drawn only; touches reach the area above).
+    if root.pad-visible: Rectangle {
+        width: 100%;
+        height: 100%;
+        for c in root.pad-controls: Rectangle {
+            x: c.x - c.w / 2;
+            y: c.y - c.h / 2;
+            width: c.w;
+            height: c.h;
+
+            if c.kind == 0 || c.kind == 1: Rectangle {
+                width: 100%;
+                height: 100%;
+                border-radius: c.kind == 0 ? self.height / 2 : 10px;
+                background: c.pressed ? #ffffff70 : #ffffff24;
+                border-width: 1.5px;
+                border-color: #ffffffa0;
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: c.label;
+                    color: white;
+                    font-size: min(c.h * 0.42, 20px);
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            if c.kind == 2: Rectangle {
+                width: 100%;
+                height: 100%;
+                border-radius: self.width / 2;
+                background: #ffffff18;
+                border-width: 1.5px;
+                border-color: #ffffff70;
+                Rectangle {
+                    width: parent.width * 0.46;
+                    height: self.width;
+                    x: (parent.width - self.width) / 2 + c.knob-x;
+                    y: (parent.height - self.height) / 2 + c.knob-y;
+                    border-radius: self.width / 2;
+                    background: c.pressed ? #ffffff90 : #ffffff50;
+                }
+            }
+            if c.kind == 3: Rectangle {
+                width: 100%;
+                height: 100%;
+                PadArrow {
+                    x: (parent.width - self.width) / 2;
+                    y: 0;
+                    lit: c.up;
+                }
+                PadArrow {
+                    x: (parent.width - self.width) / 2;
+                    y: parent.height - self.height;
+                    lit: c.down;
+                }
+                PadArrow {
+                    x: 0;
+                    y: (parent.height - self.height) / 2;
+                    lit: c.left;
+                }
+                PadArrow {
+                    x: parent.width - self.width;
+                    y: (parent.height - self.height) / 2;
+                    lit: c.right;
+                }
             }
         }
     }
@@ -311,9 +437,25 @@ export component StreamView inherits Rectangle {
             }
             MenuItem {
                 icon: "mouse";
-                text: root.trackpad ? "Touch: trackpad" : "Touch: direct";
+                text: root.touch-mode == 0 ? "Touch: trackpad" : root.touch-mode == 1 ? "Touch: mouse" : "Touch: touchscreen";
                 clicked => {
-                    root.toggle-trackpad();
+                    root.cycle-touch-mode();
+                }
+            }
+            MenuItem {
+                icon: "play";
+                text: root.pad-visible ? "Hide on-screen controller" : "On-screen controller";
+                clicked => {
+                    root.toggle-pad();
+                    root.menu-open = false;
+                }
+            }
+            MenuItem {
+                icon: "fullscreen";
+                text: root.zoom-mode ? "Zoom: on (pinch, two-finger pan)" : "Zoom";
+                clicked => {
+                    root.toggle-zoom();
+                    root.menu-open = false;
                 }
             }
             MenuItem {

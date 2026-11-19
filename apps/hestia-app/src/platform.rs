@@ -439,18 +439,28 @@ pub fn has_soft_keyboard() -> bool {
     cfg!(target_os = "android")
 }
 
-/// Streaming on/off: on Android, landscape, system bars hidden, screen kept
-/// on. Nothing on desktop (the window's full screen is its own toggle).
-pub fn set_stream_mode(on: bool) {
+/// Streaming on/off: on Android, the chosen orientation, system bars
+/// hidden, screen kept on. Nothing on desktop (the window's full screen is
+/// its own toggle).
+pub fn set_stream_mode(on: bool, orientation: hestia_core::StreamOrientation) {
     #[cfg(target_os = "android")]
     {
         let result = with_helper(|env, activity, helper| {
             use jni::objects::JValue;
+            let orientation = match orientation {
+                hestia_core::StreamOrientation::Landscape => 0,
+                hestia_core::StreamOrientation::Portrait => 1,
+                hestia_core::StreamOrientation::Auto => 2,
+            };
             env.call_static_method(
                 helper,
                 "setStreamMode",
-                "(Landroid/app/Activity;Z)V",
-                &[JValue::Object(activity), JValue::Bool(u8::from(on))],
+                "(Landroid/app/Activity;ZI)V",
+                &[
+                    JValue::Object(activity),
+                    JValue::Bool(u8::from(on)),
+                    JValue::Int(orientation),
+                ],
             )?;
             Ok(())
         });
@@ -459,7 +469,7 @@ pub fn set_stream_mode(on: bool) {
         }
     }
     #[cfg(not(target_os = "android"))]
-    let _ = on;
+    let _ = (on, orientation);
 }
 
 /// Shows or hides the on-screen keyboard that types into the host.
@@ -634,6 +644,22 @@ pub fn set_gamepads_streaming(on: bool) {
         }
         rumble_device(-1, 0, 0);
     }
+}
+
+/// The on-screen controller's state (it takes a controller slot like a
+/// physical one).
+pub fn onscreen_gamepad(buttons: u32, left_stick: (i16, i16), right_stick: (i16, i16), triggers: (u8, u8)) {
+    if !controllers::active() {
+        return;
+    }
+    let update = controllers::state().set(crate::gamepad::ON_SCREEN, buttons, left_stick, right_stick, triggers);
+    controllers::send(update);
+}
+
+/// The on-screen controller went away: release everything, free its slot.
+pub fn onscreen_gamepad_off() {
+    onscreen_gamepad(0, (0, 0), (0, 0), (0, 0));
+    controllers::state().remove(crate::gamepad::ON_SCREEN);
 }
 
 /// Rumble for controller `index` from the host.

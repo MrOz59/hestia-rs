@@ -230,6 +230,14 @@ impl FingerTaps {
         self.down.len()
     }
 
+    /// Where the first two fingers are now (for pinch-zoom).
+    pub fn pair(&self) -> Option<((f32, f32), (f32, f32))> {
+        match &self.down[..] {
+            [a, b, ..] => Some(((a.3, a.4), (b.3, b.4))),
+            _ => None,
+        }
+    }
+
     /// The finger went up. When it was the last one, returns how many
     /// fingers took part if it was a quick multi-finger tap.
     pub fn up(&mut self, id: i32, now: Instant) -> Option<usize> {

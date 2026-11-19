@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -49,8 +49,8 @@ pub struct Controller {
     state: Mutex<State>,
     stream: Mutex<Option<streaming::ActiveStream>>,
     stream_generation: AtomicU64,
-    /// Touch acts as a trackpad in the stream (persisted in the settings).
-    trackpad: AtomicBool,
+    /// What a finger does in the stream (`TouchMode` index; persisted).
+    touch_mode: AtomicU8,
     /// The report screen's content.
     last_report: Mutex<Option<report::LastReport>>,
 }
@@ -71,7 +71,7 @@ impl Controller {
             state: Mutex::new(State::default()),
             stream: Mutex::new(None),
             stream_generation: AtomicU64::new(0),
-            trackpad: AtomicBool::new(true),
+            touch_mode: AtomicU8::new(0),
             last_report: Mutex::new(None),
         })
     }
@@ -164,9 +164,17 @@ impl Controller {
             c.stream_key(&text, pressed, repeat, modifiers);
         });
         let c = self.clone();
-        ui.on_stream_pointer(move |kind, button, x, y, w, h, finger| {
-            c.stream_pointer(kind, button, x, y, w, h, finger)
+        ui.on_stream_pointer(move |kind, button, x, y, w, h, finger, sx, sy| {
+            c.stream_pointer(kind, button, (x, y), (w, h), finger, (sx, sy))
         });
+        let c = self.clone();
+        ui.on_stream_toggle_pad(move || c.toggle_pad());
+        let c = self.clone();
+        ui.on_stream_toggle_zoom(move || c.toggle_zoom());
+        let c = self.clone();
+        ui.on_stream_view_size(move |w, h| c.stream_view_size(w, h));
+        let c = self.clone();
+        ui.on_settings_custom_resolution(move |text| c.custom_resolution(&text));
         let c = self.clone();
         ui.on_stream_scroll(move |dx, dy| c.stream_scroll(dx, dy));
         ui.on_stream_keyboard(platform::set_keyboard_visible);
@@ -178,7 +186,7 @@ impl Controller {
         let c = self.clone();
         ui.on_stream_special_key(move |name| c.stream_special_key(&name));
         let c = self.clone();
-        ui.on_stream_toggle_trackpad(move || c.toggle_trackpad());
+        ui.on_stream_cycle_touch_mode(move || c.cycle_touch_mode());
         let c = self.clone();
         ui.on_stream_request_keyframe(move || c.request_keyframe());
         let c = self.clone();
@@ -243,12 +251,12 @@ impl Controller {
             }
             info!("{} starting", view::version_text());
             let settings = core.settings();
-            c.trackpad.store(settings.touch_trackpad, Ordering::Relaxed);
+            c.touch_mode.store(settings.touch().index() as u8, Ordering::Relaxed);
             let client_id = core.identity().unique_id().to_owned();
             let dir = core.data_dir().display().to_string();
             c.ui(move |ui| {
                 view::load_settings_into(&ui, &settings, platform::native_display());
-                ui.set_stream_trackpad(settings.touch_trackpad);
+                ui.set_stream_touch_mode(settings.touch().index());
                 ui.set_version_text(view::version_text().into());
                 ui.set_client_id(client_id.into());
                 ui.set_data_dir(dir.into());
@@ -930,6 +938,22 @@ impl Controller {
             (settings.width, settings.height, settings.fps, settings.bitrate_kbps) = (w, h, fps, kbps);
         }
         view::load_settings_into(&ui, &settings, native);
+    }
+
+    /// Settings → Custom resolution: adds it to the list and selects it.
+    fn custom_resolution(self: &Shared, text: &str) {
+        let Some((width, height)) = view::parse_resolution(text) else {
+            self.toast("Type a size like 2560x1080 (320x200 to 7680x4320)");
+            return;
+        };
+        let Some(core) = self.core() else { return };
+        let weak = self.weak.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let Some(ui) = weak.upgrade() else { return };
+        let mut settings = view::read_settings_from(&ui, &core.settings());
+        (settings.width, settings.height) = (width, height);
+        settings.preset = Preset::Custom;
+        view::load_settings_into(&ui, &settings, platform::native_display());
+        self.toast(format!("Resolution set to {width}×{height}; Save to keep it"));
     }
 
     /// Fit → Fill → Stretch, from the stream menu; remembered for next time.

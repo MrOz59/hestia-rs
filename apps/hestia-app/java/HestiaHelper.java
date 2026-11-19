@@ -39,15 +39,22 @@ public final class HestiaHelper {
     private static KeyboardView sKeyboardView;
 
     /**
-     * Streaming on: landscape (either way up), system bars hidden until
-     * swiped in, screen kept on, drawing under the display cutout.
+     * Streaming on: the chosen orientation (0 landscape, 1 portrait, either
+     * way up; 2 follow the device), system bars hidden until swiped in,
+     * screen kept on, drawing under the display cutout.
      */
-    public static void setStreamMode(final Activity activity, final boolean on) {
+    public static void setStreamMode(final Activity activity, final boolean on, final int orientation) {
         activity.runOnUiThread(() -> {
             Window window = activity.getWindow();
-            activity.setRequestedOrientation(on
-                    ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                    : ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+            int requested = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+            if (on && orientation == 0) {
+                requested = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE;
+            } else if (on && orientation == 1) {
+                requested = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT;
+            } else if (on) {
+                requested = ActivityInfo.SCREEN_ORIENTATION_FULL_USER;
+            }
+            activity.setRequestedOrientation(requested);
             if (on) {
                 window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             } else {

@@ -47,6 +47,16 @@ fn numbers(label: &str) -> Vec<u32> {
         .collect()
 }
 
+/// "2560x1080" (also with ×, *, spaces) → an encoder-friendly size: both
+/// sides even and within what hosts accept.
+pub fn parse_resolution(text: &str) -> Option<(u32, u32)> {
+    let mut parts = text.split(['x', 'X', '×', '*']).map(|p| p.trim().parse::<u32>().ok());
+    let (Some(Some(w)), Some(Some(h)), None) = (parts.next(), parts.next(), parts.next()) else {
+        return None;
+    };
+    ((320..=7680).contains(&w) && (200..=4320).contains(&h)).then_some((w & !1, h & !1))
+}
+
 /// Kbps from the slider's Mbps, in 250 kbps steps (presets use quarters).
 pub fn bitrate_from_mbps(mbps: f32) -> u32 {
     (((mbps * 4.0).round() / 4.0) * 1000.0).round().clamp(500.0, 500_000.0) as u32
@@ -203,6 +213,12 @@ pub fn load_settings_into(ui: &AppWindow, s: &StreamSettings, native: Option<(u3
     ui.set_cfg_show_report(s.show_stream_report);
     ui.set_cfg_show_menu_button(s.show_menu_button);
     ui.set_cfg_hardware_decoding(s.hardware_decoding);
+    ui.set_cfg_orientation(
+        hestia_core::StreamOrientation::ALL
+            .iter()
+            .position(|&o| o == s.orientation)
+            .unwrap_or(0) as i32,
+    );
     ui.set_stream_show_menu_button(s.show_menu_button);
 }
 
@@ -244,6 +260,8 @@ pub fn read_settings_from(ui: &AppWindow, base: &StreamSettings) -> StreamSettin
         show_stream_report: ui.get_cfg_show_report(),
         show_menu_button: ui.get_cfg_show_menu_button(),
         hardware_decoding: ui.get_cfg_hardware_decoding(),
+        orientation: hestia_core::StreamOrientation::ALL
+            [pick(ui.get_cfg_orientation(), hestia_core::StreamOrientation::ALL.len())],
         ..base.clone()
     }
 }
@@ -283,6 +301,17 @@ mod mode_tests {
         );
         assert_eq!(numbers("2400 × 1080 (native)"), vec![2400, 1080]);
         assert_eq!(numbers("120 fps"), vec![120]);
+    }
+
+    #[test]
+    fn custom_resolutions() {
+        assert_eq!(parse_resolution("2560x1080"), Some((2560, 1080)));
+        assert_eq!(parse_resolution(" 1366 × 768 "), Some((1366, 768)));
+        assert_eq!(parse_resolution("1365*767"), Some((1364, 766)), "made even");
+        assert_eq!(parse_resolution("8000x1000"), None);
+        assert_eq!(parse_resolution("1920"), None);
+        assert_eq!(parse_resolution("1920x1080x3"), None);
+        assert_eq!(parse_resolution("wide"), None);
     }
 
     #[test]

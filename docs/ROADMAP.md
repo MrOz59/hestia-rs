@@ -35,8 +35,10 @@
       trackpad, keyboard bar with shortcuts (Android on-screen keyboard)
 - [x] Android: game controllers (up to 4; buttons, sticks, triggers, d-pad)
       with rumble on the controller or the phone; two-finger scroll
+- [x] Touch modes (trackpad, mouse, native multi-touch), on-screen
+      controller, pinch zoom and pan, stream orientation, custom resolution
 - [ ] Input: scancode-based keyboard, desktop pointer capture, desktop
-      gamepads, native multi-touch and stylus / S Pen, virtual gamepad
+      gamepads, stylus / S Pen
 - [x] Stream overlay: stats, full screen, keyframe request, disconnect, quit
 - [x] Hermes host tools: display recovery, server commands, clipboard,
       permissions, diagnostics (app and CLI)

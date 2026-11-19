@@ -41,9 +41,19 @@ server commands) when the host offers them.
   mapping, text fallback for other characters), absolute mouse, buttons,
   scroll, touch as mouse, stats overlay, full screen, disconnect / quit.
   `Ctrl+Alt+Shift+Q` disconnects, `Ctrl+Alt+Shift+S` toggles statistics.
-- **Touch as a trackpad** (default on phones): the finger moves the host
-  cursor relatively; tap = click, hold = right click, tap then drag = drag.
-  "Touch: direct" in the stream menu clicks where you touch instead.
+- **Touch modes** (stream menu, remembered): *trackpad* (default; the
+  finger moves the host cursor relatively, tap = click, hold = right click,
+  tap then drag = drag), *mouse* (the cursor goes where you touch) and
+  *touchscreen* (every finger reaches the host as a real touch, for
+  touch-aware apps).
+- **On-screen controller** (stream menu, remembered): sticks (tap to click
+  L3/R3), d-pad, A/B/X/Y, bumpers, analog triggers, Back/Home/Start, every
+  finger independent. It takes a controller slot like a physical one.
+- **Zoom** (stream menu): pinch to magnify the picture up to 4×, drag with
+  two fingers to move around.
+- **Orientation** (Android settings): landscape, portrait or the device's
+  rotation, while streaming. **Custom resolution** in the settings takes any
+  size (e.g. 2560x1080).
 - **Keyboard bar** in the stream menu: a text field (opens the on-screen
   keyboard) replayed on the host, plus Esc, Tab, Enter, Backspace, Win,
   Alt+Tab and Alt+F4; "Fix picture" asks the host for a fresh keyframe.
