@@ -90,6 +90,10 @@ pub trait FrameDecoder: Send {
         Ok(())
     }
 
+    /// How many frames are queued behind the next one: a pipelined decoder
+    /// can take the next input instead of waiting for this one's picture.
+    fn set_backlog(&mut self, _frames: usize) {}
+
     fn decode_timed(
         &mut self,
         frame: &EncodedFrame,
@@ -202,7 +206,15 @@ impl DecodeStats {
     }
 }
 
-const QUEUE_DEPTH: usize = 6;
+/// Compressed frames are never dropped for being late: each one is a
+/// reference for the next, so dropping one costs a keyframe (large, slow on
+/// WAN links, and a stall until it arrives). The decoder catches up and only
+/// the newest picture is shown. Only a backlog this deep or this old (the
+/// decoder can't keep up at all) is flushed for a keyframe.
+const QUEUE_DEPTH: usize = 48;
+const MIN_BACKLOG_AGE: Duration = Duration::from_millis(300);
+/// Frames of backlog allowed at low frame rates (more than the age above).
+const MIN_BACKLOG_FRAMES: u64 = 8;
 
 struct QueuedFrame {
     frame: EncodedFrame,
@@ -291,10 +303,10 @@ impl VideoSink for DecodingSink {
             decoder.name()
         );
         let presenter = self.presenter.take().ok_or("decoder already set up")?;
-        // Allow a short burst around a keyframe, then recover instead of
-        // decoding a backlog. Cap the wait independently of frame rate.
-        self.shared.queue().max_age = Duration::from_micros(2_000_000 / u64::from(fps.max(1)))
-            .clamp(Duration::from_millis(8), Duration::from_millis(45));
+        // Bursts (Wi-Fi, VPNs, keyframes) are decoded through; only a
+        // decoder that can't keep up at all is reset (see QUEUE_DEPTH).
+        self.shared.queue().max_age =
+            Duration::from_micros(MIN_BACKLOG_FRAMES * 1_000_000 / u64::from(fps.max(1))).max(MIN_BACKLOG_AGE);
         let shared = self.shared.clone();
         let requester = self.requester.clone();
         self.thread = Some(
@@ -390,13 +402,20 @@ fn decode_loop(
         if started.duration_since(queued_at) > queue.max_age {
             let dropped = queue.invalidate();
             drop(queue);
+            warn!(
+                "decoder {} ms behind: dropping {} frames for a keyframe",
+                started.duration_since(queued_at).as_millis(),
+                dropped + 1
+            );
             shared.dropped_backlog(dropped + 1);
             if let Some(r) = &requester {
                 r.request();
             }
             continue;
         }
+        let backlog = queue.frames.len();
         drop(queue);
+        decoder.set_backlog(backlog);
         let timing = FrameTiming::new(&frame, queued_at, started);
         let result = if decoder_generation != generation {
             let reset = decoder.reset();
@@ -538,6 +557,48 @@ mod tests {
         assert_eq!(stats.errors.load(Ordering::Relaxed), 1);
         assert_eq!(stats.decoded.load(Ordering::Relaxed), 3);
         assert_eq!(stats.dropped.load(Ordering::Relaxed), 4);
+    }
+
+    /// A decoder slower than real time for a while (a burst arrives at
+    /// once): every frame is still decoded, nothing is dropped, no keyframe
+    /// is asked for.
+    #[test]
+    fn bursts_are_decoded_through() {
+        struct Slow;
+        impl FrameDecoder for Slow {
+            fn name(&self) -> &'static str {
+                "slow"
+            }
+            fn supports(&self, _f: VideoFormat) -> bool {
+                true
+            }
+            fn decode(&mut self, frame: &EncodedFrame, out: &mut RgbaFrame) -> Result<bool, String> {
+                std::thread::sleep(Duration::from_millis(5));
+                out.reshape(2, 1);
+                out.data[0] = frame.frame_number as u8;
+                Ok(true)
+            }
+        }
+        let shown = Arc::new(Mutex::new(Vec::new()));
+        let (requested, request) = mpsc::channel();
+        let s = shown.clone();
+        let mut sink = DecodingSink::new(
+            Box::new(Slow),
+            Box::new(move |f: &RgbaFrame| s.lock().unwrap().push(f.data[0] as u32)),
+        );
+        sink.attach_keyframe_requester(KeyframeRequester::new(move || {
+            requested.send(()).unwrap();
+        }));
+        sink.setup(H264, 1280, 720, 60).unwrap();
+        // 20 frames at once: 100 ms of decoding, six frame times behind.
+        sink.submit(frame(1, true));
+        for n in 2..=20 {
+            assert_eq!(sink.submit(frame(n, false)), SubmitResult::Ok);
+        }
+        sink.cleanup();
+        assert_eq!(*shown.lock().unwrap(), (1..=20).collect::<Vec<_>>());
+        assert!(request.try_recv().is_err(), "no keyframe needed");
+        assert_eq!(sink.stats().dropped.load(Ordering::Relaxed), 0);
     }
 
     #[test]

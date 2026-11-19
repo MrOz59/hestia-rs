@@ -101,6 +101,8 @@ pub struct MediaCodecDecoder {
     failures: u32,
     /// Nothing left to try: every decode reports this.
     fatal: Option<String>,
+    /// Frames queued behind the current one (see `set_backlog`).
+    backlog: usize,
     /// Software decoder used when the hardware one can't be set up or its
     /// pictures can't be read (H.264).
     #[cfg(feature = "openh264")]
@@ -124,6 +126,7 @@ impl MediaCodecDecoder {
             pictures: 0,
             failures: 0,
             fatal: None,
+            backlog: 0,
             #[cfg(feature = "openh264")]
             fallback: None,
         })
@@ -283,8 +286,8 @@ impl Running {
         Ok(true)
     }
 
-    /// Buffer output: converts every finished picture into `out` (the
-    /// newest wins) and returns the last one's timing.
+    /// Buffer output: takes every finished picture, converts the newest
+    /// into `out` (older ones go back unread) and returns its timing.
     fn drain_buffers(
         &mut self,
         wait: Duration,
@@ -292,33 +295,17 @@ impl Running {
         out: &mut RgbaFrame,
     ) -> Result<Option<FrameTiming>, String> {
         let mut timeout = wait;
-        let mut shown = None;
+        let mut newest = None;
         loop {
             match self.codec.dequeue_output_buffer(timeout) {
                 Ok(DequeuedOutputBufferInfoResult::Buffer(buffer)) => {
                     timeout = Duration::ZERO;
-                    let pts = buffer.info().presentation_time_us() as u64;
-                    if self.layout.is_none() {
-                        let format = self.codec.output_format();
-                        self.layout = BufferLayout::from_format(|key| format.i32(key), (self.width, self.height)).ok();
-                    }
-                    let converted = match &self.layout {
-                        Some(layout) => layout.convert(buffer.buffer(), colorimetry, out),
-                        None => {
-                            let format = self.codec.output_format();
-                            BufferLayout::from_format(|key| format.i32(key), (self.width, self.height)).map(|_| ())
-                        }
-                    };
-                    // Always hand the buffer back, even if it can't be read.
-                    self.codec
-                        .release_output_buffer(buffer, false)
-                        .map_err(|e| format!("release output: {e:?}"))?;
-                    converted?;
-                    if let Some(index) = self.pending.iter().position(|(at, _)| *at == pts) {
-                        if let Some((_, mut timing)) = self.pending.remove(index) {
-                            timing.codec_output_at = Instant::now();
-                            shown = Some(timing);
-                        }
+                    if let Some(older) = newest.replace(buffer) {
+                        let pts = older.info().presentation_time_us() as u64;
+                        self.pending.retain(|(at, _)| *at != pts);
+                        self.codec
+                            .release_output_buffer(older, false)
+                            .map_err(|e| format!("release output: {e:?}"))?;
                     }
                 }
                 Ok(DequeuedOutputBufferInfoResult::OutputFormatChanged) => {
@@ -335,10 +322,42 @@ impl Running {
                     }
                 }
                 Ok(DequeuedOutputBufferInfoResult::OutputBuffersChanged) => {}
-                Ok(DequeuedOutputBufferInfoResult::TryAgainLater) => return Ok(shown),
-                Err(e) => return Err(format!("output buffer: {e:?}")),
+                Ok(DequeuedOutputBufferInfoResult::TryAgainLater) => break,
+                Err(e) => {
+                    if let Some(buffer) = newest.take() {
+                        let _ = self.codec.release_output_buffer(buffer, false);
+                    }
+                    return Err(format!("output buffer: {e:?}"));
+                }
             }
         }
+        let Some(buffer) = newest else {
+            return Ok(None);
+        };
+        let pts = buffer.info().presentation_time_us() as u64;
+        if self.layout.is_none() {
+            let format = self.codec.output_format();
+            self.layout = BufferLayout::from_format(|key| format.i32(key), (self.width, self.height)).ok();
+        }
+        let converted = match &self.layout {
+            Some(layout) => layout.convert(buffer.buffer(), colorimetry, out),
+            None => {
+                let format = self.codec.output_format();
+                BufferLayout::from_format(|key| format.i32(key), (self.width, self.height)).map(|_| ())
+            }
+        };
+        // Always hand the buffer back, even if it can't be read.
+        self.codec
+            .release_output_buffer(buffer, false)
+            .map_err(|e| format!("release output: {e:?}"))?;
+        converted?;
+        let Some(index) = self.pending.iter().position(|(at, _)| *at == pts) else {
+            return Ok(None);
+        };
+        Ok(self.pending.remove(index).map(|(_, mut timing)| {
+            timing.codec_output_at = Instant::now();
+            timing
+        }))
     }
 
     /// Releases every finished picture to the image reader; true if any.
@@ -474,6 +493,10 @@ impl FrameDecoder for MediaCodecDecoder {
             .map(|t| t.is_some())
     }
 
+    fn set_backlog(&mut self, frames: usize) {
+        self.backlog = frames;
+    }
+
     fn reset(&mut self) -> Result<(), String> {
         #[cfg(feature = "openh264")]
         if let Some(software) = &mut self.fallback {
@@ -532,6 +555,9 @@ impl MediaCodecDecoder {
         timing: FrameTiming,
         colorimetry: Colorimetry,
     ) -> Result<Option<FrameTiming>, String> {
+        // More frames waiting: queue the next one rather than wait for this
+        // one's picture (the codec works on several at once).
+        let output_wait = if self.backlog > 0 { Duration::ZERO } else { OUTPUT_WAIT };
         let running = self.running.as_mut().ok_or("decoder not configured")?;
         if running.images.is_none() {
             let mut shown = None;
@@ -543,7 +569,7 @@ impl MediaCodecDecoder {
                     return Err("decoder input is full".into());
                 }
             }
-            let wait = if shown.is_some() { Duration::ZERO } else { OUTPUT_WAIT };
+            let wait = if shown.is_some() { Duration::ZERO } else { output_wait };
             let newer = running
                 .drain_buffers(wait, colorimetry, out)
                 .map_err(|e| format!("{UNREADABLE}: {e}"))?;
@@ -557,7 +583,7 @@ impl MediaCodecDecoder {
                 return Err("decoder input is full".into());
             }
         }
-        rendered |= running.drain(if rendered { Duration::ZERO } else { OUTPUT_WAIT })?;
+        rendered |= running.drain(if rendered { Duration::ZERO } else { output_wait })?;
         let Some(image) = running.latest_image(rendered)? else {
             return Ok(None);
         };

@@ -37,10 +37,12 @@ server commands) when the host offers them.
 - **Decoding**: on Android, the hardware decoder (MediaCodec: H.264, HEVC,
   AV1) read through an image reader, or through its own output buffers on
   devices whose pictures the image reader can't lock; OpenH264 (software
-  H.264) on desktop and as the fallback. Decoding runs on its own thread,
-  with frames handed to the UI newest-first so a slow renderer drops frames
-  instead of adding latency. When keyframes don't fix a failing decoder,
-  keyframe requests space out instead of flooding the host.
+  H.264) on desktop and as the fallback. Decoding runs on its own thread
+  and, like Moonlight, never drops a compressed frame for being late (each
+  one is a reference for the next; dropping one costs a keyframe): bursts
+  decode through and only the newest picture is shown. When keyframes don't
+  fix a failing decoder, keyframe requests space out instead of flooding
+  the host.
 - **Stream screen**: video letterboxed in the window, keyboard (US-layout key
   mapping, text fallback for other characters), absolute mouse, buttons,
   scroll, touch as mouse, stats overlay, full screen, disconnect / quit.
