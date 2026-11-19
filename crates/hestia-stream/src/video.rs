@@ -421,6 +421,46 @@ pub fn bind_udp(remote: &SocketAddr) -> io::Result<UdpSocket> {
     UdpSocket::bind(bind)
 }
 
+/// Receive buffer for the video socket. A 1080p keyframe arrives as a
+/// burst of a few hundred packets; the default (~200 KB on Android) can't
+/// hold one while the receive thread is busy, and the kernel drops what
+/// doesn't fit, more than FEC can repair. Moonlight asks for ~3 MB too.
+pub const VIDEO_RECV_BUFFER: usize = 4 << 20;
+
+/// Asks the kernel for a `bytes` receive buffer (it may grant less, up to
+/// `net.core.rmem_max`); returns what it actually reserved.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn set_recv_buffer(socket: &UdpSocket, bytes: usize) -> io::Result<usize> {
+    use std::os::fd::AsRawFd;
+
+    const SOL_SOCKET: i32 = 1;
+    const SO_RCVBUF: i32 = 8;
+    unsafe extern "C" {
+        fn setsockopt(fd: i32, level: i32, name: i32, value: *const std::ffi::c_void, len: u32) -> i32;
+        fn getsockopt(fd: i32, level: i32, name: i32, value: *mut std::ffi::c_void, len: *mut u32) -> i32;
+    }
+    let fd = socket.as_raw_fd();
+    let wanted = i32::try_from(bytes).unwrap_or(i32::MAX);
+    // SAFETY: plain setsockopt/getsockopt on a socket we own, with a
+    // correctly sized i32 option value.
+    unsafe {
+        if setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (&raw const wanted).cast(), 4) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut got: i32 = 0;
+        let mut len: u32 = 4;
+        if getsockopt(fd, SOL_SOCKET, SO_RCVBUF, (&raw mut got).cast(), &mut len) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(got.max(0) as usize)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub fn set_recv_buffer(_socket: &UdpSocket, _bytes: usize) -> io::Result<usize> {
+    Ok(0)
+}
+
 /// `payload(16) | seq(be32)` or the legacy "PING".
 pub fn ping_packet(payload: Option<&[u8; 16]>, seq: u32) -> Vec<u8> {
     match payload {
@@ -447,6 +487,11 @@ impl VideoReceiver {
         sink.setup(cfg.format, cfg.width, cfg.height, cfg.fps)
             .map_err(|e| io::Error::other(format!("video decoder setup failed: {e}")))?;
         let socket = bind_udp(&cfg.remote)?;
+        match set_recv_buffer(&socket, VIDEO_RECV_BUFFER) {
+            // Linux reports twice the usable size (bookkeeping included).
+            Ok(got) => info!("video receive buffer: {} KiB", got / 1024),
+            Err(e) => warn!("could not enlarge the video receive buffer: {e}"),
+        }
         socket.set_read_timeout(Some(Duration::from_millis(100)))?;
         let stop = Arc::new(AtomicBool::new(false));
         let counters = Arc::new(VideoCounters::default());
@@ -824,6 +869,15 @@ mod tests {
         a.stats.lost_frames = 7;
         a.wait_for_keyframe();
         assert_eq!(a.stats.lost_frames, 7);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn enlarges_the_receive_buffer() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let before = set_recv_buffer(&socket, 4096).unwrap();
+        let after = set_recv_buffer(&socket, 1 << 20).unwrap();
+        assert!(after > before, "{before} -> {after}");
     }
 
     #[test]

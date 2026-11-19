@@ -91,7 +91,9 @@ impl DecodeStats {
 }
 
 /// Frames waiting for the decoder; beyond this the decoder is too slow.
-const QUEUE_DEPTH: usize = 4;
+/// Deep enough to absorb a keyframe that takes several frame times to
+/// decode (each overflow costs a new keyframe, which is slower still).
+const QUEUE_DEPTH: usize = 6;
 
 struct Shared {
     waiting_for_keyframe: AtomicBool,

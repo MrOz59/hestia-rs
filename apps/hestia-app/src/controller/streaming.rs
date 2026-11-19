@@ -192,7 +192,6 @@ impl Listener {
         let received = delta(now.stats.frames, prev.stats.frames);
         let lost = delta(now.stats.lost_frames, prev.stats.lost_frames);
         let decoded = delta(now.decoded, prev.decoded);
-        let decoder_dropped = delta(now.decoder_dropped, prev.decoder_dropped);
         let superseded = delta(now.superseded, prev.superseded);
         let host_frames = delta(now.stats.host_latency_frames, prev.stats.host_latency_frames);
         let host_ms = (host_frames > 0)
@@ -214,7 +213,9 @@ impl Listener {
                 delta(now.decode_us, prev.decode_us) as f64 / decoded as f64 / 1000.0
             },
             network_drop_pct: percent(lost, received + lost),
-            display_drop_pct: percent(superseded + decoder_dropped, decoded + decoder_dropped),
+            // Frames the screen skipped. The decoder's own drops (it fell
+            // behind) show up as decoded < received, a decode problem.
+            display_drop_pct: percent(superseded, decoded),
             host_ms,
         };
         let verdict = diagnosis::diagnose(&window);
