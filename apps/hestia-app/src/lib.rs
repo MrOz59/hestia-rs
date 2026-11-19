@@ -2,7 +2,10 @@
 //! it to `hestia-core` and runs every network call on worker threads.
 
 mod controller;
+mod hostinfo;
 mod keymap;
+mod touch;
+mod typing;
 mod view;
 
 use std::path::PathBuf;

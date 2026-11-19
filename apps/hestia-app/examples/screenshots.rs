@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use hestia_app::{AppCard, AppWindow, HostCard};
+use hestia_app::{AppCard, AppWindow, CommandRow, HostCard};
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
 use slint::platform::{Platform, WindowAdapter, WindowEvent};
 use slint::{
@@ -115,6 +115,39 @@ fn fill_sample_data(ui: &AppWindow) {
     ui.set_stream_stats(
         "1920×1080  ·  60 fps  ·  18.4 Mbps  ·  RTT 3 ms  ·  decode 4.1 ms  ·  FEC 12  ·  lost 0  ·  dropped 0".into(),
     );
+    ui.set_host_hermes(true);
+    ui.set_tools_display_status("backend: kms · connector: HDMI-A-1 · mode: 1920x1080@60 · virtual: yes".into());
+    ui.set_tools_commands(model(vec![
+        CommandRow {
+            id: 1,
+            name: "Restart Steam".into(),
+            confirm: false,
+            armed: false,
+        },
+        CommandRow {
+            id: 2,
+            name: "Reboot the host".into(),
+            confirm: true,
+            armed: false,
+        },
+        CommandRow {
+            id: 3,
+            name: "Toggle HDR on the TV".into(),
+            confirm: true,
+            armed: true,
+        },
+    ]));
+    ui.set_tools_clipboard_text("https://github.com/MrOz59/hestia-rs".into());
+    ui.set_tools_permissions(
+        "Allowed: view streams, list apps, launch apps, keyboard, mouse, gamepads, clipboard. Not allowed: server commands."
+            .into(),
+    );
+    ui.set_tools_diagnostics(strings(&[
+        "version: 1.4.0",
+        "display.backend: kms",
+        "display.hdr: no",
+        "sessions: 1 items",
+    ]));
     ui.set_pair_host_name("cachy-desktop".into());
     ui.set_pair_pin("4821".into());
     ui.set_pair_status("Waiting for the host…".into());
@@ -153,19 +186,24 @@ fn main() {
         let size = PhysicalSize::new((lw as f32 * scale) as u32, (lh as f32 * scale) as u32);
         window.set_size(size);
 
-        let shots: [(&str, i32, bool); 6] = [
-            ("hosts", 0, false),
-            ("apps", 1, false),
-            ("launching", 2, false),
-            ("settings", 3, false),
-            ("pairing", 0, true),
-            ("stream", 4, false),
+        // (file name, screen, pairing dialog, stream keyboard bar)
+        let shots: [(&str, i32, bool, bool); 8] = [
+            ("hosts", 0, false, false),
+            ("apps", 1, false, false),
+            ("launching", 2, false, false),
+            ("settings", 3, false, false),
+            ("pairing", 0, true, false),
+            ("stream", 4, false, false),
+            ("stream-keyboard", 4, false, true),
+            ("tools", 5, false, false),
         ];
-        for (name, screen, pairing) in shots {
+        for (name, screen, pairing, keyboard) in shots {
             ui.set_pair_visible(pairing);
+            ui.set_stream_keyboard_open(keyboard);
             ui.set_screen(screen);
             save(&window, size, &out.join(format!("{form}-{name}.png")));
         }
+        ui.set_stream_keyboard_open(false);
         ui.set_pair_visible(false);
     }
 }

@@ -110,6 +110,31 @@ enum Command {
     Diagnostics { host: String },
     /// Hermes: list this client's permissions.
     Permissions { host: String },
+    /// Hermes: list the host's server commands.
+    Commands { host: String },
+    /// Hermes: run a server command (by id or name).
+    Run {
+        host: String,
+        command: String,
+        /// Confirm commands the host marks as needing confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Hermes: print the host's clipboard, or replace it with --set.
+    Clipboard {
+        host: String,
+        #[arg(long, value_name = "TEXT")]
+        set: Option<String>,
+    },
+    /// Hermes: print the display status; --recover asks the host to recover it.
+    Display {
+        host: String,
+        #[arg(long)]
+        recover: bool,
+        /// With --recover: recover even if the display looks healthy.
+        #[arg(long, requires = "recover")]
+        force: bool,
+    },
     /// Forget a host locally.
     Forget { host: String },
 }
@@ -311,6 +336,54 @@ fn run(cli: Cli) -> Result<()> {
             let id = resolve(&client, &host)?.id;
             let perms = client.with_api(&id, |api| api.client_permissions())??;
             println!("{}", serde_json::to_string_pretty(&perms)?);
+        }
+        Command::Commands { host } => {
+            let id = resolve(&client, &host)?.id;
+            let commands = client.with_api(&id, |api| api.commands())??;
+            if commands.is_empty() {
+                println!("no server commands configured on the host");
+            }
+            for c in commands {
+                println!(
+                    "{:>4}  {}{}",
+                    c.id,
+                    c.name,
+                    if c.requires_confirmation { "  (needs --yes)" } else { "" }
+                );
+            }
+        }
+        Command::Run { host, command, yes } => {
+            let id = resolve(&client, &host)?.id;
+            let commands = client.with_api(&id, |api| api.commands())??;
+            let cmd = commands
+                .iter()
+                .find(|c| c.id.to_string() == command || c.name.eq_ignore_ascii_case(&command))
+                .ok_or_else(|| format!("no server command matching '{command}' (see `hestia commands {host}`)"))?;
+            if cmd.requires_confirmation && !yes {
+                return Err(format!("'{}' asks for confirmation; run again with --yes", cmd.name).into());
+            }
+            let cmd_id = cmd.id;
+            client.with_api(&id, |api| api.run_command(cmd_id))??;
+            println!("Ran '{}'.", cmd.name);
+        }
+        Command::Clipboard { host, set } => {
+            let id = resolve(&client, &host)?.id;
+            match set {
+                Some(text) => {
+                    client.with_api(&id, |api| api.set_clipboard(&text))??;
+                    println!("Clipboard set ({} bytes).", text.len());
+                }
+                None => print!("{}", client.with_api(&id, |api| api.clipboard())??),
+            }
+        }
+        Command::Display { host, recover, force } => {
+            let id = resolve(&client, &host)?.id;
+            let value = if recover {
+                client.with_api(&id, |api| api.recover_display(force))??
+            } else {
+                client.with_api(&id, |api| api.display_status())??
+            };
+            println!("{}", serde_json::to_string_pretty(&value)?);
         }
         Command::Forget { host } => {
             let record = resolve(&client, &host)?;

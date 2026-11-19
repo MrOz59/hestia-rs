@@ -1,4 +1,4 @@
-import { ComboBox, Slider, Switch, Spinner } from "std-widgets.slint";
+import { ComboBox, Slider, Switch, Spinner, TextEdit } from "std-widgets.slint";
 import { Theme, PillButton, LinkButton, Chip, IconButton, Fab, MenuItem } from "theme.slint";
 
 export struct HostCard {
@@ -360,10 +360,12 @@ export component AppsPage inherits Rectangle {
     in property <[AppCard]> apps;
     in property <bool> loading;
     in property <bool> app-running;
+    in property <bool> hermes;
     callback back;
     callback launch(int);
     callback quit-app;
     callback forget;
+    callback tools;
 
     property <bool> menu-open: false;
     property <length> pad: Theme.page-padding;
@@ -396,6 +398,15 @@ export component AppsPage inherits Rectangle {
                     text: "Back";
                     clicked => {
                         root.back();
+                    }
+                }
+            }
+            if !Theme.compact && root.hermes: VerticalLayout {
+                alignment: center;
+                PillButton {
+                    text: "Tools";
+                    clicked => {
+                        root.tools();
                     }
                 }
             }
@@ -545,6 +556,14 @@ export component AppsPage inherits Rectangle {
                 clicked => {
                     root.menu-open = false;
                     root.quit-app();
+                }
+            }
+            if root.hermes: MenuItem {
+                icon: "tools";
+                text: "Host tools";
+                clicked => {
+                    root.menu-open = false;
+                    root.tools();
                 }
             }
             MenuItem {
@@ -855,6 +874,237 @@ export component SettingsPage inherits Rectangle {
                         color: Theme.muted;
                         font-size: 12px;
                         wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}
+
+export struct CommandRow {
+    id: int,
+    name: string,
+    // Hermes wants a confirmation before running it.
+    confirm: bool,
+    // First tap done; the next one runs it.
+    armed: bool,
+}
+
+component ToolCard inherits Rectangle {
+    in property <string> title;
+    border-radius: Theme.radius;
+    background: Theme.card;
+    border-width: 1px;
+    border-color: Theme.border;
+    height: card-body.preferred-height;
+    card-body := VerticalLayout {
+        width: 100%;
+        padding: Theme.compact ? 14px : 16px;
+        spacing: 10px;
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: 16px;
+            font-weight: 700;
+        }
+        @children
+    }
+}
+
+// Hermes host tools: display recovery, server commands, clipboard,
+// this client's permissions and a diagnostics summary.
+export component ToolsPage inherits Rectangle {
+    in property <string> host-name;
+    in property <bool> loading;
+    // Error or note for the whole page ("not allowed", "not a Hermes host").
+    in property <string> message;
+    in property <string> display-status;
+    in property <bool> display-allowed: true;
+    in property <[CommandRow]> commands;
+    in property <bool> commands-allowed: true;
+    in property <bool> clipboard-allowed: true;
+    in-out property <string> clipboard-text;
+    in property <string> permissions;
+    in property <[string]> diagnostics;
+    in property <bool> busy;
+    callback back;
+    callback refresh;
+    callback recover-display;
+    callback run-command(int);
+    callback send-clipboard(string);
+    callback fetch-clipboard;
+
+    VerticalLayout {
+        PageHeader {
+            title: "Host tools";
+            subtitle: root.host-name;
+            show-back: Theme.compact;
+            back => {
+                root.back();
+            }
+            if root.busy || root.loading: VerticalLayout {
+                alignment: center;
+                Spinner {
+                    width: 22px;
+                    height: 22px;
+                    indeterminate: true;
+                }
+            }
+            if Theme.compact: VerticalLayout {
+                alignment: center;
+                IconButton {
+                    icon: "refresh";
+                    clicked => {
+                        root.refresh();
+                    }
+                }
+            }
+            if !Theme.compact: VerticalLayout {
+                alignment: center;
+                PillButton {
+                    text: "Refresh";
+                    clicked => {
+                        root.refresh();
+                    }
+                }
+            }
+            if !Theme.compact: VerticalLayout {
+                alignment: center;
+                PillButton {
+                    text: "Back";
+                    clicked => {
+                        root.back();
+                    }
+                }
+            }
+        }
+
+        Flickable {
+            vertical-stretch: 1;
+            content-width: self.width;
+            content-height: tools-form.preferred-height;
+            tools-form := HorizontalLayout {
+                width: root.width;
+                alignment: center;
+                VerticalLayout {
+                    width: Math.min(640px, root.width - 2 * Theme.page-padding);
+                    padding-top: 8px;
+                    padding-bottom: 32px;
+                    spacing: 12px;
+
+                    if root.message != "": Text {
+                        text: root.message;
+                        color: Theme.warn;
+                        wrap: word-wrap;
+                    }
+
+                    ToolCard {
+                        title: "Display";
+                        Text {
+                            text: root.loading ? "Checking…" : root.display-status;
+                            color: Theme.muted;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            PillButton {
+                                text: "Recover display";
+                                enabled: root.display-allowed && !root.busy;
+                                clicked => {
+                                    root.recover-display();
+                                }
+                            }
+                        }
+                    }
+
+                    ToolCard {
+                        title: "Server commands";
+                        if !root.loading && root.commands.length == 0: Text {
+                            text: root.commands-allowed ? "No commands are configured on the host." : "This device may not run server commands.";
+                            color: Theme.muted;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                        for cmd in root.commands: HorizontalLayout {
+                            spacing: 10px;
+                            min-height: Theme.control-height;
+                            Text {
+                                text: cmd.name;
+                                color: Theme.text;
+                                font-size: Theme.body-size;
+                                vertical-alignment: center;
+                                wrap: word-wrap;
+                                horizontal-stretch: 1;
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                PillButton {
+                                    text: cmd.armed ? "Confirm" : "Run";
+                                    primary: cmd.armed;
+                                    danger: cmd.confirm && !cmd.armed;
+                                    enabled: root.commands-allowed && !root.busy;
+                                    clicked => {
+                                        root.run-command(cmd.id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    ToolCard {
+                        title: "Clipboard";
+                        Text {
+                            text: root.clipboard-allowed ? "Send text to the host's clipboard, or fetch what it holds." : "Clipboard sync is not allowed for this device.";
+                            color: Theme.muted;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                        TextEdit {
+                            height: 96px;
+                            text <=> root.clipboard-text;
+                            enabled: root.clipboard-allowed;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            PillButton {
+                                text: "Send to host";
+                                primary: true;
+                                enabled: root.clipboard-allowed && !root.busy && root.clipboard-text != "";
+                                clicked => {
+                                    root.send-clipboard(root.clipboard-text);
+                                }
+                            }
+                            PillButton {
+                                text: "Get from host";
+                                enabled: root.clipboard-allowed && !root.busy;
+                                clicked => {
+                                    root.fetch-clipboard();
+                                }
+                            }
+                        }
+                    }
+
+                    ToolCard {
+                        title: "This device";
+                        Text {
+                            text: root.permissions == "" ? "…" : root.permissions;
+                            color: Theme.muted;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    if root.diagnostics.length > 0: ToolCard {
+                        title: "Diagnostics";
+                        for line in root.diagnostics: Text {
+                            text: line;
+                            color: Theme.muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
                     }
                 }
             }

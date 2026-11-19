@@ -71,6 +71,9 @@ pub struct StreamSettings {
     pub optimize_game_settings: bool,
     /// Keep the clipboard in sync with the host when it supports it.
     pub clipboard_sync: bool,
+    /// Touch drives the host cursor like a trackpad (relative); otherwise
+    /// a touch clicks where the finger lands.
+    pub touch_trackpad: bool,
 }
 
 impl Default for StreamSettings {
@@ -89,6 +92,7 @@ impl Default for StreamSettings {
             launch_mode: LaunchMode::Normal,
             optimize_game_settings: true,
             clipboard_sync: false,
+            touch_trackpad: true,
         }
     }
 }

@@ -25,6 +25,7 @@ openh264 = ["hestia-media/openh264"]
 [dependencies]
 hestia-core.workspace = true
 hestia-media.workspace = true
+serde_json.workspace = true
 slint.workspace = true
 image.workspace = true
 log.workspace = true

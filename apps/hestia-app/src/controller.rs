@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -20,6 +20,7 @@ use crate::AppWindow;
 use crate::view;
 
 mod streaming;
+mod tools;
 
 #[derive(Default)]
 struct State {
@@ -31,6 +32,10 @@ struct State {
     /// of abandoned attempts.
     pairing_host: Option<String>,
     pair_generation: u64,
+    /// Hermes server commands on the tools screen, and the one waiting for
+    /// its confirmation tap.
+    tools_commands: Vec<hestia_core::api::ServerCommand>,
+    tools_armed: Option<u32>,
 }
 
 pub struct Controller {
@@ -39,6 +44,8 @@ pub struct Controller {
     state: Mutex<State>,
     stream: Mutex<Option<streaming::ActiveStream>>,
     stream_generation: AtomicU64,
+    /// Touch acts as a trackpad in the stream (persisted in the settings).
+    trackpad: AtomicBool,
 }
 
 type Shared = Arc<Controller>;
@@ -57,6 +64,7 @@ impl Controller {
             state: Mutex::new(State::default()),
             stream: Mutex::new(None),
             stream_generation: AtomicU64::new(0),
+            trackpad: AtomicBool::new(true),
         })
     }
 
@@ -134,17 +142,38 @@ impl Controller {
             c.stream_key(&text, pressed, repeat, modifiers);
         });
         let c = self.clone();
-        ui.on_stream_pointer(move |x, y, w, h| c.stream_pointer(x, y, w, h));
-        let c = self.clone();
-        ui.on_stream_button(move |button, pressed| c.stream_button(button, pressed));
+        ui.on_stream_pointer(move |kind, button, x, y, w, h, touch| c.stream_pointer(kind, button, x, y, w, h, touch));
         let c = self.clone();
         ui.on_stream_scroll(move |dx, dy| c.stream_scroll(dx, dy));
+        let c = self.clone();
+        ui.on_stream_text_edited(move |text| c.stream_text_edited(&text));
+        let c = self.clone();
+        ui.on_stream_text_enter(move || c.stream_text_enter());
+        let c = self.clone();
+        ui.on_stream_special_key(move |name| c.stream_special_key(&name));
+        let c = self.clone();
+        ui.on_stream_toggle_trackpad(move || c.toggle_trackpad());
+        let c = self.clone();
+        ui.on_stream_request_keyframe(move || c.request_keyframe());
         let c = self.clone();
         ui.on_stream_toggle_fullscreen(move || c.toggle_fullscreen());
         let c = self.clone();
         ui.on_stream_disconnect(move || c.end_stream(None, None, false));
         let c = self.clone();
         ui.on_stream_quit(move || c.end_stream(None, None, true));
+
+        let c = self.clone();
+        ui.on_open_tools(move || c.open_tools());
+        let c = self.clone();
+        ui.on_tools_refresh(move || c.tools_refresh());
+        let c = self.clone();
+        ui.on_tools_recover_display(move || c.tools_recover_display());
+        let c = self.clone();
+        ui.on_tools_run_command(move |id| c.tools_run_command(id));
+        let c = self.clone();
+        ui.on_tools_send_clipboard(move |text| c.tools_send_clipboard(text.to_string()));
+        let c = self.clone();
+        ui.on_tools_fetch_clipboard(move || c.tools_fetch_clipboard());
 
         let c = self.clone();
         ui.on_open_settings(move || {
@@ -175,10 +204,12 @@ impl Controller {
             };
             let _ = c.core.set(core.clone());
             let settings = core.settings();
+            c.trackpad.store(settings.touch_trackpad, Ordering::Relaxed);
             let client_id = core.identity().unique_id().to_owned();
             let dir = core.data_dir().display().to_string();
             c.ui(move |ui| {
                 view::load_settings_into(&ui, &settings);
+                ui.set_stream_trackpad(settings.touch_trackpad);
                 ui.set_version_text(view::version_text().into());
                 ui.set_client_id(client_id.into());
                 ui.set_data_dir(dir.into());
@@ -508,7 +539,9 @@ impl Controller {
         };
         let chips = view::host_chips(&snapshot);
         let running = snapshot.info.as_ref().is_some_and(|i| i.is_busy());
+        let hermes = snapshot.capabilities.is_some();
         self.ui(move |ui| {
+            ui.set_host_hermes(hermes);
             ui.set_host_name(name);
             ui.set_host_detail(detail.into());
             ui.set_host_chips(ModelRc::new(VecModel::from(chips)));

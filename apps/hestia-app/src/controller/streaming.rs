@@ -15,11 +15,38 @@ use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer, SharedString}
 use super::{Controller, Shared, spawn};
 use crate::AppWindow;
 use crate::keymap::{self, Mapped};
+use crate::touch::{self, Trackpad};
+use crate::typing;
+
+/// Trackpad speed on top of the on-screen → host pixel ratio.
+const TRACKPAD_SPEED: f32 = 1.4;
 
 pub(super) struct ActiveStream {
     generation: u64,
     session: StreamSession,
     host_id: String,
+    /// Stream resolution, for trackpad scaling.
+    width: u32,
+    trackpad: Trackpad,
+    /// Identifies the current touch, so a stale long-press timer is ignored.
+    touch_id: u64,
+    /// Current content of the keyboard bar.
+    typed: String,
+}
+
+impl ActiveStream {
+    fn send(&self, events: impl IntoIterator<Item = InputEvent>) {
+        for event in events {
+            self.session.send_input(&event);
+        }
+    }
+}
+
+fn trackpad_events(outputs: Vec<touch::Output>) -> impl Iterator<Item = InputEvent> {
+    outputs.into_iter().map(|o| match o {
+        touch::Output::Move { dx, dy } => InputEvent::MouseMove { dx, dy },
+        touch::Output::Button { button, pressed } => InputEvent::MouseButton { button, pressed },
+    })
 }
 
 /// Hands decoded pictures to the UI thread. Only the newest picture is kept:
@@ -129,6 +156,7 @@ impl Controller {
             }),
         );
         let decode = sink.stats();
+        let stream_width = config.width;
         let size = format!("{}×{}", config.width, config.height);
         let listener = Arc::new(Listener {
             controller: self.clone(),
@@ -146,6 +174,10 @@ impl Controller {
             generation,
             session,
             host_id,
+            width: stream_width,
+            trackpad: Trackpad::new(),
+            touch_id: 0,
+            typed: String::new(),
         });
         if let Some(previous) = previous {
             spawn("hestia-stream-stop", move || previous.session.stop());
@@ -182,6 +214,7 @@ impl Controller {
                 }
                 ui.set_stream_frame(Image::default());
                 ui.set_stream_stats(SharedString::new());
+                ui.set_stream_keyboard_open(false);
             });
             if let Some(reason) = reason {
                 c.toast(reason);
@@ -223,27 +256,132 @@ impl Controller {
         }
     }
 
-    pub(super) fn stream_pointer(&self, x: f32, y: f32, width: f32, height: f32) {
+    /// `kind`: 0 down, 1 up, 2 move, 3 cancel. Touch goes through the
+    /// trackpad when it is enabled; mice (and direct touch) position the
+    /// host cursor absolutely inside the video.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn stream_pointer(
+        self: &Shared,
+        kind: i32,
+        button: i32,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        touch: bool,
+    ) {
+        if touch && self.trackpad.load(Ordering::Relaxed) {
+            return self.trackpad_event(kind, x, y, width);
+        }
         if width < 1.0 || height < 1.0 {
             return;
         }
         let clamp = |v: f32, max: f32| v.clamp(0.0, max - 1.0).round() as i16;
-        self.send_input(InputEvent::MousePosition {
+        let mut events = vec![InputEvent::MousePosition {
             x: clamp(x, width),
             y: clamp(y, height),
             width: width.round().min(i16::MAX as f32) as i16,
             height: height.round().min(i16::MAX as f32) as i16,
+        }];
+        let button = match button {
+            1 => Some(MouseButton::Left),
+            2 => Some(MouseButton::Middle),
+            3 => Some(MouseButton::Right),
+            _ => None,
+        };
+        // Touch reports no button; it is the left one.
+        let button = button.or(touch.then_some(MouseButton::Left));
+        if let (Some(button), 0 | 1) = (button, kind) {
+            events.push(InputEvent::MouseButton {
+                button,
+                pressed: kind == 0,
+            });
+        }
+        if let Some(active) = self.active_stream().as_ref() {
+            active.send(events);
+        }
+    }
+
+    fn trackpad_event(self: &Shared, kind: i32, x: f32, y: f32, video_width: f32) {
+        let now = Instant::now();
+        let mut guard = self.active_stream();
+        let Some(active) = guard.as_mut() else { return };
+        let outputs = match kind {
+            0 => {
+                active.touch_id += 1;
+                let (generation, touch_id) = (active.generation, active.touch_id);
+                let c = self.clone();
+                slint::Timer::single_shot(touch::LONG_PRESS, move || c.trackpad_long_press(generation, touch_id));
+                active.trackpad.down(x, y, now)
+            }
+            1 => active.trackpad.up(now),
+            2 => {
+                let scale = TRACKPAD_SPEED * active.width as f32 / video_width.max(1.0);
+                active.trackpad.moved(x, y, scale)
+            }
+            _ => active.trackpad.cancel(),
+        };
+        active.send(trackpad_events(outputs));
+    }
+
+    fn trackpad_long_press(&self, generation: u64, touch_id: u64) {
+        let mut guard = self.active_stream();
+        let Some(active) = guard.as_mut() else { return };
+        if active.generation == generation && active.touch_id == touch_id {
+            let outputs = active.trackpad.long_press(Instant::now());
+            active.send(trackpad_events(outputs));
+        }
+    }
+
+    pub(super) fn toggle_trackpad(self: &Shared) {
+        let on = !self.trackpad.load(Ordering::Relaxed);
+        self.trackpad.store(on, Ordering::Relaxed);
+        if let Some(active) = self.active_stream().as_mut() {
+            let released = active.trackpad.cancel();
+            active.send(trackpad_events(released));
+        }
+        self.ui(move |ui| ui.set_stream_trackpad(on));
+        self.toast(if on {
+            "Touch: trackpad. Tap to click, hold to right-click, tap then drag to drag."
+        } else {
+            "Touch: direct. The cursor goes where you touch."
+        });
+        let Some(core) = self.core() else { return };
+        spawn("hestia-settings", move || {
+            let mut settings = core.settings();
+            settings.touch_trackpad = on;
+            if let Err(e) = core.set_settings(settings) {
+                warn!("saving the touch mode failed: {e}");
+            }
         });
     }
 
-    pub(super) fn stream_button(&self, button: i32, pressed: bool) {
-        let button = match button {
-            1 => MouseButton::Left,
-            2 => MouseButton::Middle,
-            3 => MouseButton::Right,
-            _ => return,
-        };
-        self.send_input(InputEvent::MouseButton { button, pressed });
+    pub(super) fn stream_text_edited(&self, text: &str) {
+        let mut guard = self.active_stream();
+        let Some(active) = guard.as_mut() else { return };
+        let events = typing::edit_events(&active.typed, text);
+        active.typed = text.to_owned();
+        active.send(events);
+    }
+
+    pub(super) fn stream_text_enter(&self) {
+        let mut guard = self.active_stream();
+        let Some(active) = guard.as_mut() else { return };
+        active.typed.clear();
+        active.send(typing::special_key_events("enter"));
+    }
+
+    pub(super) fn stream_special_key(&self, name: &str) {
+        if let Some(active) = self.active_stream().as_ref() {
+            active.send(typing::special_key_events(name));
+        }
+    }
+
+    pub(super) fn request_keyframe(self: &Shared) {
+        if let Some(active) = self.active_stream().as_ref() {
+            active.session.request_keyframe();
+        }
+        self.toast("Asked the host for a fresh frame");
     }
 
     pub(super) fn stream_scroll(&self, dx: f32, dy: f32) {

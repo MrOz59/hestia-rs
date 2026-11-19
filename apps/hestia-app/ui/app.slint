@@ -1,9 +1,9 @@
 import { LineEdit, Spinner } from "std-widgets.slint";
 import { Theme, PillButton, LinkButton, Dialog } from "theme.slint";
-import { HostCard, AppCard, HostsPage, AppsPage, SessionPage, SettingsPage } from "pages.slint";
+import { HostCard, AppCard, CommandRow, HostsPage, AppsPage, SessionPage, SettingsPage, ToolsPage } from "pages.slint";
 import { StreamView } from "stream.slint";
 
-export { HostCard, AppCard } from "pages.slint";
+export { HostCard, AppCard, CommandRow } from "pages.slint";
 
 export component AppWindow inherits Window {
     title: "Hestia";
@@ -23,7 +23,7 @@ export component AppWindow inherits Window {
         Theme.compact = self.width < 640px;
     }
 
-    // 0 = hosts, 1 = apps, 2 = session (launching / errors), 3 = settings, 4 = stream
+    // 0 = hosts, 1 = apps, 2 = session (launching / errors), 3 = settings, 4 = stream, 5 = host tools
     in-out property <int> screen: 0;
 
     // Startup (identity generation on first run)
@@ -67,6 +67,7 @@ export component AppWindow inherits Window {
     in property <[AppCard]> apps;
     in property <bool> apps-loading;
     in property <bool> app-running;
+    in property <bool> host-hermes;
     callback launch-app(int);
     callback quit-app();
     callback forget-host();
@@ -79,16 +80,41 @@ export component AppWindow inherits Window {
     in property <bool> session-busy;
     callback back-to-apps();
 
+    // Host tools (Hermes)
+    in property <bool> tools-loading;
+    in property <bool> tools-busy;
+    in property <string> tools-message;
+    in property <string> tools-display-status;
+    in property <bool> tools-display-allowed: true;
+    in property <[CommandRow]> tools-commands;
+    in property <bool> tools-commands-allowed: true;
+    in property <bool> tools-clipboard-allowed: true;
+    in-out property <string> tools-clipboard-text;
+    in property <string> tools-permissions;
+    in property <[string]> tools-diagnostics;
+    callback open-tools();
+    callback tools-refresh();
+    callback tools-recover-display();
+    callback tools-run-command(int);
+    callback tools-send-clipboard(string);
+    callback tools-fetch-clipboard();
+
     // Stream
     in property <image> stream-frame;
     in property <string> stream-stats;
     in property <string> stream-status;
     in-out property <bool> stream-show-stats: true;
     in property <bool> stream-fullscreen;
+    in property <bool> stream-trackpad: true;
+    in-out property <bool> stream-keyboard-open: false;
     callback stream-key(string, bool, bool, bool, bool, bool, bool);
-    callback stream-pointer(float, float, float, float);
-    callback stream-button(int, bool);
+    callback stream-pointer(int, int, float, float, float, float, bool);
     callback stream-scroll(float, float);
+    callback stream-text-edited(string);
+    callback stream-text-enter();
+    callback stream-special-key(string);
+    callback stream-toggle-trackpad();
+    callback stream-request-keyframe();
     callback stream-toggle-fullscreen();
     callback stream-disconnect();
     callback stream-quit();
@@ -127,6 +153,10 @@ export component AppWindow inherits Window {
         }
         if (root.screen == 3) {
             root.screen = root.settings-return;
+            return true;
+        }
+        if (root.screen == 5) {
+            root.screen = 1;
             return true;
         }
         if (root.screen == 2) {
@@ -197,6 +227,10 @@ export component AppWindow inherits Window {
         apps: root.apps;
         loading: root.apps-loading;
         app-running: root.app-running;
+        hermes: root.host-hermes;
+        tools => {
+            root.open-tools();
+        }
         back => {
             root.back-to-hosts();
         }
@@ -234,17 +268,31 @@ export component AppWindow inherits Window {
         status: root.stream-status;
         show-stats: root.stream-show-stats;
         fullscreen: root.stream-fullscreen;
+        trackpad: root.stream-trackpad;
+        keyboard-open <=> root.stream-keyboard-open;
         key-event(text, pressed, repeat, ctrl, alt, shift, meta) => {
             root.stream-key(text, pressed, repeat, ctrl, alt, shift, meta);
         }
-        pointer-moved(x, y, w, h) => {
-            root.stream-pointer(x, y, w, h);
-        }
-        pointer-button(button, pressed) => {
-            root.stream-button(button, pressed);
+        pointer(kind, button, x, y, w, h, touch) => {
+            root.stream-pointer(kind, button, x, y, w, h, touch);
         }
         scrolled(dx, dy) => {
             root.stream-scroll(dx, dy);
+        }
+        text-edited(text) => {
+            root.stream-text-edited(text);
+        }
+        text-enter => {
+            root.stream-text-enter();
+        }
+        special-key(name) => {
+            root.stream-special-key(name);
+        }
+        toggle-trackpad => {
+            root.stream-toggle-trackpad();
+        }
+        request-keyframe => {
+            root.stream-request-keyframe();
         }
         toggle-stats => {
             root.stream-show-stats = !root.stream-show-stats;
@@ -257,6 +305,41 @@ export component AppWindow inherits Window {
         }
         quit-app => {
             root.stream-quit();
+        }
+    }
+
+    if root.screen == 5: ToolsPage {
+        width: 100%;
+        height: 100%;
+        host-name: root.host-name;
+        loading: root.tools-loading;
+        busy: root.tools-busy;
+        message: root.tools-message;
+        display-status: root.tools-display-status;
+        display-allowed: root.tools-display-allowed;
+        commands: root.tools-commands;
+        commands-allowed: root.tools-commands-allowed;
+        clipboard-allowed: root.tools-clipboard-allowed;
+        clipboard-text <=> root.tools-clipboard-text;
+        permissions: root.tools-permissions;
+        diagnostics: root.tools-diagnostics;
+        back => {
+            root.screen = 1;
+        }
+        refresh => {
+            root.tools-refresh();
+        }
+        recover-display => {
+            root.tools-recover-display();
+        }
+        run-command(id) => {
+            root.tools-run-command(id);
+        }
+        send-clipboard(text) => {
+            root.tools-send-clipboard(text);
+        }
+        fetch-clipboard => {
+            root.tools-fetch-clipboard();
         }
     }
 
