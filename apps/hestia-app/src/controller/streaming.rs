@@ -1,16 +1,16 @@
-//! The stream screen: runs a [`StreamSession`] after a launch, shows decoded
+//! The stream screen: runs a [`ManagedStream`] after a launch, shows decoded
 //! frames and forwards keyboard, mouse and touch input to the host.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use hestia_core::LaunchedSession;
 use hestia_core::diagnosis::{self, Bottleneck, SpikeHistory};
 use hestia_core::report::StatsSample;
 use hestia_core::stream::input::{Modifiers, MouseButton};
-use hestia_core::stream::{InputEvent, SessionListener, StreamEvent, StreamSession, StreamStats};
-use hestia_media::{Colorimetry, DecodeStats, DecodingSink, FramePresenter, RgbaFrame};
+use hestia_core::stream::{InputEvent, SessionListener, StreamEvent, StreamStats};
+use hestia_core::{LaunchedSession, ManagedStream, StreamHost};
+use hestia_media::{DecodeStats, DecoderChoice, DecodingSink, FramePresenter, LatencyHistogram, RgbaFrame};
 use log::{info, warn};
 use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer, SharedString};
 
@@ -27,7 +27,7 @@ const TRACKPAD_SPEED: f32 = 1.4;
 
 pub(super) struct ActiveStream {
     generation: u64,
-    session: StreamSession,
+    session: ManagedStream,
     host_id: String,
     /// Stream resolution, for trackpad scaling.
     width: u32,
@@ -38,6 +38,7 @@ pub(super) struct ActiveStream {
     fingers: touch::FingerTaps,
     report: SharedReport,
     decode: Arc<DecodeStats>,
+    present: Arc<PresentStats>,
 }
 
 impl ActiveStream {
@@ -55,52 +56,71 @@ fn trackpad_events(outputs: Vec<touch::Output>) -> impl Iterator<Item = InputEve
     })
 }
 
-/// Hands decoded pictures to the UI thread. Only the newest picture is kept:
-/// if the UI is still busy with the previous one, it is replaced, so a slow
-/// renderer drops frames instead of building up latency.
-/// What the screen actually showed: decoded pictures that reached the
-/// window, and those replaced by a newer one before the UI drew them.
+/// Counts the handoff to Slint, where physical presentation is not observed.
 #[derive(Default)]
 struct PresentStats {
-    presented: std::sync::atomic::AtomicU64,
-    superseded: std::sync::atomic::AtomicU64,
+    delivered: AtomicU64,
+    superseded: AtomicU64,
+    closed: AtomicBool,
+    handoff: LatencyHistogram,
+    receive_to_ui: LatencyHistogram,
+}
+
+#[derive(Default)]
+struct PendingPicture {
+    latest: Option<RgbaFrame>,
+    spare: Option<RgbaFrame>,
+    scheduled: bool,
 }
 
 struct UiPresenter {
     weak: slint::Weak<AppWindow>,
-    slot: Arc<Mutex<Option<SharedPixelBuffer<Rgba8Pixel>>>>,
-    scheduled: Arc<AtomicBool>,
-    first: bool,
+    pending: Arc<Mutex<PendingPicture>>,
     stats: Arc<PresentStats>,
 }
 
 impl FramePresenter for UiPresenter {
-    fn present(&mut self, frame: &RgbaFrame) {
-        let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&frame.data, frame.width, frame.height);
-        if self
-            .slot
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .replace(buffer)
-            .is_some()
-        {
-            self.stats.superseded.fetch_add(1, Ordering::Relaxed);
-        }
-        let first = std::mem::take(&mut self.first);
-        if self.scheduled.swap(true, Ordering::AcqRel) && !first {
+    fn present(&mut self, frame: &mut RgbaFrame) {
+        let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+        if self.stats.closed.load(Ordering::Acquire) {
             return;
         }
-        let slot = self.slot.clone();
-        let scheduled = self.scheduled.clone();
+        let reusable = if let Some(older) = pending.latest.take() {
+            self.stats.superseded.fetch_add(1, Ordering::Relaxed);
+            older
+        } else {
+            pending.spare.take().unwrap_or_default()
+        };
+        pending.latest = Some(std::mem::replace(frame, reusable));
+        if pending.scheduled {
+            return;
+        }
+        pending.scheduled = true;
+        drop(pending);
+
+        let pending = self.pending.clone();
         let stats = self.stats.clone();
         let _ = self.weak.upgrade_in_event_loop(move |ui| {
-            scheduled.store(false, Ordering::Release);
-            if let Some(buffer) = slot.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            let frame = {
+                let mut pending = pending.lock().unwrap_or_else(|p| p.into_inner());
+                pending.scheduled = false;
+                pending.latest.take()
+            };
+            if let Some(frame) = frame
+                && !stats.closed.load(Ordering::Acquire)
+            {
+                // Copy only a frame the UI will actually hand to its renderer.
+                let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&frame.data, frame.width, frame.height);
                 ui.set_stream_frame(Image::from_rgba8(buffer));
-                stats.presented.fetch_add(1, Ordering::Relaxed);
-            }
-            if first {
-                ui.set_stream_status(SharedString::new());
+                let delivered_at = Instant::now();
+                stats.handoff.record(delivered_at.duration_since(frame.decoded_at));
+                stats
+                    .receive_to_ui
+                    .record(delivered_at.duration_since(frame.received_at));
+                if stats.delivered.fetch_add(1, Ordering::Relaxed) == 0 {
+                    ui.set_stream_status(SharedString::new());
+                }
+                pending.lock().unwrap_or_else(|p| p.into_inner()).spare = Some(frame);
             }
         });
     }
@@ -279,8 +299,6 @@ impl SessionListener for Listener {
             StreamEvent::FirstFrame => {
                 self.first_frame.store(true, Ordering::Relaxed);
                 report::lock(&self.report).first_frame();
-                self.controller
-                    .ui(|ui| ui.set_stream_status("Decoding the first frame…".into()));
             }
             StreamEvent::HdrMode(on) => {
                 info!("host HDR mode: {on}");
@@ -312,11 +330,11 @@ impl Controller {
         self: &Shared,
         host_id: String,
         launched: &LaunchedSession,
+        host: StreamHost,
+        (decoder, formats): DecoderChoice,
         session_report: SharedReport,
         launch_seq: u64,
     ) -> Result<(), String> {
-        let (decoder, formats) =
-            hestia_media::decoder_with(Colorimetry::default(), launched.settings.hardware_decoding)?;
         let config = launched.stream_config(&formats).map_err(|e| e.to_string())?;
         hestia_core::add_stream_config_to_report(&config, decoder.name(), &mut report::lock(&session_report));
         let generation = self.stream_generation.fetch_add(1, Ordering::Relaxed) + 1;
@@ -326,9 +344,7 @@ impl Controller {
             decoder,
             Box::new(UiPresenter {
                 weak,
-                slot: Arc::new(Mutex::new(None)),
-                scheduled: Arc::new(AtomicBool::new(false)),
-                first: true,
+                pending: Arc::new(Mutex::new(PendingPicture::default())),
                 stats: present.clone(),
             }),
         );
@@ -342,7 +358,7 @@ impl Controller {
             label: size.clone(),
             last: Mutex::new(None),
             report: session_report.clone(),
-            present,
+            present: present.clone(),
             target_fps: config.fps,
             spikes: Mutex::new(SpikeHistory::default()),
             host_id: host_id.clone(),
@@ -355,15 +371,24 @@ impl Controller {
             first_frame: AtomicBool::new(false),
             provenance_requested: AtomicBool::new(false),
         });
-        let session = StreamSession::start(
-            config,
-            Box::new(sink),
-            hestia_media::default_audio_sink(),
-            listener.clone(),
-        )
-        .map_err(|e| e.to_string())?;
+        self.ui(|ui| {
+            ui.set_stream_frame(Image::default());
+            ui.set_stream_status("Waiting for video…".into());
+        });
+        let session = host
+            .connect(
+                config,
+                Box::new(sink),
+                hestia_media::default_audio_sink(),
+                listener.clone(),
+            )
+            .map_err(|e| {
+                present.closed.store(true, Ordering::Release);
+                e.to_string()
+            })?;
         if !self.launch_current(launch_seq) {
-            spawn("hestia-stream-stop", move || session.stop());
+            present.closed.store(true, Ordering::Release);
+            session.stop();
             return Err("cancelled".into());
         }
         let codec = format!("{:?}", session.negotiated().video_format.codec);
@@ -381,14 +406,14 @@ impl Controller {
             fingers: touch::FingerTaps::default(),
             report: session_report,
             decode,
+            present,
         });
         if let Some(previous) = previous {
+            previous.present.closed.store(true, Ordering::Release);
             spawn("hestia-stream-stop", move || previous.session.stop());
         }
         self.ui(move |ui| {
-            ui.set_stream_frame(Image::default());
             ui.set_stream_stats(format!("{size} {codec}").into());
-            ui.set_stream_status("Waiting for video…".into());
             ui.set_screen(4);
         });
         // Landscape, no system bars, screen on (Android).
@@ -405,6 +430,7 @@ impl Controller {
             if stale { None } else { guard.take() }
         };
         let Some(active) = active else { return };
+        active.present.closed.store(true, Ordering::Release);
         let c = self.clone();
         spawn("hestia-stream-stop", move || {
             let ActiveStream {
@@ -412,27 +438,38 @@ impl Controller {
                 host_id,
                 report: session_report,
                 decode,
+                present,
                 ..
             } = active;
-            // Like Hestia desktop: let Hermes release this client's session
-            // (virtual display, Gamescope) before the GameStream teardown.
-            let hermes = c
-                .state()
-                .snapshots
-                .get(&host_id)
-                .is_some_and(|s| s.capabilities.is_some());
-            if hermes {
-                if let Some(core) = c.core() {
-                    core.end_hermes_session(&host_id);
-                }
-                report::lock(&session_report).event("Hermes session released");
-            }
             session.stop();
             {
                 let mut r = report::lock(&session_report);
                 r.field("Decoder totals", "decoded", decode.decoded.load(Ordering::Relaxed));
                 r.field("Decoder totals", "dropped", decode.dropped.load(Ordering::Relaxed));
                 r.field("Decoder totals", "errors", decode.errors.load(Ordering::Relaxed));
+                r.field(
+                    "Decoder totals",
+                    "backlog drops",
+                    decode.dropped_backlog.load(Ordering::Relaxed),
+                );
+                r.field(
+                    "Video delivery",
+                    "handed to Slint",
+                    present.delivered.load(Ordering::Relaxed),
+                );
+                r.field(
+                    "Video delivery",
+                    "replaced before handoff",
+                    present.superseded.load(Ordering::Relaxed),
+                );
+                for (stage, histogram) in decode.latency_stages().into_iter().chain([
+                    ("RGBA ready to Slint handoff", &present.handoff),
+                    ("first packet to Slint handoff", &present.receive_to_ui),
+                ]) {
+                    if let Some(summary) = histogram.summary() {
+                        r.field("Video latency", stage, summary);
+                    }
+                }
                 r.field(
                     "Decoder totals",
                     "mean decode",

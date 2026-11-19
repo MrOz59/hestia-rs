@@ -57,12 +57,25 @@ fn clamp8(v: i32) -> u8 {
 /// Pictures shorter than this convert on one thread.
 const PARALLEL_MIN_ROWS: usize = 360;
 
-/// How many horizontal bands to convert at once (one per core, up to 4).
-fn bands(height: usize) -> usize {
+fn conversion_pool(height: usize) -> Option<&'static rayon::ThreadPool> {
+    use std::sync::OnceLock;
+
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
     if height < PARALLEL_MIN_ROWS {
-        return 1;
+        return None;
     }
-    std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 4)
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(4);
+        if threads < 2 {
+            return None;
+        }
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|n| format!("hestia-color-{n}"))
+            .build()
+            .ok()
+    })
+    .as_ref()
 }
 
 /// Splits `height` rows into `n` bands of an even number of rows (so each
@@ -82,13 +95,12 @@ fn band_rows(height: usize, n: usize) -> Vec<(usize, usize)> {
 pub fn i420_to_rgba(src: &I420<'_>, colorimetry: Colorimetry, out: &mut [u8]) {
     let (w, h) = (src.width, src.height);
     assert!(out.len() >= w * h * 4, "RGBA buffer too small");
-    let n = bands(h);
-    if n <= 1 {
+    let Some(pool) = conversion_pool(h) else {
         return i420_rows(src, colorimetry, out);
-    }
-    std::thread::scope(|scope| {
+    };
+    pool.scope(|scope| {
         let mut rest = &mut out[..w * h * 4];
-        for (row, rows) in band_rows(h, n) {
+        for (row, rows) in band_rows(h, pool.current_num_threads()) {
             let (band, tail) = std::mem::take(&mut rest).split_at_mut(rows * w * 4);
             rest = tail;
             let c = (row / 2) * src.uv_stride;
@@ -99,7 +111,7 @@ pub fn i420_to_rgba(src: &I420<'_>, colorimetry: Colorimetry, out: &mut [u8]) {
                 height: rows,
                 ..*src
             };
-            scope.spawn(move || i420_rows(&sub, colorimetry, band));
+            scope.spawn(move |_| i420_rows(&sub, colorimetry, band));
         }
     });
 }
@@ -179,13 +191,12 @@ pub fn yuv420_to_rgba(src: &Yuv420<'_>, colorimetry: Colorimetry, out: &mut [u8]
     }
     let (w, h) = (src.width, src.height);
     assert!(out.len() >= w * h * 4, "RGBA buffer too small");
-    let n = bands(h);
-    if n <= 1 {
+    let Some(pool) = conversion_pool(h) else {
         return yuv420_rows(src, colorimetry, out);
-    }
-    std::thread::scope(|scope| {
+    };
+    pool.scope(|scope| {
         let mut rest = &mut out[..w * h * 4];
-        for (row, rows) in band_rows(h, n) {
+        for (row, rows) in band_rows(h, pool.current_num_threads()) {
             let (band, tail) = std::mem::take(&mut rest).split_at_mut(rows * w * 4);
             rest = tail;
             let sub = Yuv420 {
@@ -195,7 +206,7 @@ pub fn yuv420_to_rgba(src: &Yuv420<'_>, colorimetry: Colorimetry, out: &mut [u8]
                 height: rows,
                 ..*src
             };
-            scope.spawn(move || yuv420_rows(&sub, colorimetry, band));
+            scope.spawn(move |_| yuv420_rows(&sub, colorimetry, band));
         }
     });
 }

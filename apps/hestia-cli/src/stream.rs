@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use hestia_core::diagnosis;
 use hestia_core::report::{StatsSample, StreamReport};
-use hestia_core::stream::{SessionListener, StreamEvent, StreamSession, VideoCodec, VideoFormat, VideoSink};
+use hestia_core::stream::{SessionListener, StreamEvent, VideoCodec, VideoFormat, VideoSink};
 use hestia_core::{DeviceInfo, HestiaClient, logcapture};
 use hestia_media::null::{NullAudioSink, NullVideoSink};
 use hestia_media::{Colorimetry, DecodeStats, DecodingSink, RgbaFrame, dump::DumpVideoSink};
@@ -93,7 +93,8 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
     let mut decode_stats: Option<Arc<DecodeStats>> = None;
     let (formats, video_sink): (Vec<VideoFormat>, Box<dyn VideoSink>) = match opts.mode {
         VideoMode::Decode => {
-            let (decoder, formats) = hestia_media::default_decoder(Colorimetry::default())?;
+            let (decoder, formats) =
+                hestia_media::decoder_with(Colorimetry::default(), opts.settings.hardware_decoding)?;
             let snapshot = opts.snapshot.clone();
             let started = Instant::now();
             let mut saved = false;
@@ -120,6 +121,7 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
     };
 
     let launched = client.launch_with(host_id, app.id, &DeviceInfo::default(), opts.settings.clone())?;
+    let host = client.stream_host(&launched);
     let mut report = StreamReport::new(format!("{} on {}", app.title, launched.host.name), log_mark);
     report.field("Client", "version", format!("hestia CLI {}", env!("CARGO_PKG_VERSION")));
     report.field(
@@ -155,7 +157,7 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
 
     let fps = config.fps;
     let (tx, rx) = mpsc::channel();
-    let session = StreamSession::start(
+    let session = host.connect(
         config,
         video_sink,
         if opts.play_audio {
@@ -306,6 +308,16 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
         report.field("Decoder totals", "decoded", d.decoded.load(Ordering::Relaxed));
         report.field("Decoder totals", "dropped", d.dropped.load(Ordering::Relaxed));
         report.field("Decoder totals", "errors", d.errors.load(Ordering::Relaxed));
+        report.field(
+            "Decoder totals",
+            "backlog drops",
+            d.dropped_backlog.load(Ordering::Relaxed),
+        );
+        for (stage, histogram) in d.latency_stages() {
+            if let Some(summary) = histogram.summary() {
+                report.field("Video latency", stage, summary);
+            }
+        }
         report.field("Decoder totals", "mean decode", format!("{:.2} ms", d.mean_decode_ms()));
     }
     let ending = match &outcome {

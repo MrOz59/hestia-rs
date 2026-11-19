@@ -691,6 +691,9 @@ impl Controller {
 
         let seq = {
             let mut st = self.state();
+            if st.launching.is_some() {
+                return;
+            }
             st.launch_seq += 1;
             st.launching = Some((st.launch_seq, id.clone()));
             st.launch_seq
@@ -718,16 +721,26 @@ impl Controller {
                 let Some(core) = c.core() else { return };
                 let session_report = report::begin(&title, &host_name, &device);
                 let failure: String;
-                let launched = core.launch(&id, app_id, &device);
+                let settings = core.settings();
+                let decoder =
+                    hestia_media::decoder_with(hestia_media::Colorimetry::default(), settings.hardware_decoding);
+                let launched = decoder.and_then(|decoder| {
+                    if !c.launch_current(seq) {
+                        return Err("cancelled".into());
+                    }
+                    core.launch_with(&id, app_id, &device, settings.clone())
+                        .map(|session| (core.stream_host(&session), session, decoder))
+                        .map_err(|error| error.to_string())
+                });
                 if !c.launch_current(seq) {
-                    // Cancelled while the host was starting the app: undo
-                    // Hermes' display changes (the app itself keeps running).
-                    core.end_hermes_session(&id);
+                    // Release the preparation before another attempt can start.
+                    drop(launched);
+                    c.finish_launch(seq);
                     c.finish_report(session_report, "cancelled while starting", Some(id.clone()));
                     return;
                 }
                 let text: Vec<String> = match launched {
-                    Ok(session) => {
+                    Ok((host, session, decoder)) => {
                         report::launched(&session_report, &session);
                         if let Some(why) = &session.prepare_error {
                             c.toast(format!(
@@ -735,7 +748,7 @@ impl Controller {
                             ));
                         }
                         c.ui(|ui| ui.set_session_lines(lines(&["Connecting to the stream…"])));
-                        match c.start_stream(id.clone(), &session, session_report.clone(), seq) {
+                        match c.start_stream(id.clone(), &session, host, decoder, session_report.clone(), seq) {
                             Ok(()) => {
                                 c.finish_launch(seq);
                                 c.ui(|ui| ui.set_session_busy(false));
@@ -743,14 +756,11 @@ impl Controller {
                                 return;
                             }
                             Err(_) if !c.launch_current(seq) => {
-                                core.end_hermes_session(&id);
+                                c.finish_launch(seq);
                                 c.finish_report(session_report, "cancelled while connecting", Some(id.clone()));
                                 return;
                             }
                             Err(e) => {
-                                // Give the host its display back (Hermes
-                                // turned the monitor off for this session).
-                                core.end_hermes_session(&id);
                                 failure = format!("the stream could not start: {e}");
                                 let mut out = vec![format!(
                                     "{} on {}, but the stream could not start: {e}",
@@ -776,12 +786,11 @@ impl Controller {
                         }
                     }
                     Err(e) => {
-                        report::settings(&session_report, &core.settings());
+                        report::settings(&session_report, &settings);
                         session_report
                             .lock()
                             .unwrap_or_else(|p| p.into_inner())
                             .field("Host", "address", &address);
-                        core.end_hermes_session(&id);
                         failure = format!("could not start the app: {e}");
                         vec![format!("Could not start the app: {e}")]
                     }
@@ -802,7 +811,8 @@ impl Controller {
     }
 
     fn launch_current(&self, seq: u64) -> bool {
-        self.state().launching.as_ref().is_some_and(|(s, _)| *s == seq)
+        let state = self.state();
+        state.launch_seq == seq && state.launching.as_ref().is_some_and(|(s, _)| *s == seq)
     }
 
     fn finish_launch(&self, seq: u64) {
@@ -815,21 +825,23 @@ impl Controller {
     /// Cancels the launch in progress, if any: back to the apps right away;
     /// the launch thread backs out and Hermes gets its display back.
     fn cancel_launch(self: &Shared) -> bool {
-        let Some((_, id)) = self.state().launching.take() else {
-            return false;
-        };
+        {
+            let mut state = self.state();
+            if !state
+                .launching
+                .as_ref()
+                .is_some_and(|(seq, _)| *seq == state.launch_seq)
+            {
+                return false;
+            }
+            state.launch_seq += 1;
+        }
         info!("launch cancelled by the user");
         self.ui(|ui| {
             ui.set_session_busy(false);
             ui.set_screen(1);
         });
         self.toast("Cancelled. If the app already started on the host, quit it from the app list.");
-        let c = self.clone();
-        spawn("hestia-launch-cancel", move || {
-            if let Some(core) = c.core() {
-                core.end_hermes_session(&id);
-            }
-        });
         true
     }
 

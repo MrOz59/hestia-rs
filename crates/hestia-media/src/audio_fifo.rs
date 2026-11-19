@@ -7,7 +7,7 @@
 //! before playing again.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Mutex, TryLockError};
 
 /// Target and maximum buffered audio.
 pub const TARGET_LATENCY_MS: usize = 30;
@@ -28,7 +28,14 @@ pub fn lock(fifo: &Mutex<Fifo>) -> std::sync::MutexGuard<'_, Fifo> {
 
 /// Fills `out` (interleaved, `channels` per frame) from the stereo FIFO.
 pub fn fill<T: Copy>(fifo: &Mutex<Fifo>, out: &mut [T], channels: usize, convert: impl Fn(f32) -> T, silence: T) {
-    let mut f = lock(fifo);
+    let mut f = match fifo.try_lock() {
+        Ok(fifo) => fifo,
+        Err(TryLockError::Poisoned(error)) => error.into_inner(),
+        Err(TryLockError::WouldBlock) => {
+            out.fill(silence);
+            return;
+        }
+    };
     let target = TARGET_LATENCY_MS * SAMPLE_RATE as usize / 1000 * CHANNELS;
     if f.priming && f.samples.len() < target {
         out.fill(silence);
@@ -125,6 +132,15 @@ mod tests {
         let mut mono = [1.0f32; 2];
         fill(&fifo, &mut mono, 1, |s| s, 0.0);
         assert_eq!(mono, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn callback_does_not_wait_for_a_busy_producer() {
+        let fifo = Mutex::new(Fifo::new());
+        let _producer = lock(&fifo);
+        let mut out = [1.0f32; 4];
+        fill(&fifo, &mut out, 2, |sample| sample, 0.0);
+        assert_eq!(out, [0.0; 4]);
     }
 
     #[test]

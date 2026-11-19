@@ -7,6 +7,7 @@
 //! same. Low-latency keys (standard and vendor ones, as Moonlight sets)
 //! keep the codec from holding frames back.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use hestia_stream::sink::VideoCodec;
@@ -19,7 +20,7 @@ use ndk::media::media_format::MediaFormat;
 use ndk::native_window::NativeWindow;
 
 use crate::color::{Colorimetry, Yuv420, yuv420_to_rgba};
-use crate::decode::{FrameDecoder, RgbaFrame};
+use crate::decode::{FrameDecoder, FrameTiming, RgbaFrame};
 use crate::{EncodedFrame, VideoFormat};
 
 /// How long a call waits for an input buffer, and for its picture.
@@ -27,6 +28,7 @@ const INPUT_WAIT: Duration = Duration::from_millis(20);
 const OUTPUT_WAIT: Duration = Duration::from_millis(12);
 /// Rendering to the image reader is asynchronous; wait this long for it.
 const IMAGE_WAIT: Duration = Duration::from_millis(20);
+const MAX_PENDING_FRAMES: usize = 32;
 
 fn mime(codec: VideoCodec) -> Option<&'static str> {
     match codec {
@@ -48,6 +50,7 @@ struct Running {
     height: i32,
     pts_us: u64,
     frame_us: u64,
+    pending: VecDeque<(u64, FrameTiming)>,
 }
 
 // SAFETY: see the type's documentation.
@@ -71,13 +74,13 @@ pub struct MediaCodecDecoder {
 }
 
 impl MediaCodecDecoder {
-    /// A decoder if this device has a hardware H.264 or HEVC decoder.
+    /// Checks which formats have a MediaCodec decoder registered.
     pub fn probe(colorimetry: Colorimetry) -> Option<Self> {
         let h264 = MediaCodec::from_decoder_type("video/avc").is_some();
         let hevc = MediaCodec::from_decoder_type("video/hevc").is_some();
         let av1 = MediaCodec::from_decoder_type("video/av01").is_some();
         info!("MediaCodec decoders: H.264 {h264}, HEVC {hevc}, AV1 {av1}");
-        (h264 || hevc).then_some(Self {
+        (h264 || hevc || av1).then_some(Self {
             colorimetry,
             h264,
             hevc,
@@ -148,14 +151,15 @@ impl MediaCodecDecoder {
             width: w,
             height: h,
             pts_us: 0,
-            frame_us: 1_000_000 / u64::from(fps.max(1)),
+            frame_us: (1_000_000 / u64::from(fps.max(1))).max(1),
+            pending: VecDeque::with_capacity(MAX_PENDING_FRAMES),
         })
     }
 }
 
 impl Running {
     /// Queues one access unit; false when the codec had no free input buffer.
-    fn feed(&mut self, data: &[u8]) -> Result<bool, String> {
+    fn feed(&mut self, data: &[u8], timing: FrameTiming) -> Result<bool, String> {
         let mut input = match self.codec.dequeue_input_buffer(INPUT_WAIT) {
             Ok(DequeuedInputBufferResult::Buffer(b)) => b,
             Ok(DequeuedInputBufferResult::TryAgainLater) => return Ok(false),
@@ -172,6 +176,10 @@ impl Running {
         self.codec
             .queue_input_buffer(input, 0, data.len(), self.pts_us, 0)
             .map_err(|e| format!("queue input: {e:?}"))?;
+        if self.pending.len() == MAX_PENDING_FRAMES {
+            self.pending.pop_front();
+        }
+        self.pending.push_back((self.pts_us, timing));
         Ok(true)
     }
 
@@ -182,8 +190,12 @@ impl Running {
         loop {
             match self.codec.dequeue_output_buffer(timeout) {
                 Ok(DequeuedOutputBufferInfoResult::Buffer(buffer)) => {
+                    let pts = buffer.info().presentation_time_us() as u64;
+                    if let Some((_, timing)) = self.pending.iter_mut().find(|(time, _)| *time == pts) {
+                        timing.codec_output_at = Instant::now();
+                    }
                     self.codec
-                        .release_output_buffer(buffer, true)
+                        .release_output_buffer_at_time(buffer, (pts * 1_000) as i64)
                         .map_err(|e| format!("release output: {e:?}"))?;
                     rendered = true;
                     timeout = Duration::ZERO;
@@ -291,26 +303,67 @@ impl FrameDecoder for MediaCodecDecoder {
     }
 
     fn decode(&mut self, frame: &EncodedFrame, out: &mut RgbaFrame) -> Result<bool, String> {
+        let now = Instant::now();
+        self.decode_timed(frame, out, FrameTiming::new(frame, now, now))
+            .map(|t| t.is_some())
+    }
+
+    fn reset(&mut self) -> Result<(), String> {
         #[cfg(feature = "openh264")]
         if let Some(software) = &mut self.fallback {
-            return software.decode(frame, out);
+            return software.reset();
+        }
+        let running = self.running.as_mut().ok_or("decoder not configured")?;
+        running.codec.flush().map_err(|e| format!("flush decoder: {e:?}"))?;
+        // Keep timestamps monotonic across resets so an image already handed
+        // to the reader cannot be mistaken for an output from the new IDR.
+        running.pending.clear();
+        Ok(())
+    }
+
+    fn decode_timed(
+        &mut self,
+        frame: &EncodedFrame,
+        out: &mut RgbaFrame,
+        timing: FrameTiming,
+    ) -> Result<Option<FrameTiming>, String> {
+        #[cfg(feature = "openh264")]
+        if let Some(software) = &mut self.fallback {
+            return software.decode_timed(frame, out, timing);
         }
         let colorimetry = self.colorimetry;
         let running = self.running.as_mut().ok_or("decoder not configured")?;
-        if !running.feed(&frame.data)? {
+        let mut rendered = false;
+        if !running.feed(&frame.data, timing)? {
             // Input full: collect what's done, then try once more.
-            running.drain(Duration::ZERO)?;
-            if !running.feed(&frame.data)? {
+            rendered = running.drain(Duration::ZERO)?;
+            if !running.feed(&frame.data, timing)? {
                 return Err("decoder input is full".into());
             }
         }
-        if !running.drain(OUTPUT_WAIT)? {
-            return Ok(false);
-        }
-        let Some(image) = running.latest_image()? else {
-            return Ok(false);
+        rendered |= running.drain(if rendered { Duration::ZERO } else { OUTPUT_WAIT })?;
+        let image = if rendered {
+            running.latest_image()?
+        } else {
+            match running.reader.acquire_latest_image() {
+                Ok(AcquireResult::Image(image)) => Some(image),
+                Ok(_) => None,
+                Err(e) => return Err(format!("acquire image: {e:?}")),
+            }
+        };
+        let Some(image) = image else {
+            return Ok(None);
+        };
+        let pts = image.timestamp().map_err(|e| format!("image timestamp: {e:?}"))? / 1_000;
+        let Some(index) = running.pending.iter().position(|(at, _)| *at == pts as u64) else {
+            return Ok(None);
+        };
+        // Keep unmatched input timings until their output arrives or the
+        // bounded PTS history expires them.
+        let Some((_, timing)) = running.pending.remove(index) else {
+            return Ok(None);
         };
         convert(&image, colorimetry, (running.width, running.height), out)?;
-        Ok(true)
+        Ok(Some(timing))
     }
 }

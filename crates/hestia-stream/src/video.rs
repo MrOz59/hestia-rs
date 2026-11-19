@@ -35,6 +35,8 @@ pub const FLAG_SOF: u8 = 0x4;
 
 const PING_INTERVAL: Duration = Duration::from_millis(500);
 const FIRST_DATA_TIMEOUT: Duration = Duration::from_secs(10);
+const REORDER_WINDOW: Duration = Duration::from_millis(6);
+const MAX_FRAME_LOOKAHEAD: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PacketInfo {
@@ -90,6 +92,7 @@ pub struct AssembledFrame {
     pub data: Vec<u8>,
     pub keyframe: bool,
     pub host_latency_100us: u16,
+    pub received_at: Instant,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -104,26 +107,65 @@ struct Block {
     lowest_seq: u16,
     data_shards: usize,
     parity_shards: usize,
-    last_block: u8,
     shards: Vec<Option<Vec<u8>>>,
     received: usize,
     received_data: usize,
 }
 
-struct FrameState {
-    frame: u32,
-    /// Payload shards of completed FEC blocks, in order.
-    payloads: Vec<Vec<u8>>,
-    blocks_done: u8,
-    block: Option<Block>,
+impl Block {
+    fn new(info: PacketInfo) -> Self {
+        let data_shards = usize::from(info.data_shards);
+        let parity_shards = usize::from(info.parity_shards());
+        Self {
+            lowest_seq: info.seq.wrapping_sub(info.fec_index),
+            data_shards,
+            parity_shards,
+            shards: vec![None; data_shards + parity_shards],
+            received: 0,
+            received_data: 0,
+        }
+    }
+
+    fn complete(&self) -> bool {
+        self.received >= self.data_shards
+    }
+
+    fn add(&mut self, info: PacketInfo, packet: &[u8], shard_len: usize) -> Result<usize, fec::FecError> {
+        let index = usize::from(info.seq.wrapping_sub(self.lowest_seq));
+        if self.complete() || index >= self.shards.len() || self.shards[index].is_some() {
+            return Ok(0);
+        }
+        let mut shard = Vec::with_capacity(shard_len);
+        shard.extend_from_slice(packet);
+        shard.resize(shard_len, 0);
+        self.shards[index] = Some(shard);
+        self.received += 1;
+        if index < self.data_shards {
+            self.received_data += 1;
+        }
+        if !self.complete() || self.received_data == self.data_shards {
+            return Ok(0);
+        }
+        fec::reconstruct(&mut self.shards, self.data_shards, self.parity_shards, shard_len)?;
+        Ok(self.data_shards - self.received_data)
+    }
 }
 
-/// Reassembles frames from shards. Pure logic, no I/O.
+struct FrameState {
+    number: u32,
+    received_at: Instant,
+    blocks: [Option<Block>; 4],
+    last_block: usize,
+    result: Option<Option<AssembledFrame>>,
+}
+
+/// Reassembles frames from shards. Pure logic, no I/O. Newer frames may finish
+/// first but are emitted in sequence while the preceding frame can still arrive.
 pub struct FrameAssembler {
     shard_len: usize,
     codec: VideoCodec,
     next_frame: Option<u32>,
-    current: Option<FrameState>,
+    pending: Vec<FrameState>,
     waiting_for_idr: bool,
     pub stats: AssemblerStats,
 }
@@ -142,7 +184,7 @@ impl FrameAssembler {
             shard_len: packet_size as usize + MAX_RTP_HEADER_LEN,
             codec,
             next_frame: None,
-            current: None,
+            pending: Vec::with_capacity(MAX_FRAME_LOOKAHEAD as usize + 2),
             waiting_for_idr: true,
             stats: AssemblerStats::default(),
         }
@@ -152,151 +194,153 @@ impl FrameAssembler {
         self.shard_len
     }
 
-    /// Drops the frame in progress and skips everything up to the next
-    /// keyframe (the decoder lost its references). Statistics are kept.
+    /// Suppresses delta frames until the decoder has a fresh reference.
     pub fn wait_for_keyframe(&mut self) {
-        self.current = None;
         self.waiting_for_idr = true;
     }
 
-    fn lose(&mut self, out: &mut Vec<AssemblerOutput>, frame: u32) {
-        self.stats.lost_frames += 1;
-        self.current = None;
-        self.next_frame = Some(frame.wrapping_add(1));
-        if !self.waiting_for_idr {
-            self.waiting_for_idr = true;
-        }
-        out.push(AssemblerOutput::NeedIdr);
+    pub fn add(&mut self, packet: &[u8]) -> Vec<AssemblerOutput> {
+        self.add_at(packet, Instant::now())
     }
 
-    pub fn add(&mut self, packet: &[u8]) -> Vec<AssemblerOutput> {
-        let mut out = Vec::new();
+    fn add_at(&mut self, packet: &[u8], now: Instant) -> Vec<AssemblerOutput> {
+        let mut out = self.expire(now);
         let Some(info) = parse_packet(packet) else {
             return out;
         };
-        if let Some(next) = self.next_frame
-            && frame_before(info.frame, next)
+        let total_shards = usize::from(info.data_shards) + usize::from(info.parity_shards());
+        if info.data_shards == 0
+            || total_shards > fec::MAX_SHARDS
+            || usize::from(info.fec_index) >= total_shards
+            || info.block > info.last_block
+            || packet.len() > self.shard_len
         {
-            return out; // late shard of a finished or abandoned frame
-        }
-        if info.data_shards == 0 {
             return out;
         }
 
-        // A packet for a newer frame means the current one can't complete.
-        if let Some(cur) = &self.current
-            && cur.frame != info.frame
-        {
-            let lost = cur.frame;
-            self.lose(&mut out, lost);
+        let next = *self.next_frame.get_or_insert(info.frame);
+        if frame_before(info.frame, next) {
+            return out;
         }
-        if self.current.is_none() {
-            if let Some(next) = self.next_frame
-                && info.frame != next
-            {
-                // Whole frames went missing.
-                self.stats.lost_frames += info.frame.wrapping_sub(next) as u64;
-                self.waiting_for_idr = true;
-                if !out.contains(&AssemblerOutput::NeedIdr) {
-                    out.push(AssemblerOutput::NeedIdr);
-                }
-            }
-            self.current = Some(FrameState {
-                frame: info.frame,
-                payloads: Vec::new(),
-                blocks_done: 0,
-                block: None,
+        let index = self
+            .pending
+            .binary_search_by_key(&info.frame.wrapping_sub(next), |f| f.number.wrapping_sub(next))
+            .unwrap_or_else(|index| {
+                self.pending.insert(
+                    index,
+                    FrameState {
+                        number: info.frame,
+                        received_at: now,
+                        blocks: Default::default(),
+                        last_block: usize::from(info.last_block),
+                        result: None,
+                    },
+                );
+                index
             });
-        }
-
-        let shard_len = self.shard_len;
-        let cur = self.current.as_mut().expect("current frame set above");
-        if info.block < cur.blocks_done {
-            return out; // extra parity for a block we already finished
-        }
-        if info.block > cur.blocks_done && cur.block.is_none() {
-            // We missed an entire FEC block.
-            let lost = cur.frame;
-            self.lose(&mut out, lost);
-            return out;
-        }
-        if cur.block.is_none() {
-            let data_shards = info.data_shards as usize;
-            let parity_shards = info.parity_shards() as usize;
-            if data_shards + parity_shards > fec::MAX_SHARDS {
-                let lost = cur.frame;
-                self.lose(&mut out, lost);
-                return out;
-            }
-            cur.block = Some(Block {
-                lowest_seq: info.seq.wrapping_sub(info.fec_index),
-                data_shards,
-                parity_shards,
-                last_block: info.last_block,
-                shards: vec![None; data_shards + parity_shards],
-                received: 0,
-                received_data: 0,
-            });
-        }
-        let block = cur.block.as_mut().expect("block set above");
-        let index = info.seq.wrapping_sub(block.lowest_seq) as usize;
-        if index >= block.shards.len() || block.shards[index].is_some() {
-            return out;
-        }
-        let mut shard = packet.to_vec();
-        shard.resize(shard_len, 0);
-        block.shards[index] = Some(shard);
-        block.received += 1;
-        if index < block.data_shards {
-            block.received_data += 1;
-        }
-        if block.received < block.data_shards {
-            return out;
-        }
-
-        // Enough shards: recover what's missing and take the payloads.
-        let recovered = block.data_shards - block.received_data;
-        if recovered > 0 {
-            if fec::reconstruct(&mut block.shards, block.data_shards, block.parity_shards, shard_len).is_err() {
-                let lost = cur.frame;
-                self.lose(&mut out, lost);
-                return out;
-            }
-            self.stats.recovered_packets += recovered as u64;
-        }
-        let block = cur.block.take().expect("block present");
-        let last_block = block.last_block;
-        for shard in block.shards.into_iter().take(block.data_shards) {
-            let shard = shard.unwrap_or_default();
-            cur.payloads
-                .push(shard.get(SHARD_HEADER_LEN..).unwrap_or_default().to_vec());
-        }
-        cur.blocks_done += 1;
-        if cur.blocks_done <= last_block {
-            return out; // more blocks to come
-        }
-
-        let state = self.current.take().expect("frame present");
-        self.next_frame = Some(state.frame.wrapping_add(1));
-        match depacketize(state.frame, &state.payloads, self.codec) {
-            Some(frame) => {
-                if self.waiting_for_idr && !frame.keyframe {
-                    self.stats.dropped_waiting_idr += 1;
-                } else {
-                    self.waiting_for_idr = false;
-                    self.stats.frames += 1;
-                    out.push(AssemblerOutput::Frame(frame));
+        let frame = &mut self.pending[index];
+        if frame.result.is_none() && frame.last_block == usize::from(info.last_block) {
+            let block = frame.blocks[usize::from(info.block)].get_or_insert_with(|| Block::new(info));
+            match block.add(info, packet, self.shard_len) {
+                Ok(recovered) => {
+                    self.stats.recovered_packets += recovered as u64;
+                    if frame.blocks[..=frame.last_block]
+                        .iter()
+                        .all(|b| b.as_ref().is_some_and(Block::complete))
+                    {
+                        let payloads: Vec<_> = frame
+                            .blocks
+                            .iter()
+                            .flatten()
+                            .flat_map(|block| block.shards[..block.data_shards].iter().flatten())
+                            .map(|shard| &shard[SHARD_HEADER_LEN..])
+                            .collect();
+                        frame.result = Some(depacketize_at(frame.number, &payloads, self.codec, frame.received_at));
+                        frame.blocks = Default::default();
+                    }
                 }
+                Err(_) => frame.result = Some(None),
             }
-            None => self.lose(&mut out, state.frame),
         }
+
+        self.drain(now, &mut out);
         out
+    }
+
+    fn expire(&mut self, now: Instant) -> Vec<AssemblerOutput> {
+        let mut out = Vec::new();
+        self.drain(now, &mut out);
+        out
+    }
+
+    fn drain(&mut self, now: Instant, out: &mut Vec<AssemblerOutput>) {
+        while let Some(first) = self.pending.first_mut() {
+            let next = self.next_frame.expect("buffered frames have a sequence start");
+            let number = first.number;
+            if number == next
+                && let Some(result) = first.result.take()
+            {
+                self.pending.remove(0);
+                self.next_frame = Some(next.wrapping_add(1));
+                match result {
+                    Some(frame) if !self.waiting_for_idr || frame.keyframe => {
+                        self.waiting_for_idr = false;
+                        self.stats.frames += 1;
+                        out.push(AssemblerOutput::Frame(frame));
+                    }
+                    Some(_) => self.stats.dropped_waiting_idr += 1,
+                    None => self.mark_lost(1, out),
+                }
+                continue;
+            }
+
+            // Evidence of a newer frame starts the deadline. A slow sender
+            // alone is never treated as packet loss.
+            let future_index = if number == next { 1 } else { 0 };
+            let Some(future) = self.pending.get(future_index..) else {
+                break;
+            };
+            let Some(oldest_arrival) = future.iter().map(|frame| frame.received_at).min() else {
+                break;
+            };
+            let newest = self.pending.last().expect("we have at least one future frame");
+            if newest.number.wrapping_sub(next) <= MAX_FRAME_LOOKAHEAD
+                && now.saturating_duration_since(oldest_arrival) < REORDER_WINDOW
+            {
+                break;
+            }
+            let skipped = if number == next {
+                self.pending.remove(0);
+                1
+            } else {
+                number.wrapping_sub(next)
+            };
+            self.next_frame = Some(next.wrapping_add(skipped));
+            self.mark_lost(skipped, out);
+        }
+    }
+
+    fn mark_lost(&mut self, count: u32, out: &mut Vec<AssemblerOutput>) {
+        self.stats.lost_frames += u64::from(count);
+        self.waiting_for_idr = true;
+        if !matches!(out.last(), Some(AssemblerOutput::NeedIdr)) {
+            out.push(AssemblerOutput::NeedIdr);
+        }
     }
 }
 
 /// Joins shard payloads into an access unit and strips the frame header.
 pub fn depacketize(frame: u32, payloads: &[Vec<u8>], codec: VideoCodec) -> Option<AssembledFrame> {
-    let first = payloads.first()?;
+    depacketize_at(frame, payloads, codec, Instant::now())
+}
+
+fn depacketize_at(
+    frame: u32,
+    payloads: &[impl AsRef<[u8]>],
+    codec: VideoCodec,
+    received_at: Instant,
+) -> Option<AssembledFrame> {
+    let first = payloads.first()?.as_ref();
     if first.len() < 8 {
         return None;
     }
@@ -306,28 +350,33 @@ pub fn depacketize(frame: u32, payloads: &[Vec<u8>], codec: VideoCodec) -> Optio
     let last_len = u16::from_le_bytes([first[4], first[5]]) as usize;
     let capacity = first.len();
 
-    let mut data: Vec<u8> = payloads.concat();
+    let total_len: usize = payloads.iter().map(|part| part.as_ref().len()).sum();
+    if total_len < header_len {
+        return None;
+    }
+    let mut data = Vec::with_capacity(total_len - header_len);
+    data.extend_from_slice(first.get(header_len..)?);
+    for part in &payloads[1..] {
+        data.extend_from_slice(part.as_ref());
+    }
     // Exact length: (packets - 1) full payloads + the last packet's length.
     if header_len == 8 && last_len > 0 && last_len <= capacity {
         let exact = (payloads.len() - 1) * capacity + last_len;
-        if exact <= data.len() && exact >= header_len {
-            data.truncate(exact);
+        if exact <= total_len && exact >= header_len {
+            data.truncate(exact - header_len);
         }
     } else if codec != VideoCodec::Av1 {
         while data.last() == Some(&0) {
             data.pop();
         }
     }
-    if data.len() < header_len {
-        return None;
-    }
-    let data = data.split_off(header_len);
     let keyframe = frame_type == 2 || is_keyframe_bitstream(&data, codec);
     Some(AssembledFrame {
         frame,
         data,
         keyframe,
         host_latency_100us: latency,
+        received_at,
     })
 }
 
@@ -492,7 +541,7 @@ impl VideoReceiver {
             Ok(got) => info!("video receive buffer: {} KiB", got / 1024),
             Err(e) => warn!("could not enlarge the video receive buffer: {e}"),
         }
-        socket.set_read_timeout(Some(Duration::from_millis(100)))?;
+        socket.set_read_timeout(Some(REORDER_WINDOW))?;
         let stop = Arc::new(AtomicBool::new(false));
         let counters = Arc::new(VideoCounters::default());
         let mut threads = Vec::new();
@@ -565,7 +614,6 @@ fn receive_loop(
     let started = Instant::now();
     let mut got_data = false;
     let mut first_frame = false;
-    let mut frame_started: Option<Instant> = None;
     let mut idr = IdrRequests::default();
 
     while !stop.load(Ordering::Relaxed) {
@@ -580,8 +628,29 @@ fn receive_loop(
             debug!("no keyframe yet; asking again");
             let _ = feedback.send(VideoFeedback::NeedIdr);
         }
-        let len = match socket.recv_from(&mut buf) {
-            Ok((len, from)) if from.ip() == cfg.remote.ip() => len,
+        let outputs = match socket.recv_from(&mut buf) {
+            Ok((len, from)) if from.ip() == cfg.remote.ip() => {
+                let received_at = Instant::now();
+                if !got_data {
+                    got_data = true;
+                    info!("first video packet after {:?}", started.elapsed());
+                }
+                counters.packets.fetch_add(1, Ordering::Relaxed);
+                counters.bytes.fetch_add(len as u64, Ordering::Relaxed);
+
+                if let Some(key) = &cfg.decrypt_key {
+                    if len < ENC_PREFIX_LEN + RTP_HEADER_LEN {
+                        continue;
+                    }
+                    let iv: [u8; 12] = buf[..12].try_into().unwrap_or_default();
+                    let Some(plain) = gcm_decrypt(key, &iv, &buf[ENC_PREFIX_LEN..len], &buf[16..32]) else {
+                        continue;
+                    };
+                    assembler.add_at(&plain, received_at)
+                } else {
+                    assembler.add_at(&buf[..len], received_at)
+                }
+            }
             Ok(_) => continue,
             Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
                 if !got_data && started.elapsed() > FIRST_DATA_TIMEOUT {
@@ -589,7 +658,7 @@ fn receive_loop(
                     let _ = feedback.send(VideoFeedback::NoVideo);
                     return;
                 }
-                continue;
+                assembler.expire(Instant::now())
             }
             // ConnectionReset: ICMP port unreachable; Interrupted: a signal
             // (Android's freezer when the app goes to the background).
@@ -599,34 +668,7 @@ fn receive_loop(
                 return;
             }
         };
-        if !got_data {
-            got_data = true;
-            info!("first video packet after {:?}", started.elapsed());
-        }
-        counters.packets.fetch_add(1, Ordering::Relaxed);
-        counters.bytes.fetch_add(len as u64, Ordering::Relaxed);
-
-        let plain;
-        let packet: &[u8] = match &cfg.decrypt_key {
-            Some(key) => {
-                if len < ENC_PREFIX_LEN + RTP_HEADER_LEN {
-                    continue;
-                }
-                let iv: [u8; 12] = buf[..12].try_into().unwrap_or_default();
-                match gcm_decrypt(key, &iv, &buf[ENC_PREFIX_LEN..len], &buf[16..32]) {
-                    Some(p) => {
-                        plain = p;
-                        &plain
-                    }
-                    None => continue,
-                }
-            }
-            None => &buf[..len],
-        };
-        if frame_started.is_none() {
-            frame_started = Some(Instant::now());
-        }
-        for output in assembler.add(packet) {
+        for output in outputs {
             match output {
                 AssemblerOutput::NeedIdr => {
                     if idr.want(Instant::now()) {
@@ -652,7 +694,7 @@ fn receive_loop(
                         frame_number: frame.frame,
                         keyframe: frame.keyframe,
                         data: frame.data,
-                        received_at: frame_started.take().unwrap_or_else(Instant::now),
+                        received_at: frame.received_at,
                         host_latency: Some(Duration::from_micros(frame.host_latency_100us as u64 * 100)),
                     };
                     if sink.submit(encoded) == SubmitResult::NeedKeyframe {
@@ -661,6 +703,7 @@ fn receive_loop(
                         if idr.want(Instant::now()) {
                             let _ = feedback.send(VideoFeedback::NeedIdr);
                         }
+                        break;
                     }
                 }
             }
@@ -812,26 +855,49 @@ mod tests {
     fn waits_for_idr_after_loss() {
         let mut asm = FrameAssembler::new(PACKET_SIZE as u32, VideoCodec::H264);
         let mut seq = 0u16;
+        let start = Instant::now();
         let mut feed = |asm: &mut FrameAssembler, frame: u32, idr: bool, drop: usize| {
             let packets = packetize(frame, &h264_frame(4000, idr), PACKET_SIZE, 20, seq, idr);
             seq = seq.wrapping_add(packets.len() as u16);
+            let now = start + Duration::from_millis(u64::from(frame) * 16);
             let mut out = Vec::new();
             for p in packets.iter().skip(drop) {
-                out.extend(asm.add(p));
+                out.extend(asm.add_at(p, now));
             }
             out
         };
-        let out = feed(&mut asm, 1, true, 0);
-        assert!(matches!(out[..], [AssemblerOutput::Frame(_)]));
-        // Frame 2 loses too much to recover.
+        assert!(matches!(feed(&mut asm, 1, true, 0)[..], [AssemblerOutput::Frame(_)]));
         assert!(feed(&mut asm, 2, false, 3).is_empty());
-        // Frame 3 arriving reveals the loss; it's a P-frame so it's dropped.
-        let out = feed(&mut asm, 3, false, 0);
+        // The newer frame is complete, but the missing frame gets a short grace period.
+        assert!(feed(&mut asm, 3, false, 0).is_empty());
+        let out = asm.expire(start + Duration::from_millis(48) + REORDER_WINDOW);
         assert_eq!(out, vec![AssemblerOutput::NeedIdr]);
+        assert_eq!(asm.stats.lost_frames, 1);
         assert_eq!(asm.stats.dropped_waiting_idr, 1);
-        // The IDR gets through again.
         let out = feed(&mut asm, 4, true, 0);
         assert!(matches!(&out[..], [AssemblerOutput::Frame(f)] if f.keyframe && f.frame == 4));
+    }
+
+    #[test]
+    fn accepts_late_frame_before_its_deadline_across_sequence_wrap() {
+        let mut asm = FrameAssembler::new(PACKET_SIZE as u32, VideoCodec::H264);
+        let start = Instant::now();
+        let older = packetize(u32::MAX, &h264_frame(4000, true), PACKET_SIZE, 20, 100, true);
+        let newer = packetize(0, &h264_frame(500, false), PACKET_SIZE, 20, 200, false);
+        assert!(asm.add_at(&older[0], start).is_empty());
+        for p in &newer {
+            assert!(asm.add_at(p, start + Duration::from_millis(1)).is_empty());
+        }
+        let mut out = Vec::new();
+        for p in &older[1..] {
+            out.extend(asm.add_at(p, start + Duration::from_millis(2)));
+        }
+        assert!(matches!(
+            &out[..],
+            [AssemblerOutput::Frame(a), AssemblerOutput::Frame(b)]
+                if a.frame == u32::MAX && a.received_at == start && b.frame == 0
+        ));
+        assert_eq!(asm.stats.lost_frames, 0);
     }
 
     #[test]
