@@ -128,7 +128,15 @@ jobs:
               echo "$lib: $("$tools/llvm-nm" -A "$libdir/$lib" 2>/dev/null | grep -c hash_memory) hash_memory symbols"
             done
             grep -rln "__hash_memory" "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/c++/v1" | head -5 || true
-            env | grep -E '^(ANDROID_NDK|NDK_HOME|CC_|CXX_|CARGO_TARGET_)' | sort
+            echo "archives referencing __hash_memory:"
+            find target/aarch64-linux-android/release -name '*.rlib' -o -name '*.a' | while read -r f; do
+              if "$tools/llvm-nm" -A "$f" 2>/dev/null | grep -q __hash_memory; then
+                echo "  $f"; "$tools/llvm-nm" -A "$f" 2>/dev/null | grep __hash_memory | head -3
+              fi
+            done
+            echo "native/C++ crates for Android:"
+            cargo tree -p hestia-app --target aarch64-linux-android --prefix none -e normal,build 2>/dev/null \
+              | grep -iE 'skia|sys|openh264|^cc |cxx|oboe' | sort -u
             find target -path '*openh264-sys2-*/output' | while read -r out; do
               echo "== $out"; grep -E "^(CXX|CXXFLAGS|CXXSTDLIB|cargo:rustc-link-lib)" "$out" | grep -v "= None" | head -20
             done
