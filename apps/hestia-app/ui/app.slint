@@ -127,10 +127,12 @@ export component AppWindow inherits Window {
     in-out property <bool> stream-keyboard-open: false;
     in property <string> stream-banner;
     callback stream-key(string, bool, bool, bool, bool, bool, bool);
-    callback stream-pointer(int, int, float, float, float, float, bool);
+    callback stream-pointer(int, int, float, float, float, float, int);
     callback stream-scroll(float, float);
-    callback stream-text-edited(string);
-    callback stream-text-enter();
+    // The on-screen keyboard was opened or closed in the stream.
+    callback stream-keyboard(bool);
+    in-out property <bool> stream-show-menu-button: true;
+    in property <bool> stream-soft-keyboard: false;
     callback stream-special-key(string);
     callback stream-toggle-trackpad();
     callback stream-request-keyframe();
@@ -159,6 +161,7 @@ export component AppWindow inherits Window {
     in-out property <bool> cfg-optimize: true;
     in-out property <bool> cfg-clipboard;
     in-out property <bool> cfg-show-report: true;
+    in-out property <bool> cfg-show-menu-button: false;
     in property <string> client-id;
     in property <string> data-dir;
     in property <string> version-text;
@@ -201,6 +204,10 @@ export component AppWindow inherits Window {
             return true;
         }
         return false;
+    }
+
+    changed stream-keyboard-open => {
+        root.stream-keyboard(root.stream-keyboard-open);
     }
 
     // The stream view and text fields take focus; give it back afterwards.
@@ -318,21 +325,17 @@ export component AppWindow inherits Window {
             trackpad: root.stream-trackpad;
             video-scale: root.stream-video-scale;
             keyboard-open <=> root.stream-keyboard-open;
+            show-menu-button: root.stream-show-menu-button;
+            soft-keyboard: root.stream-soft-keyboard;
             banner: root.stream-banner;
             key-event(text, pressed, repeat, ctrl, alt, shift, meta) => {
                 root.stream-key(text, pressed, repeat, ctrl, alt, shift, meta);
             }
-            pointer(kind, button, x, y, w, h, touch) => {
-                root.stream-pointer(kind, button, x, y, w, h, touch);
+            pointer(kind, button, x, y, w, h, finger) => {
+                root.stream-pointer(kind, button, x, y, w, h, finger);
             }
             scrolled(dx, dy) => {
                 root.stream-scroll(dx, dy);
-            }
-            text-edited(text) => {
-                root.stream-text-edited(text);
-            }
-            text-enter => {
-                root.stream-text-enter();
             }
             special-key(name) => {
                 root.stream-special-key(name);
@@ -450,6 +453,7 @@ export component AppWindow inherits Window {
             data-dir: root.data-dir;
             version: root.version-text;
             show-report <=> root.cfg-show-report;
+        show-menu-button <=> root.cfg-show-menu-button;
             open-last-report => {
                 root.open-last-report();
             }

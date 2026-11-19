@@ -184,6 +184,67 @@ impl Trackpad {
     }
 }
 
+/// A multi-finger tap ends within this time.
+pub const MULTI_TAP_TIME: Duration = Duration::from_millis(350);
+
+/// Recognizes taps with several fingers (as Moonlight/Artemis do: two
+/// fingers right-click, three toggle the keyboard). Fed every touch point
+/// by id; [`FingerTaps::up`] reports the tap when the last finger lifts.
+#[derive(Debug, Default)]
+pub struct FingerTaps {
+    /// Fingers down: id and where each started.
+    down: Vec<(i32, f32, f32)>,
+    most: usize,
+    started: Option<Instant>,
+    moved: bool,
+}
+
+impl FingerTaps {
+    pub fn down(&mut self, id: i32, x: f32, y: f32, now: Instant) {
+        if self.down.is_empty() {
+            self.most = 0;
+            self.started = Some(now);
+            self.moved = false;
+        }
+        self.down.retain(|f| f.0 != id);
+        self.down.push((id, x, y));
+        self.most = self.most.max(self.down.len());
+    }
+
+    pub fn moved(&mut self, id: i32, x: f32, y: f32) {
+        if let Some(&(_, x0, y0)) = self.down.iter().find(|f| f.0 == id)
+            && (x - x0).hypot(y - y0) > SLOP * 2.0
+        {
+            self.moved = true;
+        }
+    }
+
+    /// The finger went up. When it was the last one, returns how many
+    /// fingers took part if it was a quick multi-finger tap.
+    pub fn up(&mut self, id: i32, now: Instant) -> Option<usize> {
+        self.down.retain(|f| f.0 != id);
+        if !self.down.is_empty() {
+            return None;
+        }
+        let quick = self.started.is_some_and(|t| now.duration_since(t) <= MULTI_TAP_TIME);
+        (quick && !self.moved && self.most >= 2).then_some(self.most)
+    }
+
+    /// More than one finger is down right now.
+    pub fn multi(&self) -> bool {
+        self.down.len() > 1
+    }
+
+    /// The finger that started this touch (the trackpad follows only it).
+    pub fn primary(&self) -> Option<i32> {
+        self.down.first().map(|f| f.0)
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +366,38 @@ mod tests {
         p.moved(30.0, 0.0, 1.0);
         assert_eq!(p.cancel(), vec![L_UP]);
         assert!(p.cancel().is_empty());
+    }
+
+    #[test]
+    fn multi_finger_taps() {
+        let t0 = Instant::now();
+        let mut f = FingerTaps::default();
+        f.down(1, 10.0, 10.0, t0);
+        f.down(2, 60.0, 10.0, ms(t0, 20));
+        f.down(3, 110.0, 10.0, ms(t0, 40));
+        assert!(f.multi());
+        assert_eq!(f.primary(), Some(1));
+        assert_eq!(f.up(2, ms(t0, 150)), None);
+        assert_eq!(f.up(1, ms(t0, 160)), None);
+        assert_eq!(f.up(3, ms(t0, 170)), Some(3), "three-finger tap");
+
+        f.down(1, 0.0, 0.0, ms(t0, 1000));
+        f.down(2, 50.0, 0.0, ms(t0, 1010));
+        f.up(1, ms(t0, 1100));
+        assert_eq!(f.up(2, ms(t0, 1110)), Some(2), "two-finger tap");
+
+        f.down(1, 0.0, 0.0, ms(t0, 2000));
+        f.down(2, 50.0, 0.0, ms(t0, 2010));
+        f.moved(2, 120.0, 0.0);
+        f.up(1, ms(t0, 2100));
+        assert_eq!(f.up(2, ms(t0, 2110)), None, "moved: a gesture, not a tap");
+
+        f.down(1, 0.0, 0.0, ms(t0, 3000));
+        f.down(2, 50.0, 0.0, ms(t0, 3010));
+        f.up(1, ms(t0, 3500));
+        assert_eq!(f.up(2, ms(t0, 3510)), None, "too slow");
+
+        f.down(1, 0.0, 0.0, ms(t0, 4000));
+        assert_eq!(f.up(1, ms(t0, 4050)), None, "one finger is the trackpad's");
     }
 }

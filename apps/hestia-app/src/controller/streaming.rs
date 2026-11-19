@@ -17,10 +17,10 @@ use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer, SharedString}
 use super::report::{self, SharedReport};
 use super::{Controller, Shared, spawn};
 use crate::AppWindow;
-use crate::hostinfo;
 use crate::keymap::{self, Mapped};
 use crate::touch::{self, Trackpad};
 use crate::typing;
+use crate::{hostinfo, platform};
 
 /// Trackpad speed on top of the on-screen → host pixel ratio.
 const TRACKPAD_SPEED: f32 = 1.4;
@@ -34,8 +34,8 @@ pub(super) struct ActiveStream {
     trackpad: Trackpad,
     /// Identifies the current touch, so a stale long-press timer is ignored.
     touch_id: u64,
-    /// Current content of the keyboard bar.
-    typed: String,
+    /// Multi-finger taps (2: right click, 3: keyboard).
+    fingers: touch::FingerTaps,
     report: SharedReport,
     decode: Arc<DecodeStats>,
 }
@@ -376,7 +376,7 @@ impl Controller {
             width: stream_width,
             trackpad: Trackpad::new(),
             touch_id: 0,
-            typed: String::new(),
+            fingers: touch::FingerTaps::default(),
             report: session_report,
             decode,
         });
@@ -389,6 +389,8 @@ impl Controller {
             ui.set_stream_status("Waiting for video…".into());
             ui.set_screen(4);
         });
+        // Landscape, no system bars, screen on (Android).
+        platform::set_stream_mode(true);
         Ok(())
     }
 
@@ -441,6 +443,8 @@ impl Controller {
                 (None, false) => "disconnected by the user".to_owned(),
             };
             let show_report = c.finish_report(session_report, &outcome, Some(host_id.clone()));
+            platform::set_keyboard_visible(false);
+            platform::set_stream_mode(false);
             c.ui(move |ui| {
                 if ui.get_stream_fullscreen() {
                     ui.window().set_fullscreen(false);
@@ -506,8 +510,12 @@ impl Controller {
         y: f32,
         width: f32,
         height: f32,
-        touch: bool,
+        finger: i32,
     ) {
+        let touch = finger != 0;
+        if touch && self.multi_finger(kind, finger, x, y) {
+            return; // part of a multi-finger gesture, not a pointer action
+        }
         if touch && self.trackpad.load(Ordering::Relaxed) {
             return self.trackpad_event(kind, x, y, width);
         }
@@ -537,6 +545,78 @@ impl Controller {
         }
         if let Some(active) = self.active_stream().as_ref() {
             active.send(events);
+        }
+    }
+
+    /// Tracks every finger for multi-finger taps. True when this event
+    /// belongs to a gesture with more than one finger (the trackpad and
+    /// direct touch only follow the first finger, and drop it once a
+    /// second one lands).
+    fn multi_finger(self: &Shared, kind: i32, finger: i32, x: f32, y: f32) -> bool {
+        let now = Instant::now();
+        let mut guard = self.active_stream();
+        let Some(active) = guard.as_mut() else { return false };
+        match kind {
+            0 => {
+                let was_multi = active.fingers.multi();
+                active.fingers.down(finger, x, y, now);
+                if active.fingers.multi() && !was_multi {
+                    // The first finger's tap/drag/long press is off.
+                    let released = active.trackpad.cancel();
+                    active.touch_id += 1;
+                    active.send(trackpad_events(released));
+                }
+                active.fingers.multi()
+            }
+            2 => {
+                active.fingers.moved(finger, x, y);
+                active.fingers.multi() || active.fingers.primary() != Some(finger)
+            }
+            1 | 3 => {
+                let secondary = active.fingers.multi() || active.fingers.primary() != Some(finger);
+                let tap = if kind == 1 {
+                    active.fingers.up(finger, now)
+                } else {
+                    active.fingers.reset();
+                    None
+                };
+                match tap {
+                    Some(2) => {
+                        active.send([
+                            InputEvent::MouseButton {
+                                button: MouseButton::Right,
+                                pressed: true,
+                            },
+                            InputEvent::MouseButton {
+                                button: MouseButton::Right,
+                                pressed: false,
+                            },
+                        ]);
+                    }
+                    Some(3..) => {
+                        drop(guard);
+                        self.ui(|ui| ui.set_stream_keyboard_open(!ui.get_stream_keyboard_open()));
+                        return true;
+                    }
+                    _ => {}
+                }
+                secondary || tap.is_some()
+            }
+            _ => false,
+        }
+    }
+
+    /// Text and deletions from the on-screen keyboard, typed on the host.
+    pub(super) fn stream_ime(self: &Shared, event: platform::ImeEvent) {
+        let guard = self.active_stream();
+        let Some(active) = guard.as_ref() else { return };
+        match event {
+            platform::ImeEvent::Text(text) => active.send(typing::edit_events("", &text)),
+            platform::ImeEvent::DeleteBefore(count) => {
+                for _ in 0..count.min(256) {
+                    active.send(typing::special_key_events("backspace"));
+                }
+            }
         }
     }
 
@@ -592,21 +672,6 @@ impl Controller {
                 warn!("saving the touch mode failed: {e}");
             }
         });
-    }
-
-    pub(super) fn stream_text_edited(&self, text: &str) {
-        let mut guard = self.active_stream();
-        let Some(active) = guard.as_mut() else { return };
-        let events = typing::edit_events(&active.typed, text);
-        active.typed = text.to_owned();
-        active.send(events);
-    }
-
-    pub(super) fn stream_text_enter(&self) {
-        let mut guard = self.active_stream();
-        let Some(active) = guard.as_mut() else { return };
-        active.typed.clear();
-        active.send(typing::special_key_events("enter"));
     }
 
     pub(super) fn stream_special_key(&self, name: &str) {

@@ -118,6 +118,9 @@ pub struct StreamSettings {
     /// Preset that produced resolution/fps/bitrate (Custom once edited).
     pub preset: crate::Preset,
     pub video_scale: VideoScale,
+    /// Keep the menu button on the stream (otherwise Back/Escape open the
+    /// menu). Off on phones, where the button only covers the picture.
+    pub show_menu_button: bool,
 }
 
 impl Default for StreamSettings {
@@ -140,6 +143,7 @@ impl Default for StreamSettings {
             show_stream_report: true,
             preset: crate::Preset::Custom,
             video_scale: VideoScale::Fit,
+            show_menu_button: !cfg!(target_os = "android"),
         }
     }
 }

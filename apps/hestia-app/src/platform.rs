@@ -410,3 +410,173 @@ fn apply_route(ip: std::net::IpAddr) -> Result<(), String> {
         Ok(())
     })
 }
+
+// ---------------------------------------------------------------------------
+// Streaming mode and the soft keyboard (Android: HestiaHelper.java)
+// ---------------------------------------------------------------------------
+
+/// What the soft keyboard sent that isn't a plain key event.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImeEvent {
+    /// Committed text (accents, emoji, swipe words…).
+    Text(String),
+    /// Characters deleted before the cursor: that many Backspaces.
+    DeleteBefore(usize),
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+static IME_SINK: std::sync::OnceLock<Box<dyn Fn(ImeEvent) + Send + Sync>> = std::sync::OnceLock::new();
+
+/// Where keyboard text goes (the controller sends it to the stream).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn set_ime_sink(sink: impl Fn(ImeEvent) + Send + Sync + 'static) {
+    let _ = IME_SINK.set(Box::new(sink));
+}
+
+/// Whether this platform has an on-screen keyboard to show.
+pub fn has_soft_keyboard() -> bool {
+    cfg!(target_os = "android")
+}
+
+/// Streaming on/off: on Android, landscape, system bars hidden, screen kept
+/// on. Nothing on desktop (the window's full screen is its own toggle).
+pub fn set_stream_mode(on: bool) {
+    #[cfg(target_os = "android")]
+    {
+        let result = with_helper(|env, activity, helper| {
+            use jni::objects::JValue;
+            env.call_static_method(
+                helper,
+                "setStreamMode",
+                "(Landroid/app/Activity;Z)V",
+                &[JValue::Object(activity), JValue::Bool(u8::from(on))],
+            )?;
+            Ok(())
+        });
+        if let Err(e) = result {
+            log::warn!("switching stream mode failed: {e}");
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = on;
+}
+
+/// Shows or hides the on-screen keyboard that types into the host.
+pub fn set_keyboard_visible(visible: bool) {
+    #[cfg(target_os = "android")]
+    {
+        let result = with_helper(|env, activity, helper| {
+            use jni::objects::JValue;
+            env.call_static_method(
+                helper,
+                "setKeyboardVisible",
+                "(Landroid/app/Activity;Z)V",
+                &[JValue::Object(activity), JValue::Bool(u8::from(visible))],
+            )?;
+            Ok(())
+        });
+        if let Err(e) = result {
+            log::warn!("toggling the keyboard failed: {e}");
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = visible;
+}
+
+#[cfg(target_os = "android")]
+static HELPER: std::sync::OnceLock<jni::objects::GlobalRef> = std::sync::OnceLock::new();
+
+/// Runs `f` with HestiaHelper's class, loading it on first use.
+#[cfg(target_os = "android")]
+fn with_helper(
+    f: impl FnOnce(&mut jni::JNIEnv<'_>, &jni::objects::JObject<'_>, &jni::objects::JClass<'_>) -> jni::errors::Result<()>,
+) -> Result<(), String> {
+    with_activity(|env, activity| {
+        if HELPER.get().is_none() {
+            let class = load_helper(env, activity)?;
+            let _ = HELPER.set(class);
+        }
+        let Some(global) = HELPER.get() else {
+            return Ok(());
+        };
+        let class = jni::objects::JClass::from(env.new_local_ref(global.as_obj())?);
+        f(env, activity, &class)
+    })
+}
+
+/// Loads HestiaHelper from the dex built by build.rs (embedded here) and
+/// registers its native methods.
+#[cfg(target_os = "android")]
+fn load_helper(
+    env: &mut jni::JNIEnv<'_>,
+    activity: &jni::objects::JObject<'_>,
+) -> jni::errors::Result<jni::objects::GlobalRef> {
+    use jni::objects::{JClass, JValue};
+
+    static DEX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/classes.dex"));
+    // SAFETY: DEX is static and never written; the class loader only reads it.
+    let buffer = unsafe { env.new_direct_byte_buffer(DEX.as_ptr().cast_mut(), DEX.len())? };
+    let parent = env
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let loader = env.new_object(
+        "dalvik/system/InMemoryDexClassLoader",
+        "(Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V",
+        &[JValue::Object(&buffer), JValue::Object(&parent)],
+    )?;
+    let name = env.new_string("com.mroz59.hestia.HestiaHelper")?;
+    let class = env
+        .call_method(
+            &loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&name)],
+        )?
+        .l()?;
+    let class = JClass::from(class);
+    let methods = [
+        jni::NativeMethod {
+            name: "nativeCommitText".into(),
+            sig: "(Ljava/lang/String;)V".into(),
+            fn_ptr: native_commit_text as *mut std::ffi::c_void,
+        },
+        jni::NativeMethod {
+            name: "nativeDeleteBefore".into(),
+            sig: "(I)V".into(),
+            fn_ptr: native_delete_before as *mut std::ffi::c_void,
+        },
+    ];
+    env.register_native_methods(&class, &methods)?;
+    log::info!("Android helper loaded");
+    env.new_global_ref(class)
+}
+
+#[cfg(target_os = "android")]
+fn ime_event(event: ImeEvent) {
+    if let Some(sink) = IME_SINK.get() {
+        sink(event);
+    }
+}
+
+#[cfg(target_os = "android")]
+extern "system" fn native_commit_text(
+    mut env: jni::JNIEnv<'_>,
+    _class: jni::objects::JClass<'_>,
+    text: jni::objects::JString<'_>,
+) {
+    if let Ok(text) = env.get_string(&text) {
+        ime_event(ImeEvent::Text(text.into()));
+    }
+}
+
+#[cfg(target_os = "android")]
+extern "system" fn native_delete_before(
+    _env: jni::JNIEnv<'_>,
+    _class: jni::objects::JClass<'_>,
+    count: jni::sys::jint,
+) {
+    if count > 0 {
+        ime_event(ImeEvent::DeleteBefore(count as usize));
+    }
+}

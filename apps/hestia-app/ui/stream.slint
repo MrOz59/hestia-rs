@@ -1,4 +1,4 @@
-import { LineEdit, Spinner } from "std-widgets.slint";
+import { Spinner } from "std-widgets.slint";
 import { Theme, Icon, IconButton, MenuItem } from "theme.slint";
 
 // Small pill for the keyboard bar's shortcut keys.
@@ -43,18 +43,22 @@ export component StreamView inherits Rectangle {
     // 0 fit, 1 fill (crop), 2 stretch.
     in property <int> video-scale: 0;
     callback cycle-scale();
+    // The on-screen keyboard (Android) is up; the shortcut row shows.
     in-out property <bool> keyboard-open: false;
+    // Always show the menu button (otherwise Back / Escape open the menu).
+    in property <bool> show-menu-button: true;
+    // Whether "Keyboard" opens an on-screen keyboard (phones).
+    in property <bool> soft-keyboard: false;
     // Short-lived note at the bottom (e.g. how Hermes serves the stream).
     in property <string> banner;
 
     // text, pressed, repeat, ctrl, alt, shift, meta
     callback key-event(string, bool, bool, bool, bool, bool, bool);
     // kind (0 down, 1 up, 2 move, 3 cancel), button (1 left, 2 middle,
-    // 3 right), x, y relative to the video, video width, height, is touch
-    callback pointer(int, int, float, float, float, float, bool);
+    // 3 right), x, y relative to the video, video width, height, finger id
+    // (0 = mouse)
+    callback pointer(int, int, float, float, float, float, int);
     callback scrolled(float, float);
-    callback text-edited(string);
-    callback text-enter();
     callback special-key(string);
     callback toggle-stats();
     callback toggle-fullscreen();
@@ -146,7 +150,7 @@ export component StreamView inherits Rectangle {
                     (self.mouse-y - video.y) / 1px,
                     video.width / 1px,
                     video.height / 1px,
-                    event.touch-finger-id != 0);
+                    event.touch-finger-id);
             }
             scroll-event(event) => {
                 root.scrolled(event.delta-x / 1px, event.delta-y / 1px);
@@ -215,21 +219,22 @@ export component StreamView inherits Rectangle {
         }
     }
 
-    // Keyboard bar: at the top, so the on-screen keyboard can't cover it.
+    // Shortcut keys while the keyboard is open: a slim row at the top, so
+    // the on-screen keyboard (which types straight into the host) can't
+    // cover it.
     if root.keyboard-open: Rectangle {
         x: 8px;
         y: 8px;
-        width: root.width - Theme.control-height - 28px;
-        height: bar.preferred-height;
+        width: root.width - (root.show-menu-button ? Theme.control-height + 28px : 16px);
+        height: key-bar.preferred-height;
         border-radius: 14px;
         background: Theme.surface.transparentize(0.08);
         border-width: 1px;
         border-color: Theme.border;
 
-        bar := VerticalLayout {
-            width: 100%;
-            padding: 8px;
-            spacing: 8px;
+        key-bar := HorizontalLayout {
+            padding: 6px;
+            spacing: 6px;
             Flickable {
                 height: Theme.compact ? 40px : 32px;
                 content-height: self.height;
@@ -246,33 +251,18 @@ export component StreamView inherits Rectangle {
                     }
                 }
             }
-            HorizontalLayout {
-                spacing: 6px;
-                LineEdit {
-                    placeholder-text: "Type to send to the host";
-                    init => {
-                        self.focus();
-                    }
-                    edited(text) => {
-                        root.text-edited(text);
-                    }
-                    accepted(text) => {
-                        root.text-enter();
-                        self.text = "";
-                    }
-                }
-                IconButton {
-                    icon: "close";
-                    clicked => {
-                        root.keyboard-open = false;
-                    }
+            IconButton {
+                icon: "close";
+                clicked => {
+                    root.keyboard-open = false;
                 }
             }
         }
     }
 
-    // Menu handle, top right.
-    Rectangle {
+    // Menu handle, top right: only when asked for in Settings (Back or
+    // Escape open the menu otherwise), or while the menu is open.
+    if root.show-menu-button || root.menu-open: Rectangle {
         x: parent.width - self.width - 12px;
         y: 12px;
         width: Theme.control-height;
@@ -286,9 +276,12 @@ export component StreamView inherits Rectangle {
             name: root.menu-open ? "close" : "menu";
             tint: white;
         }
+        // On press, not click: nothing under the finger can swallow it.
         handle := TouchArea {
-            clicked => {
-                root.menu-open = !root.menu-open;
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    root.menu-open = !root.menu-open;
+                }
             }
         }
     }
@@ -310,7 +303,7 @@ export component StreamView inherits Rectangle {
             padding: 6px;
             MenuItem {
                 icon: "keyboard";
-                text: root.keyboard-open ? "Hide keyboard" : "Keyboard & shortcuts";
+                text: root.keyboard-open ? "Hide keyboard" : root.soft-keyboard ? "Keyboard (3-finger tap)" : "Shortcut keys";
                 clicked => {
                     root.keyboard-open = !root.keyboard-open;
                     root.menu-open = false;

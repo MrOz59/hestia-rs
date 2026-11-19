@@ -47,6 +47,7 @@ jni = "0.21"
 slint = { workspace = true, features = ["renderer-software"] }
 
 [build-dependencies]
+android-build = "0.1.2"
 slint-build.workspace = true
 
 # Used by `cargo apk build -p hestia-app --lib`.
@@ -70,3 +71,8 @@ name = "android.permission.ACCESS_WIFI_STATE"
 
 [package.metadata.android.application]
 label = "Hestia RS"
+
+# Rotation, keyboards and display changes must not recreate the activity
+# (that would restart the native app mid-stream).
+[package.metadata.android.application.activity]
+config_changes = "orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"

@@ -164,13 +164,15 @@ impl Controller {
             c.stream_key(&text, pressed, repeat, modifiers);
         });
         let c = self.clone();
-        ui.on_stream_pointer(move |kind, button, x, y, w, h, touch| c.stream_pointer(kind, button, x, y, w, h, touch));
+        ui.on_stream_pointer(move |kind, button, x, y, w, h, finger| {
+            c.stream_pointer(kind, button, x, y, w, h, finger)
+        });
         let c = self.clone();
         ui.on_stream_scroll(move |dx, dy| c.stream_scroll(dx, dy));
+        ui.on_stream_keyboard(platform::set_keyboard_visible);
+        ui.set_stream_soft_keyboard(platform::has_soft_keyboard());
         let c = self.clone();
-        ui.on_stream_text_edited(move |text| c.stream_text_edited(&text));
-        let c = self.clone();
-        ui.on_stream_text_enter(move || c.stream_text_enter());
+        platform::set_ime_sink(move |event| c.stream_ime(event));
         let c = self.clone();
         ui.on_stream_special_key(move |name| c.stream_special_key(&name));
         let c = self.clone();

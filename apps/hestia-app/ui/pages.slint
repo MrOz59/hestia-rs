@@ -725,6 +725,7 @@ export component SettingsPage inherits Rectangle {
     in property <string> data-dir;
     in property <string> version;
     in-out property <bool> show-report;
+    in-out property <bool> show-menu-button;
     callback back;
     callback save;
     callback open-last-report;
@@ -901,6 +902,17 @@ export component SettingsPage inherits Rectangle {
                         hint: "Let the host adjust its display mode for the stream";
                         Switch {
                             checked <=> root.optimize;
+                        }
+                    }
+
+                    SectionTitle {
+                        text: "Stream screen";
+                    }
+                    SettingRow {
+                        label: "Menu button";
+                        hint: "Always show it. Otherwise Back (Escape on a keyboard) opens the menu; a 3-finger tap opens the keyboard";
+                        Switch {
+                            checked <=> root.show-menu-button;
                         }
                     }
 
