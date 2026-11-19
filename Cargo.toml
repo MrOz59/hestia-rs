@@ -39,7 +39,6 @@ hestia-api = { path = "crates/hestia-api" }
 hestia-discovery = { path = "crates/hestia-discovery" }
 hestia-core = { path = "crates/hestia-core" }
 hestia-stream = { path = "crates/hestia-stream" }
-hestia-media = { path = "crates/hestia-media" }
 
 # Crypto (pure Rust, so Android cross-compiles without OpenSSL)
 rsa = { version = "0.9", features = ["sha2"] }

@@ -505,8 +505,10 @@ impl Controller {
                 }
             };
             c.state().apps = apps.clone();
-            let cards: Vec<_> = apps.iter().map(|a| view::app_card(a, running_app)).collect();
+            let for_ui = apps.clone();
             c.ui(move |ui| {
+                // Cards hold a slint::Image (not Send), so build them here.
+                let cards: Vec<_> = for_ui.iter().map(|a| view::app_card(a, running_app)).collect();
                 ui.set_apps(ModelRc::new(VecModel::from(cards)));
                 ui.set_apps_loading(false);
             });

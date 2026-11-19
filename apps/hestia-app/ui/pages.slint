@@ -291,8 +291,8 @@ export component HostsPage inherits Rectangle {
 
         if root.hosts.length > 0: Flickable {
             vertical-stretch: 1;
-            viewport-width: self.width;
-            viewport-height: Math.ceil(root.hosts.length / root.cols) * (root.tile-h + root.gap) + root.pad;
+            content-width: self.width;
+            content-height: Math.ceil(root.hosts.length / root.cols) * (root.tile-h + root.gap) + root.pad;
 
             for host[i] in root.hosts: HostTile {
                 x: root.pad + Math.mod(i, root.cols) * (root.tile-w + root.gap);
@@ -398,8 +398,8 @@ export component AppsPage inherits Rectangle {
 
         if !root.loading && root.apps.length > 0: Flickable {
             vertical-stretch: 1;
-            viewport-width: self.width;
-            viewport-height: Math.ceil(root.apps.length / root.cols) * (root.tile-h + root.gap) + root.pad;
+            content-width: self.width;
+            content-height: Math.ceil(root.apps.length / root.cols) * (root.tile-h + root.gap) + root.pad;
 
             for app[i] in root.apps: AppTile {
                 x: root.pad + Math.mod(i, root.cols) * (root.tile-w + root.gap);
@@ -562,8 +562,8 @@ export component SettingsPage inherits Rectangle {
 
         Flickable {
             vertical-stretch: 1;
-            viewport-width: self.width;
-            viewport-height: form.preferred-height;
+            content-width: self.width;
+            content-height: form.preferred-height;
             form := HorizontalLayout {
                 width: root.width;
                 alignment: center;

@@ -177,11 +177,11 @@ impl NvHttpClient {
             .and_then(hex::decode)
             .map(|enc| crypto::aes_ecb_decrypt(&aes_key, &enc))
             .ok_or_else(|| NvHttpError::InvalidResponse("missing challengeresponse".into()))?;
-        if response.len() < hash.len() + 16 {
+        if response.len() < hash.digest_len() + 16 {
             return Ok(PairingOutcome::Failed("challengeresponse too short".into()));
         }
-        let server_response_hash = &response[..hash.len()];
-        let server_challenge = &response[hash.len()..hash.len() + 16];
+        let server_response_hash = &response[..hash.digest_len()];
+        let server_challenge = &response[hash.digest_len()..hash.digest_len() + 16];
 
         // Stage 3: answer the host's challenge with hash(challenge || our cert
         // signature || our secret).

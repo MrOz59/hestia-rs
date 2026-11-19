@@ -27,7 +27,7 @@ impl PairingHash {
         if major >= 7 { Self::Sha256 } else { Self::Sha1 }
     }
 
-    pub fn len(self) -> usize {
+    pub fn digest_len(self) -> usize {
         match self {
             Self::Sha1 => 20,
             Self::Sha256 => 32,
