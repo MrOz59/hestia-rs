@@ -40,7 +40,9 @@ pub fn edit_events(old: &str, new: &str) -> Vec<InputEvent> {
     out
 }
 
-/// Shortcut buttons of the keyboard bar, by name.
+/// Shortcut buttons of the keyboard bar, by name (the bar itself is in
+/// `stream.slint`; tests check every one maps to keys).
+#[cfg(test)]
 pub const SPECIAL_KEYS: [(&str, &str); 7] = [
     ("esc", "Esc"),
     ("tab", "Tab"),

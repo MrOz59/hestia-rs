@@ -31,6 +31,9 @@ const TRACKPAD_SPEED: f32 = 1.4;
 /// Most a pinch magnifies the stream.
 const MAX_ZOOM: f32 = 4.0;
 
+/// Where a pinch started: finger distance, their midpoint, zoom and pan.
+type PinchStart = (f32, (f32, f32), f32, (f32, f32));
+
 /// Pinch-to-zoom state (Artemis' pan/zoom).
 #[derive(Debug, Clone, Copy)]
 struct Zoom {
@@ -38,8 +41,7 @@ struct Zoom {
     on: bool,
     factor: f32,
     pan: (f32, f32),
-    /// Finger distance, midpoint, zoom and pan when the pinch started.
-    pinch: Option<(f32, (f32, f32), f32, (f32, f32))>,
+    pinch: Option<PinchStart>,
 }
 
 impl Default for Zoom {

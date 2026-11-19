@@ -73,6 +73,8 @@ struct Inner {
     key: [u8; 16],
     encrypted: bool,
     next_seq: u32,
+    /// START A/B went out; pings wait for it (hosts expect START first).
+    started: bool,
 }
 
 impl Inner {
@@ -151,6 +153,7 @@ impl ControlStream {
                 key,
                 encrypted,
                 next_seq: 0,
+                started: false,
             })),
             stop: Arc::new(AtomicBool::new(false)),
             threads: Vec::new(),
@@ -165,10 +168,14 @@ impl ControlStream {
         self.lock().send(ptype, payload, channel, delivery)
     }
 
-    /// START A + START B; the host begins streaming after these.
+    /// START A + START B; the host begins streaming after these. Sent under
+    /// one lock, so no ping slips in between.
     pub fn start(&self) -> io::Result<()> {
-        self.send(PT_REQUEST_IDR, &[0, 0], CHANNEL_GENERIC, Delivery::Reliable)?;
-        self.send(PT_START_B, &[0], CHANNEL_GENERIC, Delivery::Reliable)
+        let mut inner = self.lock();
+        inner.send(PT_REQUEST_IDR, &[0, 0], CHANNEL_GENERIC, Delivery::Reliable)?;
+        inner.send(PT_START_B, &[0], CHANNEL_GENERIC, Delivery::Reliable)?;
+        inner.started = true;
+        Ok(())
     }
 
     pub fn request_idr(&self) -> io::Result<()> {
@@ -239,15 +246,15 @@ impl ControlStream {
                         let mut payload = [0u8; 8];
                         payload[..4].copy_from_slice(&4u32.to_le_bytes());
                         while !stop.load(Ordering::Relaxed) {
-                            let result = inner.lock().unwrap_or_else(|p| p.into_inner()).send(
-                                PT_PERIODIC_PING,
-                                &payload,
-                                CHANNEL_GENERIC,
-                                Delivery::Reliable,
-                            );
-                            if let Err(e) = result {
-                                debug!("control ping failed: {e}");
+                            let mut guard = inner.lock().unwrap_or_else(|p| p.into_inner());
+                            if guard.started {
+                                let result =
+                                    guard.send(PT_PERIODIC_PING, &payload, CHANNEL_GENERIC, Delivery::Reliable);
+                                if let Err(e) = result {
+                                    debug!("control ping failed: {e}");
+                                }
                             }
+                            drop(guard);
                             std::thread::sleep(PING_INTERVAL);
                         }
                     })?,
