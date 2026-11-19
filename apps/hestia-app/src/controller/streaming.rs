@@ -181,6 +181,8 @@ impl FramePresenter for UiPresenter {
             {
                 if frame.on_gpu {
                     // The renderer counts its own draws and superseded GPU images.
+                    #[cfg(target_os = "android")]
+                    stats.gpu.redraw_requests.fetch_add(1, Ordering::Relaxed);
                     ui.window().request_redraw();
                 } else {
                     let buffer =
@@ -188,7 +190,9 @@ impl FramePresenter for UiPresenter {
                     ui.set_stream_frame(Image::from_rgba8(buffer));
                     let delivered_at = Instant::now();
                     stats.handoff.record(delivered_at.duration_since(frame.decoded_at));
-                    stats.receive_to_ui.record(delivered_at.duration_since(frame.received_at));
+                    stats
+                        .receive_to_ui
+                        .record(delivered_at.duration_since(frame.received_at));
                     if stats.delivered.fetch_add(1, Ordering::Relaxed) == 0 {
                         ui.set_stream_status(SharedString::new());
                     }
@@ -596,8 +600,17 @@ impl Controller {
                 #[cfg(target_os = "android")]
                 {
                     let gpu = &present.gpu;
+                    r.field(
+                        "GPU video",
+                        "redraw requests",
+                        gpu.redraw_requests.load(Ordering::Relaxed),
+                    );
                     r.field("GPU video", "draws submitted", gpu.drawn.load(Ordering::Relaxed));
-                    r.field("GPU video", "replaced before draw", gpu.superseded.load(Ordering::Relaxed));
+                    r.field(
+                        "GPU video",
+                        "replaced before draw",
+                        gpu.superseded.load(Ordering::Relaxed),
+                    );
                     for (stage, histogram) in [
                         ("GPU picture ready to draw submission", &gpu.ready_to_draw),
                         ("first packet to GPU draw submission", &gpu.receive_to_draw),

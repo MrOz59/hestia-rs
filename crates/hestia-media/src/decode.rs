@@ -690,7 +690,10 @@ mod tests {
         sink.attach_keyframe_requester(KeyframeRequester::new(move || send_idr.send(()).unwrap()));
         sink.setup(H264, 1280, 720, 60).unwrap();
         sink.submit(frame(1, true));
-        assert_eq!(errors.recv_timeout(Duration::from_secs(1)).unwrap(), "no usable video output");
+        assert_eq!(
+            errors.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "no usable video output"
+        );
         sink.submit(frame(2, true));
         sink.cleanup();
         assert!(errors.try_recv().is_err());

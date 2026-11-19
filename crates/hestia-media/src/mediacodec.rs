@@ -125,7 +125,10 @@ impl MediaCodecDecoder {
     }
 
     pub fn with_components(colorimetry: Colorimetry, components: Vec<(VideoCodec, String)>) -> Option<Self> {
-        let components = components.into_iter().map(|(codec, name)| (codec, Some(name))).collect();
+        let components = components
+            .into_iter()
+            .map(|(codec, name)| (codec, Some(name)))
+            .collect();
         Self::new(colorimetry, components)
     }
 
@@ -150,7 +153,14 @@ impl MediaCodecDecoder {
         if cfg!(feature = "openh264") && !codecs.contains(&VideoCodec::H264) {
             codecs.push(VideoCodec::H264);
         }
-        codecs.into_iter().map(|codec| VideoFormat { codec, ten_bit: false, yuv444: false }).collect()
+        codecs
+            .into_iter()
+            .map(|codec| VideoFormat {
+                codec,
+                ten_bit: false,
+                yuv444: false,
+            })
+            .collect()
     }
 
     fn start(
@@ -166,7 +176,8 @@ impl MediaCodecDecoder {
             match component {
                 Some(name) => MediaCodec::from_codec_name(name),
                 None => MediaCodec::from_decoder_type(mime),
-            }.ok_or_else(|| format!("no decoder for {}", component.unwrap_or(mime)))
+            }
+            .ok_or_else(|| format!("no decoder for {}", component.unwrap_or(mime)))
         };
         let mut codec = create_codec()?;
         let gpu_session = if output == Output::Gpu {
@@ -206,17 +217,28 @@ impl MediaCodecDecoder {
                 .map_err(|e| format!("configure {mime}: {e:?}"))?,
             // NV12 if the codec will convert to it (Codec2 does), else its own.
             None => {
-                if codec.configure(&media(Some(COLOR_YUV420_SEMI_PLANAR)), None, MediaCodecDirection::Decoder).is_err() {
+                if codec
+                    .configure(
+                        &media(Some(COLOR_YUV420_SEMI_PLANAR)),
+                        None,
+                        MediaCodecDirection::Decoder,
+                    )
+                    .is_err()
+                {
                     // A failed configure may leave the component unusable.
                     drop(codec);
                     codec = create_codec()?;
-                    codec.configure(&media(None), None, MediaCodecDirection::Decoder)
+                    codec
+                        .configure(&media(None), None, MediaCodecDirection::Decoder)
                         .map_err(|e| format!("configure {mime} for buffer output: {e:?}"))?;
                 }
             }
         }
         codec.start().map_err(|e| format!("start {mime}: {e:?}"))?;
-        info!("MediaCodec {} {w}x{h}@{fps} started ({output:?} output)", component.unwrap_or(mime));
+        info!(
+            "MediaCodec {} {w}x{h}@{fps} started ({output:?} output)",
+            component.unwrap_or(mime)
+        );
         Ok(Running {
             codec,
             output,
@@ -286,13 +308,20 @@ impl MediaCodecDecoder {
                 Err(e) => error = e,
             }
         }
-        let hint = if format.codec == VideoCodec::H264 { "" } else { " Choose H.264 to try another decoder." };
+        let hint = if format.codec == VideoCodec::H264 {
+            ""
+        } else {
+            " Choose H.264 to try another decoder."
+        };
         let fatal = format!("{:?} decoder failed: {reason} ({error}).{hint}", format.codec);
         self.fatal = Some(fatal.clone());
         Err(fatal)
     }
 
     fn fall_back(&mut self, why: &str) -> Result<(), String> {
+        if let Some(session) = self.running.as_ref().and_then(|running| running.gpu_session.as_ref()) {
+            GpuVideo::global().retire_output(session);
+        }
         let outputs: &[_] = match self.running.as_ref().map(|r| r.output) {
             Some(Output::Gpu) => &[Output::Images, Output::Buffers],
             Some(Output::Images) => &[Output::Buffers],
@@ -384,8 +413,12 @@ impl Running {
         let Some(buffer) = newest else {
             return Ok(None);
         };
-        let mut timing = self.pending.iter().position(|(at, _)| *at == buffer.info().presentation_time_us() as u64)
-            .and_then(|index| self.pending.remove(index)).map(|(_, timing)| timing);
+        let mut timing = self
+            .pending
+            .iter()
+            .position(|(at, _)| *at == buffer.info().presentation_time_us() as u64)
+            .and_then(|index| self.pending.remove(index))
+            .map(|(_, timing)| timing);
         if let Some(timing) = &mut timing {
             timing.codec_output_at = Instant::now();
         }
@@ -393,7 +426,10 @@ impl Running {
             (|| {
                 if self.layout.is_none() {
                     let format = self.codec.output_format();
-                    self.layout = Some(BufferLayout::from_format(|key| format.i32(key), (self.width, self.height))?);
+                    self.layout = Some(BufferLayout::from_format(
+                        |key| format.i32(key),
+                        (self.width, self.height),
+                    )?);
                 }
                 let layout = self.layout.as_ref().ok_or("no output buffer layout")?;
                 // The NDK reports the amount of valid picture data in BufferInfo.
@@ -512,10 +548,10 @@ impl FrameDecoder for MediaCodecDecoder {
     }
 
     fn supports(&self, format: VideoFormat) -> bool {
-        !format.ten_bit && !format.yuv444 && (
-            self.components.iter().any(|(codec, _)| *codec == format.codec)
-            || (cfg!(feature = "openh264") && format.codec == VideoCodec::H264)
-        )
+        !format.ten_bit
+            && !format.yuv444
+            && (self.components.iter().any(|(codec, _)| *codec == format.codec)
+                || (cfg!(feature = "openh264") && format.codec == VideoCodec::H264))
     }
 
     fn configure(&mut self, format: VideoFormat, width: u32, height: u32, fps: u32) -> Result<(), String> {
@@ -582,7 +618,11 @@ impl FrameDecoder for MediaCodecDecoder {
             return Err("switched video output; waiting for a keyframe".into());
         }
         let now = Instant::now();
-        if self.last_input.replace(now).is_none_or(|previous| now.duration_since(previous) >= OUTPUT_STALL) {
+        if self
+            .last_input
+            .replace(now)
+            .is_none_or(|previous| now.duration_since(previous) >= OUTPUT_STALL)
+        {
             self.last_output = Some(now);
         }
         let since = *self.last_output.get_or_insert(now);
@@ -661,8 +701,7 @@ impl MediaCodecDecoder {
                 .as_ref()
                 .map(|(r, _)| r.clone())
                 .ok_or("no image reader")?;
-            let picture =
-                GpuPicture::new(image, reader, session, timing)?;
+            let picture = GpuPicture::new(image, reader, session, timing)?;
             out.width = picture.width;
             out.height = picture.height;
             out.on_gpu = true;

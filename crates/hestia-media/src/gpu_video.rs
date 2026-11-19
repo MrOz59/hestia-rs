@@ -101,7 +101,9 @@ impl GpuPicture {
     pub fn record_draw(&self) {
         let now = Instant::now();
         self.stats.ready_to_draw.record(now.duration_since(self.ready_at));
-        self.stats.receive_to_draw.record(now.duration_since(self.timing.received_at));
+        self.stats
+            .receive_to_draw
+            .record(now.duration_since(self.timing.received_at));
         self.stats.drawn.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -114,6 +116,7 @@ impl GpuPicture {
 
 #[derive(Default)]
 pub struct GpuVideoStats {
+    pub redraw_requests: AtomicU64,
     pub drawn: AtomicU64,
     pub superseded: AtomicU64,
     pub ready_to_draw: LatencyHistogram,
@@ -212,10 +215,22 @@ impl GpuVideo {
         }
     }
 
+    /// The decoder switched away from GPU output for this session.
+    pub(crate) fn retire_output(&self, session: &GpuSession) {
+        let mut mailbox = self.mailbox();
+        if mailbox.generation == session.generation {
+            mailbox.session = None;
+            mailbox.latest.take();
+        }
+    }
+
     /// The newest picture (an older one not drawn yet goes back to the codec).
     pub(crate) fn put(&self, picture: GpuPicture) {
         let mut mailbox = self.mailbox();
-        if self.renderer_ready.load(Ordering::Acquire) && mailbox.generation == picture.generation {
+        if self.renderer_ready.load(Ordering::Acquire)
+            && mailbox.generation == picture.generation
+            && mailbox.session.is_some()
+        {
             if let Some(old) = mailbox.latest.replace(picture) {
                 old.stats.superseded.fetch_add(1, Ordering::Relaxed);
             }

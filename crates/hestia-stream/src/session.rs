@@ -156,7 +156,10 @@ impl StreamSession {
                                     return;
                                 }
                                 VideoFeedback::SinkFailed(reason) => {
-                                    listener.on_event(StreamEvent::Terminated { reason, graceful: false });
+                                    listener.on_event(StreamEvent::Terminated {
+                                        reason,
+                                        graceful: false,
+                                    });
                                     return;
                                 }
                             }
