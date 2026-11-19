@@ -152,7 +152,14 @@ fn run(socket: UdpSocket, tx: Sender<DiscoveredHost>, stop: Arc<AtomicBool>) {
 
         let (len, from) = match socket.recv_from(&mut buf) {
             Ok(v) => v,
-            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => continue,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
             Err(e) => {
                 warn!("mDNS receive failed: {e}");
                 std::thread::sleep(Duration::from_millis(500));

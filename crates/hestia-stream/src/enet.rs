@@ -405,7 +405,7 @@ impl EnetClient {
                     self.handle_datagram(&datagram);
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) if e.kind() == io::ErrorKind::ConnectionReset => continue,
+                Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::Interrupted) => continue,
                 Err(e) => return Err(e),
             }
         }

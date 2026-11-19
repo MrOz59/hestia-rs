@@ -152,6 +152,13 @@ impl FrameAssembler {
         self.shard_len
     }
 
+    /// Drops the frame in progress and skips everything up to the next
+    /// keyframe (the decoder lost its references). Statistics are kept.
+    pub fn wait_for_keyframe(&mut self) {
+        self.current = None;
+        self.waiting_for_idr = true;
+    }
+
     fn lose(&mut self, out: &mut Vec<AssemblerOutput>, frame: u32) {
         self.stats.lost_frames += 1;
         self.current = None;
@@ -428,10 +435,13 @@ pub fn ping_packet(payload: Option<&[u8; 16]>, seq: u32) -> Vec<u8> {
 
 impl VideoReceiver {
     pub fn start(cfg: VideoConfig, mut sink: Box<dyn VideoSink>, feedback: Sender<VideoFeedback>) -> io::Result<Self> {
+        // The decoder's requests go through the receive loop, which keeps
+        // one IDR request in flight (see `IdrRequests`).
+        let decoder_wants_idr = Arc::new(AtomicBool::new(false));
         {
-            let feedback = feedback.clone();
+            let flag = decoder_wants_idr.clone();
             sink.attach_keyframe_requester(KeyframeRequester::new(move || {
-                let _ = feedback.send(VideoFeedback::NeedIdr);
+                flag.store(true, Ordering::Relaxed);
             }));
         }
         sink.setup(cfg.format, cfg.width, cfg.height, cfg.fps)
@@ -467,7 +477,7 @@ impl VideoReceiver {
             threads.push(
                 std::thread::Builder::new()
                     .name("hestia-video-rx".into())
-                    .spawn(move || receive_loop(socket, cfg, sink, feedback, stop, counters))?,
+                    .spawn(move || receive_loop(socket, cfg, sink, feedback, stop, counters, decoder_wants_idr))?,
             );
         }
         Ok(Self {
@@ -502,6 +512,7 @@ fn receive_loop(
     feedback: Sender<VideoFeedback>,
     stop: Arc<AtomicBool>,
     counters: Arc<VideoCounters>,
+    decoder_wants_idr: Arc<AtomicBool>,
 ) {
     let mut assembler = FrameAssembler::new(cfg.packet_size, cfg.format.codec);
     let shard_len = assembler.shard_len();
@@ -510,9 +521,20 @@ fn receive_loop(
     let mut got_data = false;
     let mut first_frame = false;
     let mut frame_started: Option<Instant> = None;
-    let mut last_idr_request = Instant::now() - Duration::from_secs(1);
+    let mut idr = IdrRequests::default();
 
     while !stop.load(Ordering::Relaxed) {
+        let now = Instant::now();
+        if decoder_wants_idr.swap(false, Ordering::Relaxed) {
+            assembler.wait_for_keyframe();
+            if idr.want(now) {
+                let _ = feedback.send(VideoFeedback::NeedIdr);
+            }
+        }
+        if idr.retry_due(now) {
+            debug!("no keyframe yet; asking again");
+            let _ = feedback.send(VideoFeedback::NeedIdr);
+        }
         let len = match socket.recv_from(&mut buf) {
             Ok((len, from)) if from.ip() == cfg.remote.ip() => len,
             Ok(_) => continue,
@@ -524,7 +546,9 @@ fn receive_loop(
                 }
                 continue;
             }
-            Err(e) if e.kind() == io::ErrorKind::ConnectionReset => continue,
+            // ConnectionReset: ICMP port unreachable; Interrupted: a signal
+            // (Android's freezer when the app goes to the background).
+            Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::Interrupted) => continue,
             Err(e) => {
                 warn!("video socket error: {e}");
                 return;
@@ -560,8 +584,7 @@ fn receive_loop(
         for output in assembler.add(packet) {
             match output {
                 AssemblerOutput::NeedIdr => {
-                    if last_idr_request.elapsed() > Duration::from_millis(250) {
-                        last_idr_request = Instant::now();
+                    if idr.want(Instant::now()) {
                         let _ = feedback.send(VideoFeedback::NeedIdr);
                     }
                 }
@@ -571,6 +594,9 @@ fn receive_loop(
                         let _ = feedback.send(VideoFeedback::FirstFrame);
                     }
                     counters.frames.fetch_add(1, Ordering::Relaxed);
+                    if frame.keyframe {
+                        idr.keyframe_arrived();
+                    }
                     if frame.host_latency_100us > 0 {
                         counters
                             .host_latency_us
@@ -586,9 +612,10 @@ fn receive_loop(
                     };
                     if sink.submit(encoded) == SubmitResult::NeedKeyframe {
                         debug!("decoder asked for a keyframe");
-                        assembler = FrameAssembler::new(cfg.packet_size, cfg.format.codec);
-                        last_idr_request = Instant::now();
-                        let _ = feedback.send(VideoFeedback::NeedIdr);
+                        assembler.wait_for_keyframe();
+                        if idr.want(Instant::now()) {
+                            let _ = feedback.send(VideoFeedback::NeedIdr);
+                        }
                     }
                 }
             }
@@ -601,6 +628,45 @@ fn receive_loop(
             .store(assembler.stats.lost_frames, Ordering::Relaxed);
     }
     sink.cleanup();
+}
+
+/// Keyframe requests: one in flight at a time. Losses while waiting don't
+/// ask again (each IDR is large; asking per lost frame floods a lossy link
+/// with keyframes and makes the loss worse); if none arrives within
+/// [`IdrRequests::RETRY`], ask once more.
+#[derive(Debug, Default)]
+struct IdrRequests {
+    pending_since: Option<Instant>,
+}
+
+impl IdrRequests {
+    const RETRY: Duration = Duration::from_millis(1000);
+
+    /// A keyframe is needed: true if a request should go out now.
+    fn want(&mut self, now: Instant) -> bool {
+        match self.pending_since {
+            Some(at) if now.duration_since(at) < Self::RETRY => false,
+            _ => {
+                self.pending_since = Some(now);
+                true
+            }
+        }
+    }
+
+    /// The pending request went unanswered for too long.
+    fn retry_due(&mut self, now: Instant) -> bool {
+        match self.pending_since {
+            Some(at) if now.duration_since(at) >= Self::RETRY => {
+                self.pending_since = Some(now);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn keyframe_arrived(&mut self) {
+        self.pending_since = None;
+    }
 }
 
 /// Test helper: packetizes a frame the way Sunshine/Hermes do.
@@ -735,6 +801,29 @@ mod tests {
         let frame = depacketize(7, &payloads, VideoCodec::H264).unwrap();
         assert_eq!(frame.data, data);
         assert!(!frame.keyframe);
+    }
+
+    #[test]
+    fn one_keyframe_request_in_flight() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut idr = IdrRequests::default();
+        assert!(idr.want(t0), "first loss asks");
+        assert!(!idr.want(ms(250)), "more losses while waiting don't");
+        assert!(!idr.retry_due(ms(900)));
+        assert!(idr.retry_due(ms(1000)), "unanswered: ask again");
+        assert!(!idr.retry_due(ms(1500)));
+        idr.keyframe_arrived();
+        assert!(!idr.retry_due(ms(5000)), "nothing pending");
+        assert!(idr.want(ms(5001)), "a new loss asks right away");
+    }
+
+    #[test]
+    fn waiting_for_a_keyframe_keeps_statistics() {
+        let mut a = FrameAssembler::new(1024, VideoCodec::H264);
+        a.stats.lost_frames = 7;
+        a.wait_for_keyframe();
+        assert_eq!(a.stats.lost_frames, 7);
     }
 
     #[test]

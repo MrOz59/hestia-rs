@@ -214,6 +214,8 @@ impl ControlStream {
                                         }
                                     }
                                 }
+                                // A signal (e.g. Android freezing the app): try again.
+                                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                                 Err(e) => {
                                     warn!("control stream receive failed: {e}");
                                     let _ = events.send(ControlEvent::ConnectionLost);

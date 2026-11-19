@@ -140,17 +140,12 @@ impl StreamSession {
                 .name("hestia-session".into())
                 .spawn(move || {
                     let mut last_stats = std::time::Instant::now();
-                    let mut last_idr: Option<std::time::Instant> = None;
                     while !stop.load(Ordering::Relaxed) {
                         while let Ok(fb) = video_rx.try_recv() {
                             match fb {
+                                // The video loop already keeps one request in flight.
                                 VideoFeedback::NeedIdr => {
-                                    // Both the assembler and the decoder may ask; one request
-                                    // per 200 ms is plenty while the IDR is in flight.
-                                    if last_idr.is_none_or(|t| t.elapsed() > Duration::from_millis(200)) {
-                                        last_idr = Some(std::time::Instant::now());
-                                        let _ = control.request_idr();
-                                    }
+                                    let _ = control.request_idr();
                                 }
                                 VideoFeedback::FirstFrame => listener.on_event(StreamEvent::FirstFrame),
                                 VideoFeedback::NoVideo => {

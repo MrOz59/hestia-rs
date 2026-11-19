@@ -262,6 +262,40 @@ impl LaunchedSession {
     }
 }
 
+/// Hermes v1 validates `client.platform` against this list; anything else
+/// (Android included) must be sent as `unknown`.
+fn hermes_platform(platform: &str) -> &'static str {
+    match platform {
+        "linux" => "linux",
+        "windows" => "windows",
+        "macos" => "macos",
+        "steamdeck" => "steamdeck",
+        _ => "unknown",
+    }
+}
+
+/// The mode must be one Hermes advertises (frame rates are a fixed list).
+fn check_prepare_limits(limits: &hestia_api::Limits, s: &StreamSettings) -> std::result::Result<(), String> {
+    if limits.max_width > 0 && (s.width > limits.max_width || s.height > limits.max_height) {
+        return Err(format!(
+            "{}x{} is above the host's limit of {}x{}",
+            s.width, s.height, limits.max_width, limits.max_height
+        ));
+    }
+    if !limits.supported_fps.is_empty() && !limits.supported_fps.contains(&s.fps) {
+        let list: Vec<String> = limits.supported_fps.iter().map(u32::to_string).collect();
+        return Err(format!(
+            "Hermes doesn't offer {} fps (it offers {})",
+            s.fps,
+            list.join(", ")
+        ));
+    }
+    if !(1..=500).contains(&s.scale_factor) {
+        return Err(format!("scale factor {}% is outside 1-500%", s.scale_factor));
+    }
+    Ok(())
+}
+
 /// Facts about this device that go into Hermes' session preparation.
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
@@ -711,13 +745,18 @@ impl HestiaClient {
     ) -> Option<std::result::Result<SessionPrepareResponse, String>> {
         let api = HestiaApi::new(client);
         let caps = api.capabilities().ok().filter(Capabilities::is_compatible)?;
+        // Hermes rejects (400) rather than negotiates: check what it says it
+        // accepts and explain, instead of sending something it will refuse.
+        if let Err(why) = check_prepare_limits(&caps.limits, settings) {
+            return Some(Err(why));
+        }
         let features = &caps.features;
         let hdr = settings.hdr && features.hdr_mode_control;
         let request = SessionPrepareRequest {
             client: ClientDescription {
                 name: "Hestia RS".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
-                platform: device.platform.into(),
+                platform: hermes_platform(device.platform).into(),
                 display_width: device.display_width,
                 display_height: device.display_height,
                 refresh_rate: device.refresh_rate,
@@ -855,6 +894,28 @@ pub fn add_negotiated_to_report(n: &hestia_stream::rtsp::Negotiated, r: &mut rep
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hermes_prepare_validation() {
+        assert_eq!(hermes_platform("android"), "unknown");
+        assert_eq!(hermes_platform("linux"), "linux");
+        let limits = hestia_api::Limits {
+            max_width: 7680,
+            max_height: 4320,
+            max_fps: 240,
+            supported_fps: vec![30, 40, 45, 60, 90, 120],
+            supported_codecs: vec![],
+        };
+        let mut s = StreamSettings::default();
+        (s.width, s.height, s.fps) = (1920, 1080, 60);
+        assert_eq!(check_prepare_limits(&limits, &s), Ok(()));
+        s.fps = 144;
+        assert!(check_prepare_limits(&limits, &s).unwrap_err().contains("144 fps"));
+        s.fps = 60;
+        s.width = 8000;
+        assert!(check_prepare_limits(&limits, &s).is_err());
+        assert_eq!(check_prepare_limits(&hestia_api::Limits::default(), &s), Ok(()));
+    }
     use hestia_stream::{StreamConfig, VideoCodec, VideoFormat};
 
     fn session(url: &str, codec: CodecPreference) -> LaunchedSession {

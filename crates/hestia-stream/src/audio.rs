@@ -122,7 +122,7 @@ fn receive_loop(
             Ok((len, from)) if from.ip() == cfg.remote.ip() => len,
             Ok(_) => continue,
             Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => continue,
-            Err(e) if e.kind() == io::ErrorKind::ConnectionReset => continue,
+            Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::Interrupted) => continue,
             Err(e) => {
                 warn!("audio socket error: {e}");
                 break;
