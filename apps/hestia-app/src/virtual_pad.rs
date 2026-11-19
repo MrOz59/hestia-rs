@@ -42,6 +42,15 @@ pub struct Control {
 }
 
 impl Control {
+    fn is_button(&self) -> bool {
+        matches!(self.kind, Kind::Round(_) | Kind::Rect(_) | Kind::Trigger(_))
+    }
+
+    /// How far a point is from the centre, in control sizes.
+    fn distance(&self, x: f32, y: f32) -> f32 {
+        ((x - self.x) / self.w).hypot((y - self.y) / self.h)
+    }
+
     fn hit(&self, x: f32, y: f32) -> bool {
         let (dx, dy) = (x - self.x, y - self.y);
         match self.kind {
@@ -53,22 +62,45 @@ impl Control {
     }
 }
 
-/// The layout for a `width`×`height` view (logical px): d-pad over the
-/// left stick, face buttons over the right one, bumpers and triggers in
-/// the top corners, Back/Home/Start at the bottom centre (top in portrait).
+/// Portrait from this height/width ratio on: the controller sits under the
+/// picture instead of around it.
+pub const PORTRAIT_RATIO: f32 = 1.3;
+
+/// The layout for a `width`×`height` view (logical px). Landscape: d-pad
+/// over the left stick, face buttons over the right one, bumpers and
+/// triggers in the top corners, Back/Home/Start at the bottom centre; the
+/// top centre stays free for the menu handle. Portrait: the same clusters
+/// at the bottom, with a shoulder row and Back/Home/Start above them.
 pub fn layout(width: f32, height: f32) -> Vec<Control> {
-    let m = width.min(height);
     let (w, h) = (width, height);
-    let stick = 0.34 * m;
-    let stick_y = h - 0.27 * m;
-    let upper_y = h - 0.69 * m;
-    let face = 0.15 * m;
-    let gap = 0.12 * m;
-    let (shoulder_w, shoulder_h, shoulder_y) = (0.24 * m, 0.10 * m, 0.07 * m);
-    // Back/Home/Start at the bottom centre; in portrait the sticks reach
-    // the middle, so under the bumpers instead.
-    let small_y = if h > w { 0.21 * m } else { h - 0.08 * m };
-    let (small_w, small_h) = (0.19 * m, 0.09 * m);
+    let portrait = h >= PORTRAIT_RATIO * w;
+    // Size unit: the short side, shrunk where the screen is too square for
+    // the clusters and the middle row to sit side by side.
+    let s = if portrait {
+        w.min(h / 2.2)
+    } else {
+        w.min(h).min(w / 1.65)
+    };
+    let stick = 0.34 * s;
+    let stick_y = h - 0.27 * s;
+    let upper_y = h - 0.66 * s;
+    let face = 0.15 * s;
+    let gap = 0.12 * s;
+    let (left_x, right_x) = (0.30 * s, w - 0.30 * s);
+    let shoulder_h = 0.10 * s;
+    let (small_w, small_h) = (0.19 * s, 0.09 * s);
+    let (shoulder_x, shoulder_y, shoulder_w, small_y) = if portrait {
+        let y = upper_y - 0.30 * s;
+        (
+            [0.13 * w, 0.37 * w, 0.63 * w, 0.87 * w],
+            y,
+            (0.22 * w).min(0.26 * s),
+            y - 0.12 * s,
+        )
+    } else {
+        let x = [0.15 * s, 0.42 * s, w - 0.42 * s, w - 0.15 * s];
+        (x, 0.07 * s, 0.24 * s, h - 0.08 * s)
+    };
     let c = |kind, label, x, y, w, h| Control {
         kind,
         label,
@@ -77,63 +109,23 @@ pub fn layout(width: f32, height: f32) -> Vec<Control> {
         w,
         h,
     };
+    let shoulder = |kind, label, i: usize| c(kind, label, shoulder_x[i], shoulder_y, shoulder_w, shoulder_h);
+    let small = |kind, label, dx: f32| c(kind, label, w / 2.0 + dx * s, small_y, small_w, small_h);
     vec![
-        c(Kind::Stick(Side::Left), "", 0.30 * m, stick_y, stick, stick),
-        c(Kind::Dpad, "", 0.30 * m, upper_y, stick, stick),
-        c(Kind::Stick(Side::Right), "", w - 0.30 * m, stick_y, stick, stick),
-        c(Kind::Round(buttons::Y), "Y", w - 0.30 * m, upper_y - gap, face, face),
-        c(Kind::Round(buttons::A), "A", w - 0.30 * m, upper_y + gap, face, face),
-        c(Kind::Round(buttons::X), "X", w - 0.30 * m - gap, upper_y, face, face),
-        c(Kind::Round(buttons::B), "B", w - 0.30 * m + gap, upper_y, face, face),
-        c(
-            Kind::Trigger(Side::Left),
-            "LT",
-            0.15 * m,
-            shoulder_y,
-            shoulder_w,
-            shoulder_h,
-        ),
-        c(
-            Kind::Rect(buttons::LB),
-            "LB",
-            0.42 * m,
-            shoulder_y,
-            shoulder_w,
-            shoulder_h,
-        ),
-        c(
-            Kind::Rect(buttons::RB),
-            "RB",
-            w - 0.42 * m,
-            shoulder_y,
-            shoulder_w,
-            shoulder_h,
-        ),
-        c(
-            Kind::Trigger(Side::Right),
-            "RT",
-            w - 0.15 * m,
-            shoulder_y,
-            shoulder_w,
-            shoulder_h,
-        ),
-        c(
-            Kind::Rect(buttons::BACK),
-            "Back",
-            w / 2.0 - 0.22 * m,
-            small_y,
-            small_w,
-            small_h,
-        ),
-        c(Kind::Rect(buttons::SPECIAL), "Home", w / 2.0, small_y, small_w, small_h),
-        c(
-            Kind::Rect(buttons::PLAY),
-            "Start",
-            w / 2.0 + 0.22 * m,
-            small_y,
-            small_w,
-            small_h,
-        ),
+        c(Kind::Stick(Side::Left), "", left_x, stick_y, stick, stick),
+        c(Kind::Dpad, "", left_x, upper_y, stick, stick),
+        c(Kind::Stick(Side::Right), "", right_x, stick_y, stick, stick),
+        c(Kind::Round(buttons::Y), "Y", right_x, upper_y - gap, face, face),
+        c(Kind::Round(buttons::A), "A", right_x, upper_y + gap, face, face),
+        c(Kind::Round(buttons::X), "X", right_x - gap, upper_y, face, face),
+        c(Kind::Round(buttons::B), "B", right_x + gap, upper_y, face, face),
+        shoulder(Kind::Trigger(Side::Left), "LT", 0),
+        shoulder(Kind::Rect(buttons::LB), "LB", 1),
+        shoulder(Kind::Rect(buttons::RB), "RB", 2),
+        shoulder(Kind::Trigger(Side::Right), "RT", 3),
+        small(Kind::Rect(buttons::BACK), "Back", -0.22),
+        small(Kind::Rect(buttons::SPECIAL), "Home", 0.0),
+        small(Kind::Rect(buttons::PLAY), "Start", 0.22),
     ]
 }
 
@@ -184,13 +176,17 @@ impl VirtualPad {
 
     /// A finger landed; true if on a control (the pad takes it).
     pub fn down(&mut self, finger: i32, x: f32, y: f32, now: Instant) -> bool {
-        // Buttons first, then the bigger sticks and d-pad.
-        let Some(control) = self
-            .controls
-            .iter()
-            .position(|c| matches!(c.kind, Kind::Round(_) | Kind::Rect(_) | Kind::Trigger(_)) && c.hit(x, y))
-            .or_else(|| self.controls.iter().position(|c| c.hit(x, y)))
-        else {
+        // Buttons first, then the bigger sticks and d-pad; the nearest one
+        // where touch areas meet.
+        let nearest = |buttons: bool| {
+            self.controls
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.is_button() == buttons && c.hit(x, y))
+                .min_by(|(_, a), (_, b)| a.distance(x, y).total_cmp(&b.distance(x, y)))
+                .map(|(i, _)| i)
+        };
+        let Some(control) = nearest(true).or_else(|| nearest(false)) else {
             return false;
         };
         self.fingers.retain(|f| f.id != finger);
@@ -323,11 +319,43 @@ mod tests {
 
     #[test]
     fn layout_fits_and_doesnt_overlap() {
-        for (w, h) in [(1000.0, 500.0), (2000.0, 900.0), (800.0, 1200.0)] {
+        // Phones both ways, 4:3 and near-square tablets, foldables, desktop.
+        let sizes = [
+            (915.0, 412.0),
+            (412.0, 915.0),
+            (1000.0, 500.0),
+            (2000.0, 900.0),
+            (800.0, 1200.0),
+            (1024.0, 768.0),
+            (768.0, 1024.0),
+            (900.0, 1000.0),
+            (1180.0, 760.0),
+        ];
+        for (w, h) in sizes {
             let controls = layout(w, h);
+            let rect = |c: &Control| (c.x - c.w / 2.0, c.y - c.h / 2.0, c.x + c.w / 2.0, c.y + c.h / 2.0);
             for c in &controls {
-                assert!(c.x - c.w / 2.0 >= 0.0 && c.x + c.w / 2.0 <= w, "{c:?} in {w}x{h}");
-                assert!(c.y - c.h / 2.0 >= 0.0 && c.y + c.h / 2.0 <= h, "{c:?} in {w}x{h}");
+                let (l, t, r, b) = rect(c);
+                assert!(l >= 0.0 && r <= w && t >= 0.0 && b <= h, "{c:?} in {w}x{h}");
+                // The menu handle's place (top centre) stays free.
+                let handle = (w / 2.0 - 34.0, 0.0, w / 2.0 + 34.0, 70.0);
+                assert!(
+                    r <= handle.0 || l >= handle.2 || t >= handle.3,
+                    "{c:?} under the menu handle in {w}x{h}"
+                );
+            }
+            // No two controls are drawn over each other (circles as circles).
+            let round = |c: &Control| matches!(c.kind, Kind::Round(_) | Kind::Stick(_));
+            for (i, a) in controls.iter().enumerate() {
+                for b in &controls[i + 1..] {
+                    let ((al, at, ar, ab), (bl, bt, br, bb)) = (rect(a), rect(b));
+                    let apart = if round(a) && round(b) {
+                        (a.x - b.x).hypot(a.y - b.y) >= (a.w + b.w) / 2.0
+                    } else {
+                        ar <= bl || br <= al || ab <= bt || bb <= at
+                    };
+                    assert!(apart, "{:?} and {:?} overlap in {w}x{h}", a.kind, b.kind);
+                }
             }
             // Every control's centre hits only itself.
             for (i, c) in controls.iter().enumerate() {

@@ -48,7 +48,8 @@ server commands) when the host offers them.
   touch-aware apps).
 - **On-screen controller** (stream menu, remembered): sticks (tap to click
   L3/R3), d-pad, A/B/X/Y, bumpers, analog triggers, Back/Home/Start, every
-  finger independent. It takes a controller slot like a physical one.
+  finger independent; in portrait it sits under the picture. It takes a
+  controller slot like a physical one.
 - **Zoom** (stream menu): pinch to magnify the picture up to 4×, drag with
   two fingers to move around.
 - **Orientation** (Android settings): landscape, portrait or the device's

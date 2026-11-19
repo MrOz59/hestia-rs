@@ -31,8 +31,25 @@ const TRACKPAD_SPEED: f32 = 1.4;
 /// Most a pinch magnifies the stream.
 const MAX_ZOOM: f32 = 4.0;
 
-/// Where a pinch started: finger distance, their midpoint, zoom and pan.
-type PinchStart = (f32, (f32, f32), f32, (f32, f32));
+/// Where the picture is on screen (logical px), from a pointer event.
+#[derive(Debug, Clone, Copy)]
+struct Picture {
+    centre: (f32, f32),
+    size: (f32, f32),
+}
+
+/// Where a pinch started.
+#[derive(Debug, Clone, Copy)]
+struct PinchStart {
+    /// Finger distance and midpoint.
+    distance: f32,
+    mid: (f32, f32),
+    zoom: f32,
+    pan: (f32, f32),
+    /// The picture's centre, and its size unzoomed.
+    centre: (f32, f32),
+    size: (f32, f32),
+}
 
 /// Pinch-to-zoom state (Artemis' pan/zoom).
 #[derive(Debug, Clone, Copy)]
@@ -615,7 +632,11 @@ impl Controller {
         if touch && mode == TouchMode::Touchscreen {
             return self.native_touch(kind, finger, (x, y), (width, height));
         }
-        if touch && self.multi_finger(kind, finger, screen.0, screen.1) {
+        let picture = Picture {
+            centre: (screen.0 - x + width / 2.0, screen.1 - y + height / 2.0),
+            size: (width, height),
+        };
+        if touch && self.multi_finger(kind, finger, screen, picture) {
             return; // part of a multi-finger gesture, not a pointer action
         }
         if touch && mode == TouchMode::Trackpad {
@@ -654,7 +675,7 @@ impl Controller {
     /// belongs to a gesture with more than one finger (the trackpad and
     /// direct touch only follow the first finger, and drop it once a
     /// second one lands).
-    fn multi_finger(self: &Shared, kind: i32, finger: i32, x: f32, y: f32) -> bool {
+    fn multi_finger(self: &Shared, kind: i32, finger: i32, (x, y): (f32, f32), picture: Picture) -> bool {
         let now = Instant::now();
         let mut guard = self.active_stream();
         let Some(active) = guard.as_mut() else { return false };
@@ -673,7 +694,7 @@ impl Controller {
             2 => {
                 let (dx, dy) = active.fingers.moved(finger, x, y);
                 if active.zoom.on && active.fingers.count() == 2 {
-                    let update = Self::pinch(active);
+                    let update = Self::pinch(active, picture);
                     drop(guard);
                     if let Some((factor, (px, py))) = update {
                         self.ui(move |ui| {
@@ -732,24 +753,32 @@ impl Controller {
 
     /// Pinch-zoom from the first two fingers: zooms about their midpoint
     /// and pans with it. Returns the new zoom and pan when they changed.
-    fn pinch(active: &mut ActiveStream) -> Option<(f32, (f32, f32))> {
+    fn pinch(active: &mut ActiveStream, picture: Picture) -> Option<(f32, (f32, f32))> {
         let ((ax, ay), (bx, by)) = active.fingers.pair()?;
         let distance = (bx - ax).hypot(by - ay).max(1.0);
         let mid = ((ax + bx) / 2.0, (ay + by) / 2.0);
         let z = &mut active.zoom;
-        let (d0, mid0, zoom0, pan0) = *z.pinch.get_or_insert((distance, mid, z.factor, z.pan));
-        let factor = (zoom0 * distance / d0).clamp(1.0, MAX_ZOOM);
-        // Keep the point under the fingers' midpoint under it.
-        let (w, h) = active.view;
-        let centre = (w / 2.0, h / 2.0);
+        let start = *z.pinch.get_or_insert(PinchStart {
+            distance,
+            mid,
+            zoom: z.factor,
+            pan: z.pan,
+            centre: picture.centre,
+            size: (picture.size.0 / z.factor, picture.size.1 / z.factor),
+        });
+        let factor = (start.zoom * distance / start.distance).clamp(1.0, MAX_ZOOM);
+        // The picture point under the fingers (unzoomed px from its centre)
+        // stays under them; the centre moves with the pan.
         let anchor = (
-            (mid0.0 - centre.0 - pan0.0) / zoom0,
-            (mid0.1 - centre.1 - pan0.1) / zoom0,
+            (start.mid.0 - start.centre.0) / start.zoom,
+            (start.mid.1 - start.centre.1) / start.zoom,
         );
+        let base = (start.centre.0 - start.pan.0, start.centre.1 - start.pan.1);
+        // The zoomed picture always covers where it was unzoomed.
         let limit = |size: f32| size * (factor - 1.0) / 2.0;
         let pan = (
-            (mid.0 - centre.0 - anchor.0 * factor).clamp(-limit(w), limit(w)),
-            (mid.1 - centre.1 - anchor.1 * factor).clamp(-limit(h), limit(h)),
+            (mid.0 - anchor.0 * factor - base.0).clamp(-limit(start.size.0), limit(start.size.0)),
+            (mid.1 - anchor.1 * factor - base.1).clamp(-limit(start.size.1), limit(start.size.1)),
         );
         if (factor, pan) == (z.factor, z.pan) {
             return None;

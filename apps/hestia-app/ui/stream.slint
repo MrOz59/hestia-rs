@@ -177,7 +177,9 @@ export component StreamView inherits Rectangle {
             width: (root.video-scale == 2 ? parent.width : root.frame-w * root.scale * 1px) * root.zoom;
             height: (root.video-scale == 2 ? parent.height : root.frame-h * root.scale * 1px) * root.zoom;
             x: (parent.width - self.width) / 2 + root.pan-x * 1px;
-            y: (parent.height - self.height) / 2 + root.pan-y * 1px;
+            // Portrait with the on-screen controller: the picture goes to
+            // the top, the controller under it (same ratio as the layout).
+            y: (root.pad-visible && parent.height >= parent.width * 1.3 ? (self.height / root.zoom - self.height) / 2 : (parent.height - self.height) / 2) + root.pan-y * 1px;
 
             Image {
                 width: 100%;
@@ -388,8 +390,10 @@ export component StreamView inherits Rectangle {
 
     // Menu handle, top right: only when asked for in Settings (Back or
     // Escape open the menu otherwise), or while the menu is open.
+    // With the on-screen controller it moves to the top centre, off the
+    // triggers.
     if root.show-menu-button || root.menu-open: Rectangle {
-        x: parent.width - self.width - 12px;
+        x: root.pad-visible && !root.keyboard-open ? (parent.width - self.width) / 2 : parent.width - self.width - 12px;
         y: 12px;
         width: Theme.control-height;
         height: Theme.control-height;
@@ -413,7 +417,7 @@ export component StreamView inherits Rectangle {
     }
 
     if root.menu-open: Rectangle {
-        x: parent.width - self.width - 12px;
+        x: root.pad-visible && !root.keyboard-open ? (parent.width - self.width) / 2 : parent.width - self.width - 12px;
         y: Theme.control-height + 20px;
         width: 260px;
         height: menu.preferred-height;
