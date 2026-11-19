@@ -445,8 +445,12 @@ fn decode_loop(
             Err(e) => {
                 let dropped = queue.invalidate();
                 drop(queue);
-                warn!("decode error on frame {}: {e}", frame.frame_number);
-                shared.stats.errors.fetch_add(1, Ordering::Relaxed);
+                // The first few in full, then a reminder now and then: a
+                // decoder failing every frame would bury the log.
+                let errors = shared.stats.errors.fetch_add(1, Ordering::Relaxed) + 1;
+                if errors <= 5 || errors % 100 == 0 {
+                    warn!("decode error on frame {} ({errors} so far): {e}", frame.frame_number);
+                }
                 shared.stats.dropped.fetch_add(dropped, Ordering::Relaxed);
                 if let Some(r) = &requester {
                     r.request();

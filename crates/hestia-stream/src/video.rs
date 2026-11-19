@@ -721,33 +721,66 @@ fn receive_loop(
 /// Keyframe requests: one in flight at a time. Losses while waiting don't
 /// ask again (each IDR is large; asking per lost frame floods a lossy link
 /// with keyframes and makes the loss worse); if none arrives within
-/// [`IdrRequests::RETRY`], ask once more.
+/// [`IdrRequests::RETRY`], ask once more. When keyframes don't help (the
+/// decoder fails again right after each one), requests space out, up to
+/// [`IdrRequests::MAX_GAP`] apart, until the stream runs cleanly again.
 #[derive(Debug, Default)]
 struct IdrRequests {
     pending_since: Option<Instant>,
+    last_sent: Option<Instant>,
+    /// Least time between requests; grows while keyframes don't help.
+    gap: Duration,
+    /// The gap already grew for the last request.
+    grew: bool,
+    /// A request held back by the gap, sent once it has passed.
+    deferred: bool,
 }
 
 impl IdrRequests {
     const RETRY: Duration = Duration::from_millis(1000);
+    /// Asking again this soon after a request means the keyframe didn't help.
+    const STORM: Duration = Duration::from_millis(1500);
+    const MIN_GAP: Duration = Duration::from_millis(250);
+    const MAX_GAP: Duration = Duration::from_secs(4);
 
     /// A keyframe is needed: true if a request should go out now.
     fn want(&mut self, now: Instant) -> bool {
-        match self.pending_since {
-            Some(at) if now.duration_since(at) < Self::RETRY => false,
-            _ => {
-                self.pending_since = Some(now);
-                true
-            }
+        if self
+            .pending_since
+            .is_some_and(|at| now.duration_since(at) < Self::RETRY)
+        {
+            return false;
         }
+        match self.last_sent.map(|at| now.duration_since(at)) {
+            Some(since) if since < Self::STORM => {
+                if !self.grew {
+                    self.gap = (self.gap * 2).clamp(Self::MIN_GAP, Self::MAX_GAP);
+                    self.grew = true;
+                }
+                if since < self.gap {
+                    self.deferred = true;
+                    return false;
+                }
+            }
+            _ => self.gap = Duration::ZERO,
+        }
+        self.send(now)
     }
 
-    /// The pending request went unanswered for too long.
+    fn send(&mut self, now: Instant) -> bool {
+        self.pending_since = Some(now);
+        self.last_sent = Some(now);
+        self.grew = false;
+        self.deferred = false;
+        true
+    }
+
+    /// A request is due: the pending one went unanswered for too long, or
+    /// a held-back one's gap has passed.
     fn retry_due(&mut self, now: Instant) -> bool {
-        match self.pending_since {
-            Some(at) if now.duration_since(at) >= Self::RETRY => {
-                self.pending_since = Some(now);
-                true
-            }
+        match (self.pending_since, self.last_sent) {
+            (Some(at), _) if now.duration_since(at) >= Self::RETRY => self.send(now),
+            (None, Some(last)) if self.deferred && now.duration_since(last) >= self.gap => self.send(now),
             _ => false,
         }
     }
@@ -927,6 +960,38 @@ mod tests {
         idr.keyframe_arrived();
         assert!(!idr.retry_due(ms(5000)), "nothing pending");
         assert!(idr.want(ms(5001)), "a new loss asks right away");
+    }
+
+    #[test]
+    fn keyframes_that_dont_help_space_requests_out() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut idr = IdrRequests::default();
+        // The decoder fails 50 ms after every keyframe (40 ms after asking).
+        let mut sent = vec![0u64];
+        assert!(idr.want(ms(0)));
+        let mut t = 0;
+        while t < 20_000 {
+            t += 10;
+            let last = *sent.last().unwrap();
+            if t == last + 40 {
+                idr.keyframe_arrived();
+            }
+            if t == last + 90 {
+                assert!(!idr.want(ms(t)) || t - last >= 1500, "held back at {t}");
+            }
+            if idr.retry_due(ms(t)) {
+                sent.push(t);
+            }
+        }
+        let gaps: Vec<u64> = sent.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(gaps.windows(2).all(|w| w[1] >= w[0]), "{gaps:?}");
+        assert!(*gaps.last().unwrap() >= 4000, "settles at the longest gap: {gaps:?}");
+        assert!(sent.len() < 12, "{} requests in 20 s", sent.len());
+
+        // Running cleanly for a while: the next loss asks right away.
+        let later = 30_000;
+        assert!(idr.want(ms(later)));
     }
 
     #[test]

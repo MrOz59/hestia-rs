@@ -439,6 +439,59 @@ pub fn has_soft_keyboard() -> bool {
     cfg!(target_os = "android")
 }
 
+/// The phone or tablet, for reports: "samsung SM-X710, Android 14 (SDK 34),
+/// SoC QTI SM8550 (kalama)". None off Android.
+pub fn device_summary() -> Option<String> {
+    #[cfg(target_os = "android")]
+    {
+        fn prop(name: &str) -> String {
+            use std::ffi::{CStr, CString, c_char, c_int};
+            unsafe extern "C" {
+                fn __system_property_get(name: *const c_char, value: *mut c_char) -> c_int;
+            }
+            let Ok(name) = CString::new(name) else {
+                return String::new();
+            };
+            // PROP_VALUE_MAX is 92 bytes, terminator included.
+            let mut value = [0 as c_char; 92];
+            // SAFETY: a NUL-terminated name and a PROP_VALUE_MAX buffer.
+            let len = unsafe { __system_property_get(name.as_ptr(), value.as_mut_ptr()) };
+            if len <= 0 {
+                return String::new();
+            }
+            // SAFETY: bionic NUL-terminates the value within the buffer.
+            unsafe { CStr::from_ptr(value.as_ptr()) }
+                .to_string_lossy()
+                .trim()
+                .to_owned()
+        }
+        let join = |parts: &[String]| {
+            parts
+                .iter()
+                .filter(|p| !p.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let device = join(&[prop("ro.product.manufacturer"), prop("ro.product.model")]);
+        let soc = join(&[prop("ro.soc.manufacturer"), prop("ro.soc.model")]);
+        let board = prop("ro.board.platform");
+        let soc = match (soc.is_empty(), board.is_empty()) {
+            (false, false) => format!(", SoC {soc} ({board})"),
+            (false, true) => format!(", SoC {soc}"),
+            (true, false) => format!(", SoC {board}"),
+            (true, true) => String::new(),
+        };
+        Some(format!(
+            "{device}, Android {} (SDK {}){soc}",
+            prop("ro.build.version.release"),
+            prop("ro.build.version.sdk")
+        ))
+    }
+    #[cfg(not(target_os = "android"))]
+    None
+}
+
 /// Streaming on/off: on Android, the chosen orientation, system bars
 /// hidden, screen kept on. Nothing on desktop (the window's full screen is
 /// its own toggle).

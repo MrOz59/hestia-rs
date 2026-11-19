@@ -1,11 +1,15 @@
 //! Android hardware decoding with `AMediaCodec`.
 //!
 //! The codec decodes into an `AImageReader` surface in `YUV_420_888`, the
-//! one output the NDK can read portably (ByteBuffer output uses vendor
-//! layouts and the NDK has no `getOutputImage`). Each picture is converted
-//! to RGBA like the software decoder's, so the rest of the pipeline is the
-//! same. Low-latency keys (standard and vendor ones, as Moonlight sets)
-//! keep the codec from holding frames back.
+//! one output the NDK can read portably. Some devices' decoders produce
+//! pictures the image reader can't lock for reading; after a few such
+//! failures the codec is restarted with its own output buffers instead
+//! (NV12/I420 and Qualcomm's aligned NV12, laid out as its output format
+//! says), and H.264 falls back to the software decoder if those can't be
+//! read either. Each picture is converted to RGBA like the software
+//! decoder's, so the rest of the pipeline is the same. Low-latency keys
+//! (standard and vendor ones, as Moonlight sets) keep the codec from
+//! holding frames back.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -29,6 +33,26 @@ const OUTPUT_WAIT: Duration = Duration::from_millis(12);
 /// Rendering to the image reader is asynchronous; wait this long for it.
 const IMAGE_WAIT: Duration = Duration::from_millis(20);
 const MAX_PENDING_FRAMES: usize = 32;
+/// Unreadable pictures (and none read yet) before changing the output.
+const FAILURES_BEFORE_FALLBACK: u32 = 3;
+
+// MediaCodecInfo.CodecCapabilities colour formats.
+const COLOR_YUV420_PLANAR: i32 = 19;
+const COLOR_YUV420_PACKED_PLANAR: i32 = 20;
+const COLOR_YUV420_SEMI_PLANAR: i32 = 21;
+const COLOR_YUV420_PACKED_SEMI_PLANAR: i32 = 39;
+const COLOR_YUV420_FLEXIBLE: i32 = 0x7F42_0888;
+/// Qualcomm's NV12 with 128-byte rows and 32-row planes.
+const COLOR_QCOM_YUV420_SEMI_PLANAR_32M: i32 = 0x7FA3_0C04;
+
+/// Where the codec puts its pictures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Output {
+    /// An image reader's surface.
+    Images,
+    /// The codec's own output buffers.
+    Buffers,
+}
 
 fn mime(codec: VideoCodec) -> Option<&'static str> {
     match codec {
@@ -43,9 +67,11 @@ fn mime(codec: VideoCodec) -> Option<&'static str> {
 /// only the decoder thread uses them after setup.
 struct Running {
     codec: MediaCodec,
-    reader: ImageReader,
-    // Keeps the reader's surface referenced while the codec renders to it.
-    _window: NativeWindow,
+    /// The image reader and its surface (kept referenced while the codec
+    /// renders to it); none with buffer output.
+    images: Option<(ImageReader, NativeWindow)>,
+    /// Buffer output's picture layout, from the codec's output format.
+    layout: Option<BufferLayout>,
     width: i32,
     height: i32,
     pts_us: u64,
@@ -68,7 +94,15 @@ pub struct MediaCodecDecoder {
     hevc: bool,
     av1: bool,
     running: Option<Running>,
-    /// Software decoder used when the hardware one can't be set up (H.264).
+    /// What `configure` was asked for, to restart the codec differently.
+    config: Option<(VideoFormat, u32, u32, u32)>,
+    /// Pictures read from the current output, and failed reads.
+    pictures: u64,
+    failures: u32,
+    /// Nothing left to try: every decode reports this.
+    fatal: Option<String>,
+    /// Software decoder used when the hardware one can't be set up or its
+    /// pictures can't be read (H.264).
     #[cfg(feature = "openh264")]
     fallback: Option<crate::software_h264::OpenH264Decoder>,
 }
@@ -86,6 +120,10 @@ impl MediaCodecDecoder {
             hevc,
             av1,
             running: None,
+            config: None,
+            pictures: 0,
+            failures: 0,
+            fatal: None,
             #[cfg(feature = "openh264")]
             fallback: None,
         })
@@ -113,13 +151,55 @@ impl MediaCodecDecoder {
         formats
     }
 
-    fn start(format: VideoFormat, width: u32, height: u32, fps: u32) -> Result<Running, String> {
+    fn start(format: VideoFormat, width: u32, height: u32, fps: u32, output: Output) -> Result<Running, String> {
         let mime = mime(format.codec).ok_or("unsupported codec")?;
         let codec = MediaCodec::from_decoder_type(mime).ok_or_else(|| format!("no decoder for {mime}"))?;
         let (w, h) = (width as i32, height as i32);
-        let reader = ImageReader::new(w, h, ImageFormat::YUV_420_888, 4).map_err(|e| format!("image reader: {e:?}"))?;
-        let window = reader.window().map_err(|e| format!("image reader surface: {e:?}"))?;
+        let images = match output {
+            Output::Images => {
+                let reader =
+                    ImageReader::new(w, h, ImageFormat::YUV_420_888, 4).map_err(|e| format!("image reader: {e:?}"))?;
+                let window = reader.window().map_err(|e| format!("image reader surface: {e:?}"))?;
+                Some((reader, window))
+            }
+            Output::Buffers => None,
+        };
+        let media = |color: Option<i32>| {
+            let mut media = Self::media_format(mime, w, h, fps);
+            if let Some(color) = color {
+                media.set_i32("color-format", color);
+            }
+            media
+        };
+        match &images {
+            Some((_, window)) => codec
+                .configure(&media(None), Some(window), MediaCodecDirection::Decoder)
+                .map_err(|e| format!("configure {mime}: {e:?}"))?,
+            // NV12 if the codec will convert to it (Codec2 does), else its own.
+            None => codec
+                .configure(
+                    &media(Some(COLOR_YUV420_SEMI_PLANAR)),
+                    None,
+                    MediaCodecDirection::Decoder,
+                )
+                .or_else(|_| codec.configure(&media(None), None, MediaCodecDirection::Decoder))
+                .map_err(|e| format!("configure {mime} for buffer output: {e:?}"))?,
+        }
+        codec.start().map_err(|e| format!("start {mime}: {e:?}"))?;
+        info!("MediaCodec {mime} {w}x{h}@{fps} started ({output:?} output)");
+        Ok(Running {
+            codec,
+            images,
+            layout: None,
+            width: w,
+            height: h,
+            pts_us: 0,
+            frame_us: (1_000_000 / u64::from(fps.max(1))).max(1),
+            pending: VecDeque::with_capacity(MAX_PENDING_FRAMES),
+        })
+    }
 
+    fn media_format(mime: &str, w: i32, h: i32, fps: u32) -> MediaFormat {
         let mut media = MediaFormat::new();
         media.set_str("mime", mime);
         media.set_i32("width", w);
@@ -139,21 +219,41 @@ impl MediaCodecDecoder {
         ] {
             media.set_i32(key, 1);
         }
-        codec
-            .configure(&media, Some(&window), MediaCodecDirection::Decoder)
-            .map_err(|e| format!("configure {mime}: {e:?}"))?;
-        codec.start().map_err(|e| format!("start {mime}: {e:?}"))?;
-        info!("MediaCodec {mime} {w}x{h}@{fps} started");
-        Ok(Running {
-            codec,
-            reader,
-            _window: window,
-            width: w,
-            height: h,
-            pts_us: 0,
-            frame_us: (1_000_000 / u64::from(fps.max(1))).max(1),
-            pending: VecDeque::with_capacity(MAX_PENDING_FRAMES),
-        })
+        media
+    }
+
+    /// The pictures can't be read this way: restart the codec with buffer
+    /// output, or (H.264, buffers failed too) decode in software. The
+    /// caller asks for a keyframe either way.
+    fn fall_back(&mut self, why: &str) -> Result<(), String> {
+        let (format, width, height, fps) = self.config.ok_or("decoder not configured")?;
+        let tried_buffers = self.running.as_ref().is_some_and(|r| r.images.is_none());
+        // Some devices allow one hardware decoder at a time: stop this one first.
+        self.running = None;
+        (self.pictures, self.failures) = (0, 0);
+        if !tried_buffers {
+            warn!("MediaCodec pictures can't be read through an image reader ({why}); using its output buffers");
+            match Self::start(format, width, height, fps, Output::Buffers) {
+                Ok(running) => {
+                    self.running = Some(running);
+                    return Ok(());
+                }
+                Err(e) => warn!("MediaCodec buffer output failed: {e}"),
+            }
+        }
+        #[cfg(feature = "openh264")]
+        if format.codec == VideoCodec::H264 {
+            warn!("MediaCodec pictures can't be read ({why}); decoding H.264 in software");
+            self.fallback = Some(crate::software_h264::OpenH264Decoder::new(self.colorimetry)?);
+            return Ok(());
+        }
+        let fatal = format!(
+            "this device's {:?} decoder gives pictures the app can't read ({why}); \
+             turn off Hardware decoding in the settings to decode H.264 in software",
+            format.codec
+        );
+        self.fatal = Some(fatal.clone());
+        Err(fatal)
     }
 }
 
@@ -181,6 +281,64 @@ impl Running {
         }
         self.pending.push_back((self.pts_us, timing));
         Ok(true)
+    }
+
+    /// Buffer output: converts every finished picture into `out` (the
+    /// newest wins) and returns the last one's timing.
+    fn drain_buffers(
+        &mut self,
+        wait: Duration,
+        colorimetry: Colorimetry,
+        out: &mut RgbaFrame,
+    ) -> Result<Option<FrameTiming>, String> {
+        let mut timeout = wait;
+        let mut shown = None;
+        loop {
+            match self.codec.dequeue_output_buffer(timeout) {
+                Ok(DequeuedOutputBufferInfoResult::Buffer(buffer)) => {
+                    timeout = Duration::ZERO;
+                    let pts = buffer.info().presentation_time_us() as u64;
+                    if self.layout.is_none() {
+                        let format = self.codec.output_format();
+                        self.layout = BufferLayout::from_format(|key| format.i32(key), (self.width, self.height)).ok();
+                    }
+                    let converted = match &self.layout {
+                        Some(layout) => layout.convert(buffer.buffer(), colorimetry, out),
+                        None => {
+                            let format = self.codec.output_format();
+                            BufferLayout::from_format(|key| format.i32(key), (self.width, self.height)).map(|_| ())
+                        }
+                    };
+                    // Always hand the buffer back, even if it can't be read.
+                    self.codec
+                        .release_output_buffer(buffer, false)
+                        .map_err(|e| format!("release output: {e:?}"))?;
+                    converted?;
+                    if let Some(index) = self.pending.iter().position(|(at, _)| *at == pts) {
+                        if let Some((_, mut timing)) = self.pending.remove(index) {
+                            timing.codec_output_at = Instant::now();
+                            shown = Some(timing);
+                        }
+                    }
+                }
+                Ok(DequeuedOutputBufferInfoResult::OutputFormatChanged) => {
+                    let format = self.codec.output_format();
+                    match BufferLayout::from_format(|key| format.i32(key), (self.width, self.height)) {
+                        Ok(layout) => {
+                            info!("MediaCodec buffer output: {layout:?}");
+                            self.layout = Some(layout);
+                        }
+                        Err(e) => {
+                            warn!("MediaCodec buffer output: {e}");
+                            self.layout = None;
+                        }
+                    }
+                }
+                Ok(DequeuedOutputBufferInfoResult::OutputBuffersChanged) => {}
+                Ok(DequeuedOutputBufferInfoResult::TryAgainLater) => return Ok(shown),
+                Err(e) => return Err(format!("output buffer: {e:?}")),
+            }
+        }
     }
 
     /// Releases every finished picture to the image reader; true if any.
@@ -217,10 +375,13 @@ impl Running {
     }
 
     /// The newest rendered picture, once the image reader has it.
-    fn latest_image(&self) -> Result<Option<Image>, String> {
-        let deadline = Instant::now() + IMAGE_WAIT;
+    fn latest_image(&self, wait: bool) -> Result<Option<Image>, String> {
+        let Some((reader, _)) = &self.images else {
+            return Ok(None);
+        };
+        let deadline = Instant::now() + if wait { IMAGE_WAIT } else { Duration::ZERO };
         loop {
-            match self.reader.acquire_latest_image() {
+            match reader.acquire_latest_image() {
                 Ok(AcquireResult::Image(image)) => return Ok(Some(image)),
                 Ok(AcquireResult::NoBufferAvailable) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_micros(500));
@@ -273,7 +434,10 @@ impl FrameDecoder for MediaCodecDecoder {
         if self.fallback.is_some() {
             return "OpenH264 (software; MediaCodec failed)";
         }
-        "MediaCodec (hardware)"
+        match &self.running {
+            Some(running) if running.images.is_none() => "MediaCodec (hardware, buffer output)",
+            _ => "MediaCodec (hardware)",
+        }
     }
 
     fn supports(&self, format: VideoFormat) -> bool {
@@ -287,7 +451,9 @@ impl FrameDecoder for MediaCodecDecoder {
     }
 
     fn configure(&mut self, format: VideoFormat, width: u32, height: u32, fps: u32) -> Result<(), String> {
-        match Self::start(format, width, height, fps) {
+        self.config = Some((format, width, height, fps));
+        (self.pictures, self.failures, self.fatal) = (0, 0, None);
+        match Self::start(format, width, height, fps, Output::Images) {
             Ok(running) => {
                 self.running = Some(running);
                 Ok(())
@@ -331,8 +497,58 @@ impl FrameDecoder for MediaCodecDecoder {
         if let Some(software) = &mut self.fallback {
             return software.decode_timed(frame, out, timing);
         }
+        if let Some(fatal) = &self.fatal {
+            return Err(fatal.clone());
+        }
         let colorimetry = self.colorimetry;
+        let result = self.running_decode(frame, out, timing, colorimetry);
+        match &result {
+            Ok(Some(_)) => {
+                self.pictures += 1;
+                self.failures = 0;
+            }
+            // Pictures that can't be read, and none ever were: change the
+            // output (the error makes the caller ask for a keyframe).
+            Err(e) if e.starts_with(UNREADABLE) && self.pictures == 0 => {
+                self.failures += 1;
+                if self.failures >= FAILURES_BEFORE_FALLBACK {
+                    self.fall_back(e)?;
+                }
+            }
+            _ => {}
+        }
+        result
+    }
+}
+
+/// Error prefix for pictures the codec made but the app can't read.
+const UNREADABLE: &str = "unreadable picture";
+
+impl MediaCodecDecoder {
+    fn running_decode(
+        &mut self,
+        frame: &EncodedFrame,
+        out: &mut RgbaFrame,
+        timing: FrameTiming,
+        colorimetry: Colorimetry,
+    ) -> Result<Option<FrameTiming>, String> {
         let running = self.running.as_mut().ok_or("decoder not configured")?;
+        if running.images.is_none() {
+            let mut shown = None;
+            if !running.feed(&frame.data, timing)? {
+                shown = running
+                    .drain_buffers(Duration::ZERO, colorimetry, out)
+                    .map_err(|e| format!("{UNREADABLE}: {e}"))?;
+                if !running.feed(&frame.data, timing)? {
+                    return Err("decoder input is full".into());
+                }
+            }
+            let wait = if shown.is_some() { Duration::ZERO } else { OUTPUT_WAIT };
+            let newer = running
+                .drain_buffers(wait, colorimetry, out)
+                .map_err(|e| format!("{UNREADABLE}: {e}"))?;
+            return Ok(newer.or(shown));
+        }
         let mut rendered = false;
         if !running.feed(&frame.data, timing)? {
             // Input full: collect what's done, then try once more.
@@ -342,16 +558,7 @@ impl FrameDecoder for MediaCodecDecoder {
             }
         }
         rendered |= running.drain(if rendered { Duration::ZERO } else { OUTPUT_WAIT })?;
-        let image = if rendered {
-            running.latest_image()?
-        } else {
-            match running.reader.acquire_latest_image() {
-                Ok(AcquireResult::Image(image)) => Some(image),
-                Ok(_) => None,
-                Err(e) => return Err(format!("acquire image: {e:?}")),
-            }
-        };
-        let Some(image) = image else {
+        let Some(image) = running.latest_image(rendered)? else {
             return Ok(None);
         };
         let pts = image.timestamp().map_err(|e| format!("image timestamp: {e:?}"))? / 1_000;
@@ -363,7 +570,190 @@ impl FrameDecoder for MediaCodecDecoder {
         let Some((_, timing)) = running.pending.remove(index) else {
             return Ok(None);
         };
-        convert(&image, colorimetry, (running.width, running.height), out)?;
+        convert(&image, colorimetry, (running.width, running.height), out).map_err(|e| format!("{UNREADABLE}: {e}"))?;
         Ok(Some(timing))
+    }
+}
+
+/// How the codec lays out a picture in its output buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BufferLayout {
+    /// Interleaved U/V (NV12) rather than separate planes (I420).
+    semi_planar: bool,
+    color_format: i32,
+    stride: usize,
+    slice_height: usize,
+    /// The visible picture inside the buffer.
+    left: usize,
+    top: usize,
+    width: usize,
+    height: usize,
+}
+
+fn align(v: i32, to: i32) -> i32 {
+    (v + to - 1) / to * to
+}
+
+impl BufferLayout {
+    /// From the output format's keys (`get`), `size` when it lacks them.
+    fn from_format(get: impl Fn(&str) -> Option<i32>, size: (i32, i32)) -> Result<Self, String> {
+        let width = get("width").filter(|&w| w > 0).unwrap_or(size.0);
+        let height = get("height").filter(|&h| h > 0).unwrap_or(size.1);
+        let color_format = get("color-format").unwrap_or(COLOR_YUV420_SEMI_PLANAR);
+        let semi_planar = match color_format {
+            COLOR_YUV420_PLANAR | COLOR_YUV420_PACKED_PLANAR => false,
+            // Flexible in a buffer is the codec's native layout; NV12 is
+            // what hardware decoders use.
+            COLOR_YUV420_SEMI_PLANAR
+            | COLOR_YUV420_PACKED_SEMI_PLANAR
+            | COLOR_YUV420_FLEXIBLE
+            | COLOR_QCOM_YUV420_SEMI_PLANAR_32M => true,
+            other => return Err(format!("output colour format {other:#x} isn't supported")),
+        };
+        let (aligned_w, aligned_h) = if color_format == COLOR_QCOM_YUV420_SEMI_PLANAR_32M {
+            (align(width, 128), align(height, 32))
+        } else {
+            (width, height)
+        };
+        let stride = get("stride").filter(|&s| s >= width).unwrap_or(aligned_w);
+        let slice_height = get("slice-height").filter(|&s| s >= height).unwrap_or(aligned_h);
+        let left = get("crop-left").unwrap_or(0).clamp(0, width - 1);
+        let top = get("crop-top").unwrap_or(0).clamp(0, height - 1);
+        let right = get("crop-right")
+            .filter(|&r| r > left)
+            .unwrap_or(width - 1)
+            .min(width - 1);
+        let bottom = get("crop-bottom")
+            .filter(|&b| b > top)
+            .unwrap_or(height - 1)
+            .min(height - 1);
+        Ok(Self {
+            semi_planar,
+            color_format,
+            stride: stride as usize,
+            slice_height: slice_height as usize,
+            left: left as usize,
+            top: top as usize,
+            width: (right - left + 1) as usize,
+            height: (bottom - top + 1) as usize,
+        })
+    }
+
+    /// The visible picture's planes in `data`.
+    fn planes<'a>(&self, data: &'a [u8]) -> Result<Yuv420<'a>, String> {
+        let (stride, left, top) = (self.stride, self.left, self.top);
+        // Chroma right after the luma rows, at the reported slice height,
+        // or (some decoders) right after the picture's own rows.
+        let fits = |slice: usize| {
+            let luma = stride * slice;
+            let last_row = top + self.height - 1;
+            let chroma_end = if self.semi_planar {
+                luma + (last_row / 2) * stride + left + self.width
+            } else {
+                luma + (stride / 2) * (slice / 2) + (last_row / 2) * (stride / 2) + (left + self.width) / 2
+            };
+            last_row * stride + left + self.width <= data.len() && chroma_end <= data.len()
+        };
+        let slice = [self.slice_height, top + self.height]
+            .into_iter()
+            .find(|&s| fits(s))
+            .ok_or_else(|| format!("output buffer of {} bytes is smaller than {self:?}", data.len()))?;
+        let luma = stride * slice;
+        let y = &data[top * stride + left..];
+        Ok(if self.semi_planar {
+            let uv = luma + (top / 2) * stride + (left & !1);
+            Yuv420 {
+                y,
+                u: &data[uv..],
+                v: &data[uv + 1..],
+                y_stride: stride,
+                u_stride: stride,
+                v_stride: stride,
+                uv_pixel_stride: 2,
+                width: self.width,
+                height: self.height,
+            }
+        } else {
+            let chroma = stride / 2;
+            let offset = (top / 2) * chroma + left / 2;
+            let u = luma + offset;
+            let v = luma + chroma * (slice / 2) + offset;
+            Yuv420 {
+                y,
+                u: &data[u..],
+                v: &data[v..],
+                y_stride: stride,
+                u_stride: chroma,
+                v_stride: chroma,
+                uv_pixel_stride: 1,
+                width: self.width,
+                height: self.height,
+            }
+        })
+    }
+
+    fn convert(&self, data: &[u8], colorimetry: Colorimetry, out: &mut RgbaFrame) -> Result<(), String> {
+        let planes = self.planes(data)?;
+        out.reshape(self.width as u32, self.height as u32);
+        yuv420_to_rgba(&planes, colorimetry, &mut out.data);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn layout(keys: &[(&str, i32)]) -> Result<BufferLayout, String> {
+        BufferLayout::from_format(|key| keys.iter().find(|(k, _)| *k == key).map(|&(_, v)| v), (8, 4))
+    }
+
+    #[test]
+    fn nv12_with_padding() {
+        let l = layout(&[("color-format", 21), ("stride", 16), ("slice-height", 6)]).unwrap();
+        assert_eq!((l.stride, l.slice_height, l.width, l.height), (16, 6, 8, 4));
+        let mut data = vec![0u8; 16 * 6 * 3 / 2];
+        data[16 * 6] = 7; // first U
+        data[16 * 6 + 1] = 9; // first V
+        let p = l.planes(&data).unwrap();
+        assert_eq!((p.u[0], p.v[0], p.uv_pixel_stride, p.u_stride), (7, 9, 2, 16));
+    }
+
+    #[test]
+    fn i420_planes() {
+        let l = layout(&[("color-format", 19)]).unwrap();
+        let mut data = vec![0u8; 8 * 4 * 3 / 2];
+        data[32] = 1; // U plane
+        data[32 + 8] = 2; // V plane: 4x2 chroma after U
+        let p = l.planes(&data).unwrap();
+        assert_eq!((p.u[0], p.v[0], p.uv_pixel_stride, p.u_stride), (1, 2, 1, 4));
+    }
+
+    #[test]
+    fn qualcomm_alignment_and_crop() {
+        let l = layout(&[
+            ("color-format", COLOR_QCOM_YUV420_SEMI_PLANAR_32M),
+            ("width", 1280),
+            ("height", 736),
+            ("crop-right", 1279),
+            ("crop-bottom", 719),
+        ])
+        .unwrap();
+        assert_eq!((l.stride, l.slice_height, l.width, l.height), (1280, 736, 1280, 720));
+        assert!(l.planes(&vec![0; 1280 * 736 * 3 / 2]).is_ok());
+    }
+
+    #[test]
+    fn chroma_right_after_the_picture() {
+        // Reports a 6-row slice but packs chroma after the 4 rows.
+        let l = layout(&[("color-format", 21), ("slice-height", 6)]).unwrap();
+        let data = vec![0u8; 8 * 4 * 3 / 2];
+        assert!(l.planes(&data).is_ok());
+        assert!(l.planes(&data[..20]).is_err());
+    }
+
+    #[test]
+    fn tiled_formats_are_refused() {
+        assert!(layout(&[("color-format", 0x7FC0_0002)]).is_err());
     }
 }

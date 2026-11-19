@@ -34,9 +34,13 @@ server commands) when the host offers them.
   Reed–Solomon FEC (byte-compatible with nanors), IDR recovery, Opus audio
   (AES-CBC), and input packets (keyboard, text, mouse, scroll, touch, pen,
   gamepad).
-- **Decoding**: OpenH264 software decoding on every platform (H.264 only for
-  now), on its own thread, with frames handed to the UI newest-first so a slow
-  renderer drops frames instead of adding latency.
+- **Decoding**: on Android, the hardware decoder (MediaCodec: H.264, HEVC,
+  AV1) read through an image reader, or through its own output buffers on
+  devices whose pictures the image reader can't lock; OpenH264 (software
+  H.264) on desktop and as the fallback. Decoding runs on its own thread,
+  with frames handed to the UI newest-first so a slow renderer drops frames
+  instead of adding latency. When keyframes don't fix a failing decoder,
+  keyframe requests space out instead of flooding the host.
 - **Stream screen**: video letterboxed in the window, keyboard (US-layout key
   mapping, text fallback for other characters), absolute mouse, buttons,
   scroll, touch as mouse, stats overlay, full screen, disconnect / quit.
@@ -103,8 +107,9 @@ server commands) when the host offers them.
 
 ### Known limits of the prototype
 
-- H.264 only (software). HEVC/AV1, VA-API and MediaCodec decoders are next.
-- No audio on Android yet; surround layouts are not played (stereo only).
+- Desktop decodes H.264 in software only (VA-API is next); Android
+  converts decoded pictures to RGBA on the CPU (zero-copy is next).
+- Surround audio is mixed down to stereo.
 - Keys are mapped by the character they produce (US layout), not by physical
   scancode; characters without a US key are sent as text.
 - Desktop mouse is absolute only (no pointer capture), no gamepads yet.

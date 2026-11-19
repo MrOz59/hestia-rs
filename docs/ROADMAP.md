@@ -23,7 +23,8 @@
 - [x] Software H.264 decode (OpenH264) and a video view inside the Slint window
 - [ ] **Validate against a live Hermes host** (and Sunshine/Apollo)
 - [ ] Linux VA-API decode (HEVC/AV1, DMA-BUF into the renderer)
-- [x] Android MediaCodec (H.264/HEVC/AV1) via AImageReader
+- [x] Android MediaCodec (H.264/HEVC/AV1) via AImageReader, with output
+      buffers (NV12/I420/Qualcomm NV12) and software H.264 as fallbacks
 - [ ] Android zero-copy output (MediaCodec into a Surface)
 
 ## Milestone 2 — playable

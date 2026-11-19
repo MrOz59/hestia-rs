@@ -63,6 +63,14 @@ pub struct Diagnosis {
 }
 
 pub fn diagnose(w: &Window) -> Diagnosis {
+    // Frames arrive but none come out: the decoder is failing, not slow.
+    if w.decoded_fps < 0.5 && w.received_fps >= MIN_FRAMES_TO_JUDGE {
+        return Diagnosis {
+            bottleneck: Bottleneck::Decode,
+            summary: "The video decoder isn't producing pictures. If this lasts, turn off Hardware decoding in the settings.",
+            key_metric: format!("0 of {:.0} fps decoded", w.received_fps),
+        };
+    }
     if w.decoded_fps < MIN_FRAMES_TO_JUDGE {
         return Diagnosis::default();
     }
@@ -211,6 +219,25 @@ mod tests {
             ..healthy()
         };
         assert_eq!(diagnose(&starting), Diagnosis::default());
+        let nothing_arrives = Window {
+            received_fps: 0.0,
+            decoded_fps: 0.0,
+            ..healthy()
+        };
+        assert_eq!(diagnose(&nothing_arrives), Diagnosis::default());
+    }
+
+    #[test]
+    fn a_decoder_making_no_pictures_is_called_out() {
+        let d = diagnose(&Window {
+            received_fps: 38.0,
+            decoded_fps: 0.0,
+            decode_ms: 0.0,
+            ..healthy()
+        });
+        assert_eq!(d.bottleneck, Bottleneck::Decode);
+        assert_eq!(d.key_metric, "0 of 38 fps decoded");
+        assert!(d.summary.contains("Hardware decoding"));
     }
 
     #[test]

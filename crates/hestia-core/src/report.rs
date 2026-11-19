@@ -13,6 +13,10 @@ pub const KEEP_REPORTS: usize = 20;
 /// Per-second rows written in full; longer sessions keep the first and last
 /// rows.
 const MAX_STAT_ROWS: usize = 600;
+/// Lines of one kind (the same message, numbers aside) kept in a report's
+/// log; the rest are counted at the end. A decoder failing every frame
+/// would otherwise push everything else out of a shared report.
+const MAX_SIMILAR_LOG_LINES: usize = 4;
 
 /// One second of stream statistics.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -293,9 +297,25 @@ impl StreamReport {
                 let _ = writeln!(t, "  {}", stats_row(*at, s));
             }
         }
-        let _ = writeln!(t, "\n== Log ({} lines, times in UTC)", logs.len());
-        for line in logs {
+        let (kept, left_out) = compact_log(logs);
+        let hidden: usize = left_out.iter().map(|(_, n)| n).sum();
+        if hidden == 0 {
+            let _ = writeln!(t, "\n== Log ({} lines, times in UTC)", logs.len());
+        } else {
+            let _ = writeln!(
+                t,
+                "\n== Log ({} lines, {hidden} repeats left out, times in UTC)",
+                logs.len()
+            );
+        }
+        for line in kept {
             let _ = writeln!(t, "{line}");
+        }
+        if !left_out.is_empty() {
+            let _ = writeln!(t, "\n== Repeats left out of the log");
+            for (shape, n) in left_out.iter().take(12) {
+                let _ = writeln!(t, "  {n:>6} × {shape}");
+            }
         }
         t
     }
@@ -387,6 +407,51 @@ pub fn latest(dir: &Path) -> Option<PathBuf> {
     reports.pop()
 }
 
+/// What a log line says, numbers and time aside ("decode error on frame #").
+fn log_shape(line: &str) -> String {
+    // Lines start with the time ("19:00:26.287 WARN  …").
+    let body = line.split_once(' ').map_or(line, |(_, rest)| rest);
+    let mut shape = String::with_capacity(body.len());
+    let mut in_number = false;
+    for c in body.chars() {
+        if c.is_ascii_digit() {
+            if !in_number {
+                shape.push('#');
+            }
+            in_number = true;
+        } else {
+            shape.push(c);
+            in_number = false;
+        }
+    }
+    shape.chars().take(140).collect()
+}
+
+/// The log with each kind of line kept [`MAX_SIMILAR_LOG_LINES`] times;
+/// a marker where one starts being left out, and how many of each kind
+/// were (most first).
+pub fn compact_log(logs: &[String]) -> (Vec<String>, Vec<(String, usize)>) {
+    use std::collections::HashMap;
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut kept = Vec::with_capacity(logs.len().min(4096));
+    for line in logs {
+        let count = seen.entry(log_shape(line)).or_insert(0);
+        *count += 1;
+        if *count <= MAX_SIMILAR_LOG_LINES {
+            kept.push(line.clone());
+        } else if *count == MAX_SIMILAR_LOG_LINES + 1 {
+            kept.push("  … more lines like the one above are left out (counted at the end)".to_owned());
+        }
+    }
+    let mut left_out: Vec<(String, usize)> = seen
+        .into_iter()
+        .filter(|&(_, n)| n > MAX_SIMILAR_LOG_LINES)
+        .map(|(shape, n)| (shape, n - MAX_SIMILAR_LOG_LINES))
+        .collect();
+    left_out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    (kept, left_out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +519,37 @@ mod tests {
         }
         assert!(!text.contains("ignored"));
         assert!(r.summary_lines()[0].starts_with("Result: the app was closed"));
+    }
+
+    #[test]
+    fn repeated_log_lines_are_counted_not_kept() {
+        let mut logs: Vec<String> = (0..500)
+            .flat_map(|i| {
+                [
+                    format!(
+                        "19:00:{:02}.287 WARN  hestia_media::decode: decode error on frame {i}: plane",
+                        i % 60
+                    ),
+                    format!(
+                        "19:00:{:02}.290 DEBUG hestia_stream::control: requesting IDR frame",
+                        i % 60
+                    ),
+                ]
+            })
+            .collect();
+        logs.insert(3, "19:00:01.000 INFO  hestia_stream::rtsp: RTSP done".into());
+        logs.push("19:01:00.565 INFO  hestia_app: stream ended (graceful: false): lost the connection".into());
+        let mut r = StreamReport::new("Desktop on cachy", 0);
+        r.finish("lost the connection to the host");
+        let text = r.render_with_logs(&logs);
+        assert!(
+            text.contains("== Log (1002 lines, 992 repeats left out, times in UTC)"),
+            "{text}"
+        );
+        assert!(text.contains("RTSP done") && text.contains("lost the connection\n"));
+        assert_eq!(text.matches("decode error on frame").count(), 5, "4 kept + the count");
+        assert!(text.contains("   496 × WARN  hestia_media::decode: decode error on frame #: plane"));
+        assert!(text.len() < 3000, "{} bytes", text.len());
     }
 
     #[test]

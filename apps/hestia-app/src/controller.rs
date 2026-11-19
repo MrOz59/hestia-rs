@@ -250,6 +250,9 @@ impl Controller {
                 warn!("could not keep the log on disk: {e}");
             }
             info!("{} starting", view::version_text());
+            if let Some(device) = platform::device_summary() {
+                info!("device: {device}");
+            }
             let settings = core.settings();
             c.touch_mode.store(settings.touch().index() as u8, Ordering::Relaxed);
             let client_id = core.identity().unique_id().to_owned();

@@ -1,7 +1,7 @@
 //! The stream screen: runs a [`ManagedStream`] after a launch, shows decoded
 //! frames and forwards keyboard, mouse and touch input to the host.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -207,6 +207,8 @@ struct Listener {
     video: Mutex<String>,
     first_frame: AtomicBool,
     provenance_requested: AtomicBool,
+    /// Seconds in a row with frames arriving and none decoded.
+    undecoded_secs: AtomicU32,
 }
 
 impl Listener {
@@ -344,6 +346,20 @@ impl SessionListener for Listener {
                     self.request_provenance(stats.rtt_ms);
                 }
                 if let Some((sample, verdict)) = self.sample(stats) {
+                    // Frames arrive, none decode: say so on the picture even
+                    // with statistics hidden (it says "Waiting for video").
+                    let undecoded = sample.fps >= 10.0 && sample.decoded_fps.is_some_and(|f| f < 0.5);
+                    let secs = if undecoded {
+                        self.undecoded_secs.fetch_add(1, Ordering::Relaxed) + 1
+                    } else {
+                        self.undecoded_secs.store(0, Ordering::Relaxed);
+                        0
+                    };
+                    if secs == 3 {
+                        warn!("frames arrive but none decode: {}", verdict.key_metric);
+                        let status = format!("Video arrives but can't be decoded. {}", verdict.summary);
+                        self.controller.ui(move |ui| ui.set_stream_status(status.into()));
+                    }
                     let line = self.stats_line(&sample, &verdict);
                     report::lock(&self.report).sample(sample);
                     self.controller.ui(move |ui| ui.set_stream_stats(line.into()));
@@ -423,6 +439,7 @@ impl Controller {
             video: Mutex::new(size.clone()),
             first_frame: AtomicBool::new(false),
             provenance_requested: AtomicBool::new(false),
+            undecoded_secs: AtomicU32::new(0),
         });
         self.ui(|ui| {
             ui.set_stream_frame(Image::default());
@@ -478,6 +495,7 @@ impl Controller {
         self.ui(move |ui| {
             ui.set_stream_stats(format!("{size} {codec}").into());
             ui.set_stream_pad_visible(pad);
+            ui.set_stream_menu_open(false);
             ui.set_stream_zoom_mode(false);
             ui.set_stream_zoom(1.0);
             ui.set_stream_pan_x(0.0);

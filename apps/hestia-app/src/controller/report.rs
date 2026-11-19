@@ -39,6 +39,9 @@ pub(super) fn lock(report: &SharedReport) -> MutexGuard<'_, StreamReport> {
 pub(super) fn begin(title: &str, host_name: &str, device: &DeviceInfo) -> SharedReport {
     let mut r = StreamReport::new(format!("{title} on {host_name}"), logcapture::mark());
     r.field("Client", "version", view::version_text());
+    if let Some(device) = platform::device_summary() {
+        r.field("Client", "device", device);
+    }
     r.field(
         "Client",
         "platform",
@@ -188,9 +191,10 @@ impl Controller {
         let now = std::time::SystemTime::now();
         let lines = logcapture::lines_since(0);
         let mut text = format!(
-            "Hestia RS app log — {}\n{}\nThis display: {:?}\n\nHosts:\n",
+            "Hestia RS app log — {}\n{}\nThis device: {}\nThis display: {:?}\n\nHosts:\n",
             report::utc(now),
             view::version_text(),
+            platform::device_summary().unwrap_or_else(|| std::env::consts::OS.to_owned()),
             platform::native_display(),
         );
         let snapshots = self.state().snapshots.clone();
@@ -202,8 +206,15 @@ impl Controller {
             };
             text += &format!("  {} ({}:{}) — {state}\n", host.name, host.address, host.http_port);
         }
+        let (kept, left_out) = report::compact_log(&lines);
         text += &format!("\nLog ({} lines):\n", lines.len());
-        text += &lines.join("\n");
+        text += &kept.join("\n");
+        if !left_out.is_empty() {
+            text += "\n\nRepeats left out of the log:\n";
+            for (shape, n) in left_out.iter().take(12) {
+                text += &format!("  {n:>6} × {shape}\n");
+            }
+        }
         // The run before this one (e.g. the app was closed while stuck).
         let dir = platform::reports_dir(core.data_dir());
         if let Some(previous) = logcapture::previous_run(&dir) {

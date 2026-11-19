@@ -259,4 +259,11 @@ fn main() {
     ui.set_stream_pad_visible(true);
     ui.set_screen(4);
     save(&window, size, &out.join("phone-landscape-stream-pad.png"));
+
+    // The stream menu on a short landscape screen: it must scroll, with
+    // Disconnect / Quit in reach.
+    ui.set_stream_pad_visible(false);
+    ui.set_stream_menu_open(true);
+    save(&window, size, &out.join("phone-landscape-stream-menu.png"));
+    ui.set_stream_menu_open(false);
 }

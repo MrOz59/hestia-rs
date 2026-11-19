@@ -110,7 +110,7 @@ export component StreamView inherits Rectangle {
     callback disconnect();
     callback quit-app();
 
-    property <bool> menu-open: false;
+    in-out property <bool> menu-open: false;
     property <float> frame-w: root.frame.width > 0 ? root.frame.width : 16;
     property <float> frame-h: root.frame.height > 0 ? root.frame.height : 9;
     property <float> scale: root.video-scale == 1
@@ -300,11 +300,16 @@ export component StreamView inherits Rectangle {
                 indeterminate: true;
             }
         }
-        Text {
-            horizontal-alignment: center;
-            text: root.status;
-            color: Theme.text;
-            font-size: 15px;
+        HorizontalLayout {
+            alignment: center;
+            Text {
+                width: Math.min(root.width - 48px, 520px);
+                horizontal-alignment: center;
+                wrap: word-wrap;
+                text: root.status;
+                color: Theme.text;
+                font-size: 15px;
+            }
         }
     }
 
@@ -420,7 +425,9 @@ export component StreamView inherits Rectangle {
         x: root.pad-visible && !root.keyboard-open ? (parent.width - self.width) / 2 : parent.width - self.width - 12px;
         y: Theme.control-height + 20px;
         width: 260px;
-        height: menu.preferred-height;
+        // Fits under the handle; the list scrolls when the screen is short.
+        height: Math.min(menu-top.preferred-height + menu-list.preferred-height + 1px, root.height - self.y - 12px);
+        clip: true;
         border-radius: Theme.radius;
         background: Theme.surface;
         border-width: 1px;
@@ -428,70 +435,13 @@ export component StreamView inherits Rectangle {
         drop-shadow-blur: 24px;
         drop-shadow-color: #00000090;
 
-        menu := VerticalLayout {
-            width: 100%;
+        // Leaving the stream stays in reach at the top.
+        menu-top := VerticalLayout {
+            y: 0;
+            width: parent.width;
+            height: self.preferred-height;
             padding: 6px;
-            MenuItem {
-                icon: "keyboard";
-                text: root.keyboard-open ? "Hide keyboard" : root.soft-keyboard ? "Keyboard (3-finger tap)" : "Shortcut keys";
-                clicked => {
-                    root.keyboard-open = !root.keyboard-open;
-                    root.menu-open = false;
-                }
-            }
-            MenuItem {
-                icon: "mouse";
-                text: root.touch-mode == 0 ? "Touch: trackpad" : root.touch-mode == 1 ? "Touch: mouse" : "Touch: touchscreen";
-                clicked => {
-                    root.cycle-touch-mode();
-                }
-            }
-            MenuItem {
-                icon: "play";
-                text: root.pad-visible ? "Hide on-screen controller" : "On-screen controller";
-                clicked => {
-                    root.toggle-pad();
-                    root.menu-open = false;
-                }
-            }
-            MenuItem {
-                icon: "fullscreen";
-                text: root.zoom-mode ? "Zoom: on (pinch, two-finger pan)" : "Zoom";
-                clicked => {
-                    root.toggle-zoom();
-                    root.menu-open = false;
-                }
-            }
-            MenuItem {
-                icon: "monitor";
-                text: root.video-scale == 0 ? "Picture: fit" : root.video-scale == 1 ? "Picture: fill" : "Picture: stretch";
-                clicked => {
-                    root.cycle-scale();
-                }
-            }
-            MenuItem {
-                icon: "stats";
-                text: root.show-stats ? "Hide statistics" : "Show statistics";
-                clicked => {
-                    root.toggle-stats();
-                }
-            }
-            MenuItem {
-                icon: "refresh";
-                text: "Fix picture (new keyframe)";
-                clicked => {
-                    root.request-keyframe();
-                    root.menu-open = false;
-                }
-            }
-            MenuItem {
-                icon: "fullscreen";
-                text: root.fullscreen ? "Leave full screen" : "Full screen";
-                clicked => {
-                    root.toggle-fullscreen();
-                    root.menu-open = false;
-                }
-            }
+            padding-bottom: 4px;
             MenuItem {
                 icon: "logout";
                 text: "Disconnect";
@@ -509,11 +459,91 @@ export component StreamView inherits Rectangle {
                     root.quit-app();
                 }
             }
-            if !Theme.compact: Text {
-                text: "Ctrl+Alt+Shift+Q disconnects";
-                color: Theme.muted;
-                font-size: 11px;
-                horizontal-alignment: center;
+        }
+        Rectangle {
+            y: menu-top.height;
+            x: 10px;
+            width: parent.width - 20px;
+            height: 1px;
+            background: Theme.border;
+        }
+        Flickable {
+            y: menu-top.height + 1px;
+            width: parent.width;
+            height: parent.height - self.y;
+            content-width: self.width;
+            content-height: menu-list.preferred-height;
+            menu-list := VerticalLayout {
+                width: 260px;
+                height: self.preferred-height;
+                padding: 6px;
+                MenuItem {
+                    icon: "keyboard";
+                    text: root.keyboard-open ? "Hide keyboard" : root.soft-keyboard ? "Keyboard (3-finger tap)" : "Shortcut keys";
+                    clicked => {
+                        root.keyboard-open = !root.keyboard-open;
+                        root.menu-open = false;
+                    }
+                }
+                MenuItem {
+                    icon: "mouse";
+                    text: root.touch-mode == 0 ? "Touch: trackpad" : root.touch-mode == 1 ? "Touch: mouse" : "Touch: touchscreen";
+                    clicked => {
+                        root.cycle-touch-mode();
+                    }
+                }
+                MenuItem {
+                    icon: "play";
+                    text: root.pad-visible ? "Hide on-screen controller" : "On-screen controller";
+                    clicked => {
+                        root.toggle-pad();
+                        root.menu-open = false;
+                    }
+                }
+                MenuItem {
+                    icon: "fullscreen";
+                    text: root.zoom-mode ? "Zoom: on (pinch, two-finger pan)" : "Zoom";
+                    clicked => {
+                        root.toggle-zoom();
+                        root.menu-open = false;
+                    }
+                }
+                MenuItem {
+                    icon: "monitor";
+                    text: root.video-scale == 0 ? "Picture: fit" : root.video-scale == 1 ? "Picture: fill" : "Picture: stretch";
+                    clicked => {
+                        root.cycle-scale();
+                    }
+                }
+                MenuItem {
+                    icon: "stats";
+                    text: root.show-stats ? "Hide statistics" : "Show statistics";
+                    clicked => {
+                        root.toggle-stats();
+                    }
+                }
+                MenuItem {
+                    icon: "refresh";
+                    text: "Fix picture (new keyframe)";
+                    clicked => {
+                        root.request-keyframe();
+                        root.menu-open = false;
+                    }
+                }
+                MenuItem {
+                    icon: "fullscreen";
+                    text: root.fullscreen ? "Leave full screen" : "Full screen";
+                    clicked => {
+                        root.toggle-fullscreen();
+                        root.menu-open = false;
+                    }
+                }
+                if !Theme.compact: Text {
+                    text: "Ctrl+Alt+Shift+Q disconnects";
+                    color: Theme.muted;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                }
             }
         }
     }
