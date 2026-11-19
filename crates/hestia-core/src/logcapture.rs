@@ -6,6 +6,9 @@
 //! takes a [`mark`] when a session starts and collects [`lines_since`] it.
 
 use std::collections::VecDeque;
+use std::fs::{self, File};
+use std::io::{self, Write};
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -81,7 +84,61 @@ pub fn lines_since(mark: u64) -> Vec<String> {
 /// Adds a line directly (for code that wants something in the report
 /// without going through `log`).
 pub fn note(line: impl Into<String>) {
-    buffer().push(line.into());
+    push_line(line.into());
+}
+
+/// This run's log on disk, and the one before it.
+pub const CURRENT_LOG: &str = "app-current.log";
+pub const PREVIOUS_LOG: &str = "app-previous.log";
+/// The file stops growing past this (the in-memory buffer goes on).
+const MAX_FILE_BYTES: u64 = 16 << 20;
+
+struct LogFile {
+    file: File,
+    written: u64,
+}
+
+static FILE: Mutex<Option<LogFile>> = Mutex::new(None);
+
+fn push_line(line: String) {
+    if let Some(log) = FILE.lock().unwrap_or_else(|p| p.into_inner()).as_mut()
+        && log.written < MAX_FILE_BYTES
+    {
+        let text = if log.written + line.len() as u64 + 1 >= MAX_FILE_BYTES {
+            "[log file full; later lines are only in the app]\n".to_owned()
+        } else {
+            format!("{line}\n")
+        };
+        if log.file.write_all(text.as_bytes()).is_ok() {
+            log.written += text.len() as u64;
+        }
+    }
+    buffer().push(line);
+}
+
+/// Mirrors the log into `dir/app-current.log` as it is written, so it
+/// survives the app being killed; the previous run's file is kept as
+/// `app-previous.log`. Lines logged before this call are written first.
+pub fn persist(dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let current = dir.join(CURRENT_LOG);
+    if current.exists() {
+        fs::rename(&current, dir.join(PREVIOUS_LOG))?;
+    }
+    let mut file = File::create(&current)?;
+    let mut written = 0;
+    for line in lines_since(0) {
+        file.write_all(line.as_bytes())?;
+        file.write_all(b"\n")?;
+        written += line.len() as u64 + 1;
+    }
+    *FILE.lock().unwrap_or_else(|p| p.into_inner()) = Some(LogFile { file, written });
+    Ok(())
+}
+
+/// The previous run's log, if one was kept.
+pub fn previous_run(dir: &Path) -> Option<String> {
+    fs::read_to_string(dir.join(PREVIOUS_LOG)).ok()
 }
 
 fn captured(meta: &Metadata<'_>) -> bool {
@@ -109,7 +166,7 @@ impl Log for Tee {
                 record.target(),
                 record.args()
             );
-            buffer().push(line);
+            push_line(line);
         }
     }
 
@@ -146,5 +203,23 @@ mod tests {
             ["[… 1 earlier lines dropped from the log buffer]", "c", "d", "e"]
         );
         assert!(b.since(b.mark()).is_empty());
+    }
+
+    #[test]
+    fn persists_and_keeps_the_previous_run() {
+        let dir = std::env::temp_dir().join(format!("hestia-logfile-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        note("first run line");
+        persist(&dir).unwrap();
+        note("written live");
+        let current = fs::read_to_string(dir.join(CURRENT_LOG)).unwrap();
+        assert!(
+            current.contains("first run line") && current.contains("written live"),
+            "{current}"
+        );
+        persist(&dir).unwrap();
+        assert!(previous_run(&dir).unwrap().contains("written live"));
+        *FILE.lock().unwrap() = None;
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -312,6 +312,7 @@ impl Controller {
         host_id: String,
         launched: &LaunchedSession,
         session_report: SharedReport,
+        launch_seq: u64,
     ) -> Result<(), String> {
         let (decoder, formats) = hestia_media::default_decoder(Colorimetry::default())?;
         let config = launched.stream_config(&formats).map_err(|e| e.to_string())?;
@@ -359,6 +360,10 @@ impl Controller {
             listener.clone(),
         )
         .map_err(|e| e.to_string())?;
+        if !self.launch_current(launch_seq) {
+            spawn("hestia-stream-stop", move || session.stop());
+            return Err("cancelled".into());
+        }
         let codec = format!("{:?}", session.negotiated().video_format.codec);
         info!("streaming {size} {codec} from {}", launched.host.name);
         *listener.video.lock().unwrap_or_else(|p| p.into_inner()) = format!("{size}@{} {codec}", launched.request.fps);

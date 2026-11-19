@@ -37,6 +37,10 @@ struct State {
     /// its confirmation tap.
     tools_commands: Vec<hestia_core::api::ServerCommand>,
     tools_armed: Option<u32>,
+    /// The launch in progress (sequence number, host id); cancelling clears
+    /// it so the launch thread knows to back out.
+    launching: Option<(u64, String)>,
+    launch_seq: u64,
 }
 
 pub struct Controller {
@@ -136,6 +140,10 @@ impl Controller {
         });
         let c = self.clone();
         ui.on_back_to_apps(move || {
+            // While starting, "back" means cancel.
+            if c.cancel_launch() {
+                return;
+            }
             // The report screen can be opened from Settings with no host open.
             let screen = if c.state().current_host.is_some() { 1 } else { 0 };
             c.ui(move |ui| ui.set_screen(screen));
@@ -225,6 +233,11 @@ impl Controller {
                 }
             };
             let _ = c.core.set(core.clone());
+            // Keep the log on disk too, so a killed app leaves it behind.
+            if let Err(e) = hestia_core::logcapture::persist(&platform::reports_dir(core.data_dir())) {
+                warn!("could not keep the log on disk: {e}");
+            }
+            info!("{} starting", view::version_text());
             let settings = core.settings();
             c.trackpad.store(settings.touch_trackpad, Ordering::Relaxed);
             let client_id = core.identity().unique_id().to_owned();
@@ -674,6 +687,12 @@ impl Controller {
             return;
         }
 
+        let seq = {
+            let mut st = self.state();
+            st.launch_seq += 1;
+            st.launching = Some((st.launch_seq, id.clone()));
+            st.launch_seq
+        };
         let c = self.clone();
         self.ui(move |ui| {
             ui.set_session_title(title.as_str().into());
@@ -682,17 +701,30 @@ impl Controller {
             ui.set_session_busy(true);
             ui.set_screen(2);
 
-            let size = ui.window().size();
+            // This display, landscape (streams are), else the window.
             let mut device = DeviceInfo::default();
-            if size.width > 0 && size.height > 0 {
-                device.display_width = size.width;
-                device.display_height = size.height;
+            if let Some((w, h, hz)) = platform::native_display() {
+                (device.display_width, device.display_height, device.refresh_rate) = (w, h, hz);
+            } else {
+                let size = ui.window().size();
+                if size.width > 0 && size.height > 0 {
+                    device.display_width = size.width.max(size.height);
+                    device.display_height = size.width.min(size.height);
+                }
             }
             spawn("hestia-launch", move || {
                 let Some(core) = c.core() else { return };
                 let session_report = report::begin(&title, &host_name, &device);
                 let failure: String;
-                let text: Vec<String> = match core.launch(&id, app_id, &device) {
+                let launched = core.launch(&id, app_id, &device);
+                if !c.launch_current(seq) {
+                    // Cancelled while the host was starting the app: undo
+                    // Hermes' display changes (the app itself keeps running).
+                    core.end_hermes_session(&id);
+                    c.finish_report(session_report, "cancelled while starting", Some(id.clone()));
+                    return;
+                }
+                let text: Vec<String> = match launched {
                     Ok(session) => {
                         report::launched(&session_report, &session);
                         if let Some(why) = &session.prepare_error {
@@ -701,13 +733,22 @@ impl Controller {
                             ));
                         }
                         c.ui(|ui| ui.set_session_lines(lines(&["Connecting to the stream…"])));
-                        match c.start_stream(id.clone(), &session, session_report.clone()) {
+                        match c.start_stream(id.clone(), &session, session_report.clone(), seq) {
                             Ok(()) => {
+                                c.finish_launch(seq);
                                 c.ui(|ui| ui.set_session_busy(false));
                                 c.refresh_current_running();
                                 return;
                             }
+                            Err(_) if !c.launch_current(seq) => {
+                                core.end_hermes_session(&id);
+                                c.finish_report(session_report, "cancelled while connecting", Some(id.clone()));
+                                return;
+                            }
                             Err(e) => {
+                                // Give the host its display back (Hermes
+                                // turned the monitor off for this session).
+                                core.end_hermes_session(&id);
                                 failure = format!("the stream could not start: {e}");
                                 let mut out = vec![format!(
                                     "{} on {}, but the stream could not start: {e}",
@@ -738,10 +779,12 @@ impl Controller {
                             .lock()
                             .unwrap_or_else(|p| p.into_inner())
                             .field("Host", "address", &address);
+                        core.end_hermes_session(&id);
                         failure = format!("could not start the app: {e}");
                         vec![format!("Could not start the app: {e}")]
                     }
                 };
+                c.finish_launch(seq);
                 let show_report = c.finish_report(session_report, &failure, Some(id.clone()));
                 let model_lines: Vec<SharedString> = text.into_iter().map(SharedString::from).collect();
                 c.ui(move |ui| {
@@ -754,6 +797,38 @@ impl Controller {
                 c.refresh_current_running();
             });
         });
+    }
+
+    fn launch_current(&self, seq: u64) -> bool {
+        self.state().launching.as_ref().is_some_and(|(s, _)| *s == seq)
+    }
+
+    fn finish_launch(&self, seq: u64) {
+        let mut st = self.state();
+        if st.launching.as_ref().is_some_and(|(s, _)| *s == seq) {
+            st.launching = None;
+        }
+    }
+
+    /// Cancels the launch in progress, if any: back to the apps right away;
+    /// the launch thread backs out and Hermes gets its display back.
+    fn cancel_launch(self: &Shared) -> bool {
+        let Some((_, id)) = self.state().launching.take() else {
+            return false;
+        };
+        info!("launch cancelled by the user");
+        self.ui(|ui| {
+            ui.set_session_busy(false);
+            ui.set_screen(1);
+        });
+        self.toast("Cancelled. If the app already started on the host, quit it from the app list.");
+        let c = self.clone();
+        spawn("hestia-launch-cancel", move || {
+            if let Some(core) = c.core() {
+                core.end_hermes_session(&id);
+            }
+        });
+        true
     }
 
     fn quit_app(self: &Shared) {

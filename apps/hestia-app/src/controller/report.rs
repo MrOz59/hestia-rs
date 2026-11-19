@@ -204,6 +204,20 @@ impl Controller {
         }
         text += &format!("\nLog ({} lines):\n", lines.len());
         text += &lines.join("\n");
+        // The run before this one (e.g. the app was closed while stuck).
+        let dir = platform::reports_dir(core.data_dir());
+        if let Some(previous) = logcapture::previous_run(&dir) {
+            const KEEP: usize = 3000;
+            let all: Vec<&str> = previous.lines().collect();
+            let tail = &all[all.len().saturating_sub(KEEP)..];
+            text += &format!(
+                "\n\nPrevious run ({} of {} lines, from {}):\n",
+                tail.len(),
+                all.len(),
+                logcapture::PREVIOUS_LOG
+            );
+            text += &tail.join("\n");
+        }
         let path = match report::save_named(&platform::reports_dir(core.data_dir()), "app", now, &text) {
             Ok(path) => Some(path),
             Err(e) => {

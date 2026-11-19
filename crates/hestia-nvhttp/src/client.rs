@@ -192,18 +192,26 @@ impl NvHttpClient {
     /// to learn the real pair status) and falling back to HTTP when the host no
     /// longer accepts our certificate.
     pub fn server_info(&mut self) -> Result<ServerInfo> {
+        let mut secure_error = None;
         if self.is_pinned() {
             match self.get_https_xml("serverinfo", &[], self.timeout) {
                 Ok(root) => return Ok(ServerInfo::from_xml(&root)),
-                Err(e) if e.is_unauthorized() || matches!(e, NvHttpError::Io(_)) => {
-                    warn!("HTTPS serverinfo failed on {} ({e}); falling back to HTTP", self.host);
+                Err(e) if e.is_unauthorized() => {
+                    warn!("{} rejected our certificate ({e}); falling back to HTTP", self.host);
+                }
+                Err(NvHttpError::Io(e)) => {
+                    // Not a verdict on the pairing: the HTTPS port didn't
+                    // answer (host busy with a launch, firewall…).
+                    warn!("HTTPS serverinfo on {} failed ({e}); falling back to HTTP", self.host);
+                    secure_error = Some(e.to_string());
                 }
                 Err(e) => return Err(e),
             }
         }
 
         let root = self.get_http_xml("serverinfo", &[], self.timeout)?;
-        let info = ServerInfo::from_xml(&root);
+        let mut info = ServerInfo::from_xml(&root);
+        info.secure_error = secure_error;
         let https_port = if info.https_port == 0 {
             DEFAULT_HTTPS_PORT
         } else {

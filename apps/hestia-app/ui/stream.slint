@@ -96,10 +96,22 @@ export component StreamView inherits Rectangle {
             self.focus();
         }
         key-pressed(event) => {
+            // Android back: close the keyboard bar, else toggle the menu.
+            if (event.text == Key.Back) {
+                if (root.keyboard-open) {
+                    root.keyboard-open = false;
+                } else {
+                    root.menu-open = !root.menu-open;
+                }
+                return accept;
+            }
             root.key-event(event.text, true, event.repeat, event.modifiers.control, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta);
             accept
         }
         key-released(event) => {
+            if (event.text == Key.Back) {
+                return accept;
+            }
             root.key-event(event.text, false, false, event.modifiers.control, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta);
             accept
         }

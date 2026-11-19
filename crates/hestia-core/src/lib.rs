@@ -484,7 +484,9 @@ impl HestiaClient {
             }
         };
 
-        let paired = record.is_paired() && info.paired;
+        // When only the HTTPS port failed (busy host, blocked port), plain
+        // HTTP can't tell whether we're paired: keep what we know.
+        let paired = record.is_paired() && (info.paired || info.secure_error.is_some());
         let capabilities = if paired {
             match HestiaApi::new(&client).capabilities() {
                 Ok(caps) if caps.is_compatible() => Some(caps),

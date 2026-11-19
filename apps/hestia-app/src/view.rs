@@ -82,6 +82,8 @@ pub fn host_card(record: &HostRecord, snapshot: Option<&HostSnapshot>, checking:
                 "The host no longer recognises this device. Tap to pair again.".into()
             } else if !s.paired {
                 "Tap to pair".into()
+            } else if let Some(e) = s.info.as_ref().and_then(|i| i.secure_error.as_ref()) {
+                format!("Paired, but the host's secure port isn't answering (busy starting an app?): {e}")
             } else if busy {
                 "An app is running".into()
             } else {

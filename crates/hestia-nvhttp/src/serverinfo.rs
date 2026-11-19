@@ -32,6 +32,10 @@ pub struct ServerInfo {
     pub permission: Option<u32>,
     pub virtual_display_capable: bool,
     pub virtual_display_driver_ready: bool,
+    /// Set when we hold the host's certificate but the HTTPS request failed
+    /// for a network reason (host busy, port blocked): the info then came
+    /// over plain HTTP and `paired` says nothing about us.
+    pub secure_error: Option<String>,
 }
 
 fn opt(root: &Element, name: &str) -> Option<String> {
@@ -86,6 +90,7 @@ impl ServerInfo {
             permission: num("Permission").map(|v| v as u32),
             virtual_display_capable: flag(root, "VirtualDisplayCapable"),
             virtual_display_driver_ready: flag(root, "VirtualDisplayDriverReady"),
+            secure_error: None,
         }
     }
 

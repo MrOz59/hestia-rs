@@ -636,7 +636,7 @@ export component SessionPage inherits Rectangle {
                             spacing: 10px;
                             alignment: end;
                             PillButton {
-                                text: "Back to apps";
+                                text: root.busy ? "Cancel" : "Back to apps";
                                 clicked => {
                                     root.back();
                                 }
