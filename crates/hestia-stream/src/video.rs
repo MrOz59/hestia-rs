@@ -533,6 +533,10 @@ impl VideoReceiver {
                 flag.store(true, Ordering::Relaxed);
             }));
         }
+        let failed = feedback.clone();
+        sink.attach_failure_handler(Box::new(move |why| {
+            let _ = failed.send(VideoFeedback::SinkFailed(why));
+        }));
         sink.setup(cfg.format, cfg.width, cfg.height, cfg.fps)
             .map_err(|e| io::Error::other(format!("video decoder setup failed: {e}")))?;
         let socket = bind_udp(&cfg.remote)?;

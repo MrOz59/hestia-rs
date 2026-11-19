@@ -764,10 +764,20 @@ impl Controller {
                 let session_report = report::begin(&title, &host_name, &device);
                 let failure: String;
                 let settings = core.settings();
+                let colorimetry = hestia_media::Colorimetry::default();
                 #[cfg(target_os = "android")]
-                hestia_media::gpu_video::GpuVideo::global().set_wanted(settings.gpu_video);
-                let decoder =
-                    hestia_media::decoder_with(hestia_media::Colorimetry::default(), settings.hardware_decoding);
+                let decoder = if settings.hardware_decoding {
+                    let candidates = platform::video_decoders(settings.width, settings.height, settings.fps)
+                        .unwrap_or_else(|e| {
+                            warn!("could not check Android video decoders: {e}");
+                            Vec::new()
+                        });
+                    hestia_media::decoder_with_android_capabilities(colorimetry, candidates)
+                } else {
+                    hestia_media::decoder_with(colorimetry, false)
+                };
+                #[cfg(not(target_os = "android"))]
+                let decoder = hestia_media::decoder_with(colorimetry, settings.hardware_decoding);
                 let launched = decoder.and_then(|decoder| {
                     if !c.launch_current(seq) {
                         return Err("cancelled".into());

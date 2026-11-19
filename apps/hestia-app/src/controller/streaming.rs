@@ -11,6 +11,8 @@ use hestia_core::report::StatsSample;
 use hestia_core::stream::input::{Modifiers, MouseButton, TouchPhase};
 use hestia_core::stream::{InputEvent, SessionListener, StreamEvent, StreamStats};
 use hestia_core::{LaunchedSession, ManagedStream, StreamHost};
+#[cfg(target_os = "android")]
+use hestia_media::gpu_video::{GpuSessionGuard, GpuVideo, GpuVideoStats};
 use hestia_media::{DecodeStats, DecoderChoice, DecodingSink, FramePresenter, LatencyHistogram, RgbaFrame};
 use log::{info, warn};
 use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
@@ -92,6 +94,8 @@ pub(super) struct ActiveStream {
     report: SharedReport,
     decode: Arc<DecodeStats>,
     present: Arc<PresentStats>,
+    #[cfg(target_os = "android")]
+    _gpu_session: GpuSessionGuard,
 }
 
 impl ActiveStream {
@@ -117,6 +121,17 @@ struct PresentStats {
     closed: AtomicBool,
     handoff: LatencyHistogram,
     receive_to_ui: LatencyHistogram,
+    #[cfg(target_os = "android")]
+    gpu: Arc<GpuVideoStats>,
+}
+
+impl PresentStats {
+    fn superseded(&self) -> u64 {
+        let cpu = self.superseded.load(Ordering::Relaxed);
+        #[cfg(target_os = "android")]
+        let cpu = cpu + self.gpu.superseded.load(Ordering::Relaxed);
+        cpu
+    }
 }
 
 #[derive(Default)]
@@ -139,7 +154,9 @@ impl FramePresenter for UiPresenter {
             return;
         }
         let reusable = if let Some(older) = pending.latest.take() {
-            self.stats.superseded.fetch_add(1, Ordering::Relaxed);
+            if !older.on_gpu {
+                self.stats.superseded.fetch_add(1, Ordering::Relaxed);
+            }
             older
         } else {
             pending.spare.take().unwrap_or_default()
@@ -163,21 +180,18 @@ impl FramePresenter for UiPresenter {
                 && !stats.closed.load(Ordering::Acquire)
             {
                 if frame.on_gpu {
-                    // Zero-copy: the GPU renderer draws it in this redraw.
+                    // The renderer counts its own draws and superseded GPU images.
                     ui.window().request_redraw();
                 } else {
-                    // Copy only a frame the UI will actually hand to its renderer.
                     let buffer =
                         SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&frame.data, frame.width, frame.height);
                     ui.set_stream_frame(Image::from_rgba8(buffer));
-                }
-                let delivered_at = Instant::now();
-                stats.handoff.record(delivered_at.duration_since(frame.decoded_at));
-                stats
-                    .receive_to_ui
-                    .record(delivered_at.duration_since(frame.received_at));
-                if stats.delivered.fetch_add(1, Ordering::Relaxed) == 0 {
-                    ui.set_stream_status(SharedString::new());
+                    let delivered_at = Instant::now();
+                    stats.handoff.record(delivered_at.duration_since(frame.decoded_at));
+                    stats.receive_to_ui.record(delivered_at.duration_since(frame.received_at));
+                    if stats.delivered.fetch_add(1, Ordering::Relaxed) == 0 {
+                        ui.set_stream_status(SharedString::new());
+                    }
                 }
                 pending.lock().unwrap_or_else(|p| p.into_inner()).spare = Some(frame);
             }
@@ -264,7 +278,7 @@ impl Listener {
             decoded: self.decode.decoded.load(Ordering::Relaxed),
             decode_us: self.decode.decode_time_us.load(Ordering::Relaxed),
             decoder_dropped: self.decode.dropped.load(Ordering::Relaxed),
-            superseded: self.present.superseded.load(Ordering::Relaxed),
+            superseded: self.present.superseded(),
         };
         let mut last = self.last.lock().unwrap_or_else(|p| p.into_inner());
         let prev = last.replace(now.clone())?;
@@ -414,7 +428,13 @@ impl Controller {
         hestia_core::add_stream_config_to_report(&config, decoder.name(), &mut report::lock(&session_report));
         let generation = self.stream_generation.fetch_add(1, Ordering::Relaxed) + 1;
         let weak = self.weak.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let present = Arc::new(PresentStats::default());
+        #[cfg(target_os = "android")]
+        let gpu_session = GpuVideo::global().prepare(launched.settings.gpu_video);
+        let present = Arc::new(PresentStats {
+            #[cfg(target_os = "android")]
+            gpu: gpu_session.stats(),
+            ..PresentStats::default()
+        });
         let sink = DecodingSink::new(
             decoder,
             Box::new(UiPresenter {
@@ -492,6 +512,8 @@ impl Controller {
             report: session_report,
             decode,
             present,
+            #[cfg(target_os = "android")]
+            _gpu_session: gpu_session,
         });
         if let Some(previous) = previous {
             previous.present.closed.store(true, Ordering::Release);
@@ -571,6 +593,20 @@ impl Controller {
                         r.field("Video latency", stage, summary);
                     }
                 }
+                #[cfg(target_os = "android")]
+                {
+                    let gpu = &present.gpu;
+                    r.field("GPU video", "draws submitted", gpu.drawn.load(Ordering::Relaxed));
+                    r.field("GPU video", "replaced before draw", gpu.superseded.load(Ordering::Relaxed));
+                    for (stage, histogram) in [
+                        ("GPU picture ready to draw submission", &gpu.ready_to_draw),
+                        ("first packet to GPU draw submission", &gpu.receive_to_draw),
+                    ] {
+                        if let Some(summary) = histogram.summary() {
+                            r.field("Video latency", stage, summary);
+                        }
+                    }
+                }
                 r.field(
                     "Decoder totals",
                     "mean decode",
@@ -585,9 +621,6 @@ impl Controller {
             let show_report = c.finish_report(session_report, &outcome, Some(host_id.clone()));
             platform::set_keyboard_visible(false);
             platform::set_stream_mode(false, hestia_core::StreamOrientation::default());
-            // Zero-copy video: the renderer lets go of the last picture.
-            #[cfg(target_os = "android")]
-            hestia_media::gpu_video::GpuVideo::global().end();
             platform::set_gamepads_streaming(false);
             c.ui(move |ui| {
                 if ui.get_stream_fullscreen() {

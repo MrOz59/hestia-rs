@@ -568,6 +568,48 @@ fn with_helper(
     })
 }
 
+/// Candidates ordered for Auto. Java can verify size/rate and hardware
+/// support on the Android API levels covered by the app.
+#[cfg(target_os = "android")]
+pub fn video_decoders(
+    width: u32,
+    height: u32,
+    fps: u32,
+) -> Result<Vec<(hestia_media::VideoCodec, String)>, String> {
+    use hestia_media::VideoCodec;
+    use jni::objects::{JString, JValue};
+
+    let mut decoders = Vec::new();
+    with_helper(|env, _, helper| {
+        for (codec, mime) in [
+            (VideoCodec::Hevc, "video/hevc"),
+            (VideoCodec::H264, "video/avc"),
+            (VideoCodec::Av1, "video/av01"),
+        ] {
+            let mime = env.new_string(mime)?;
+            let name = env
+                .call_static_method(
+                    helper,
+                    "findVideoDecoder",
+                    "(Ljava/lang/String;III)Ljava/lang/String;",
+                    &[
+                        JValue::Object(&mime),
+                        JValue::Int(width as i32),
+                        JValue::Int(height as i32),
+                        JValue::Int(fps as i32),
+                    ],
+                )?
+                .l()?;
+            if !name.is_null() {
+                let name = env.get_string(&JString::from(name))?.into();
+                decoders.push((codec, name));
+            }
+        }
+        Ok(())
+    })?;
+    Ok(decoders)
+}
+
 /// Loads HestiaHelper from the dex built by build.rs (embedded here) and
 /// registers its native methods.
 #[cfg(target_os = "android")]

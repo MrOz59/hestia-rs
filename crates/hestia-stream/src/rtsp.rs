@@ -29,6 +29,7 @@ const RTSP_CLIENT_VERSION: u32 = 14;
 pub enum RtspError {
     Malformed(&'static str),
     Crypto,
+    NoCommonVideoFormat,
     Io(String),
     Status { request: &'static str, code: u16 },
 }
@@ -38,6 +39,7 @@ impl fmt::Display for RtspError {
         match self {
             Self::Malformed(what) => write!(f, "malformed RTSP message: {what}"),
             Self::Crypto => f.write_str("RTSP decryption failed"),
+            Self::NoCommonVideoFormat => f.write_str("no video format supported by both the host and the decoder"),
             Self::Io(e) => write!(f, "RTSP connection failed: {e}"),
             Self::Status { request, code } => write!(f, "RTSP {request} failed with status {code}"),
         }
@@ -453,7 +455,9 @@ pub fn handshake(cfg: &HandshakeConfig) -> Result<Negotiated, RtspError> {
         None,
     )?;
     let host_sdp = HostSdp::new(String::from_utf8_lossy(&describe.body).into_owned());
-    let video_format = host_sdp.negotiate_video(&cfg.formats, cfg.server_codec_modes);
+    let video_format = host_sdp
+        .negotiate_video(&cfg.formats, cfg.server_codec_modes)
+        .ok_or(RtspError::NoCommonVideoFormat)?;
     let (normal_audio, high_audio) = host_sdp.opus_configs(cfg.audio_channels);
     let high_quality_audio = cfg.bitrate_kbps >= 15_000 && cfg.audio_channels > 2 && high_audio.is_some();
     let audio_format = if high_quality_audio { high_audio } else { normal_audio }

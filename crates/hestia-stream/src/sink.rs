@@ -67,6 +67,8 @@ pub trait VideoSink: Send {
     fn setup(&mut self, format: VideoFormat, width: u32, height: u32, fps: u32) -> Result<(), String>;
     /// Called once before `setup` with a handle for asynchronous IDR requests.
     fn attach_keyframe_requester(&mut self, _requester: KeyframeRequester) {}
+    /// Reports a permanent sink failure from the decoder thread.
+    fn attach_failure_handler(&mut self, _handler: Box<dyn Fn(String) + Send>) {}
     fn submit(&mut self, frame: EncodedFrame) -> SubmitResult;
     fn cleanup(&mut self) {}
 }

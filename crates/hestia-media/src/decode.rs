@@ -99,6 +99,11 @@ pub trait FrameDecoder: Send {
     /// can take the next input instead of waiting for this one's picture.
     fn set_backlog(&mut self, _frames: usize) {}
 
+    /// A failure that requesting a new keyframe cannot recover from.
+    fn terminal_error(&self) -> Option<&str> {
+        None
+    }
+
     fn decode_timed(
         &mut self,
         frame: &EncodedFrame,
@@ -125,11 +130,14 @@ impl<F: FnMut(&RgbaFrame) + Send> FramePresenter for F {
     }
 }
 
-/// Per-stage latency with 0.25 ms buckets up to 64 ms. The overflow bucket
-/// is reported as a lower bound, so high tail latency is visible in reports.
+/// Buckets use 0.25 ms resolution up to 64 ms and 4 ms up to 1,024 ms.
+const FINE_BUCKETS: usize = 256;
+const COARSE_BUCKETS: usize = 240;
+const LATENCY_OVERFLOW: usize = FINE_BUCKETS + COARSE_BUCKETS + 1;
+
 #[derive(Debug)]
 pub struct LatencyHistogram {
-    buckets: [AtomicU64; 257],
+    buckets: [AtomicU64; LATENCY_OVERFLOW + 1],
 }
 
 impl Default for LatencyHistogram {
@@ -142,7 +150,12 @@ impl Default for LatencyHistogram {
 
 impl LatencyHistogram {
     pub fn record(&self, elapsed: Duration) {
-        let bucket = (elapsed.as_micros().div_ceil(250)).min(256) as usize;
+        let us = elapsed.as_micros();
+        let bucket = if us <= 64_000 {
+            us.div_ceil(250) as usize
+        } else {
+            FINE_BUCKETS + ((us - 64_000).div_ceil(4_000)).min(COARSE_BUCKETS as u128 + 1) as usize
+        };
         self.buckets[bucket].fetch_add(1, Ordering::Relaxed);
     }
 
@@ -161,11 +174,13 @@ impl LatencyHistogram {
                     cumulative += *n;
                     cumulative >= target
                 })
-                .unwrap_or(256);
-            if bucket == 256 {
-                "≥63.75".to_owned()
-            } else {
+                .unwrap_or(LATENCY_OVERFLOW);
+            if bucket <= FINE_BUCKETS {
                 format!("{:.2}", bucket as f64 * 0.25)
+            } else if bucket < LATENCY_OVERFLOW {
+                format!("{}.00", 64 + (bucket - FINE_BUCKETS) * 4)
+            } else {
+                ">1024".to_owned()
             }
         };
         Some(format!(
@@ -199,7 +214,7 @@ impl DecodeStats {
             ("first packet to decode queue", &self.receive_to_queue),
             ("decoder queue", &self.queue_wait),
             ("decoder output", &self.codec),
-            ("output to RGBA ready", &self.frame_conversion),
+            ("codec output to frame ready", &self.frame_conversion),
         ]
     }
 
@@ -268,6 +283,7 @@ pub struct DecodingSink {
     decoder: Option<Box<dyn FrameDecoder>>,
     presenter: Option<Box<dyn FramePresenter>>,
     requester: Option<KeyframeRequester>,
+    failure_handler: Option<Box<dyn Fn(String) + Send>>,
     thread: Option<JoinHandle<()>>,
     shared: Arc<Shared>,
 }
@@ -278,6 +294,7 @@ impl DecodingSink {
             decoder: Some(decoder),
             presenter: Some(presenter),
             requester: None,
+            failure_handler: None,
             thread: None,
             shared: Arc::new(Shared {
                 queue: Mutex::new(Queue {
@@ -317,10 +334,11 @@ impl VideoSink for DecodingSink {
             Duration::from_micros(MIN_BACKLOG_FRAMES * 1_000_000 / u64::from(fps.max(1))).max(MIN_BACKLOG_AGE);
         let shared = self.shared.clone();
         let requester = self.requester.clone();
+        let failure_handler = self.failure_handler.take();
         self.thread = Some(
             std::thread::Builder::new()
                 .name("hestia-decode".into())
-                .spawn(move || decode_loop(decoder, presenter, shared, requester))
+                .spawn(move || decode_loop(decoder, presenter, shared, requester, failure_handler))
                 .map_err(|e| e.to_string())?,
         );
         Ok(())
@@ -330,12 +348,19 @@ impl VideoSink for DecodingSink {
         self.requester = Some(requester);
     }
 
+    fn attach_failure_handler(&mut self, handler: Box<dyn Fn(String) + Send>) {
+        self.failure_handler = Some(handler);
+    }
+
     fn submit(&mut self, frame: EncodedFrame) -> SubmitResult {
         if self.thread.is_none() {
             return SubmitResult::Ok;
         }
         let now = Instant::now();
         let mut queue = self.shared.queue();
+        if queue.closed {
+            return SubmitResult::Ok;
+        }
         let overloaded = queue.frames.len() == QUEUE_DEPTH
             || queue
                 .frames
@@ -389,6 +414,7 @@ fn decode_loop(
     mut presenter: Box<dyn FramePresenter>,
     shared: Arc<Shared>,
     requester: Option<KeyframeRequester>,
+    failure_handler: Option<Box<dyn Fn(String) + Send>>,
 ) {
     let mut picture = RgbaFrame::default();
     let mut logged_size = (0, 0);
@@ -407,12 +433,14 @@ fn decode_loop(
             break;
         };
         let started = Instant::now();
-        if started.duration_since(queued_at) > queue.max_age {
+        let queue_age = started.duration_since(queued_at);
+        shared.stats.queue_wait.record(queue_age);
+        if queue_age > queue.max_age {
             let dropped = queue.invalidate();
             drop(queue);
             warn!(
                 "decoder {} ms behind: dropping {} frames for a keyframe",
-                started.duration_since(queued_at).as_millis(),
+                queue_age.as_millis(),
                 dropped + 1
             );
             shared.dropped_backlog(dropped + 1);
@@ -443,6 +471,19 @@ fn decode_loop(
         }
         drop(current);
         let mut queue = shared.queue();
+        if let Some(reason) = decoder.terminal_error() {
+            let dropped = queue.invalidate();
+            queue.closed = true;
+            drop(queue);
+            shared.stats.errors.fetch_add(1, Ordering::Relaxed);
+            shared.stats.dropped.fetch_add(dropped, Ordering::Relaxed);
+            if let Some(report) = &failure_handler {
+                report(reason.to_owned());
+            } else {
+                warn!("video decoder stopped: {reason}");
+            }
+            return;
+        }
         if queue.generation != generation {
             // A newer keyframe may already be queued. Its generation owns recovery.
             shared.dropped_backlog(1);
@@ -459,9 +500,6 @@ fn decode_loop(
                 stats
                     .decode_time_us
                     .fetch_add(decode_time.as_micros() as u64, Ordering::Relaxed);
-                stats
-                    .queue_wait
-                    .record(timing.decode_started_at.duration_since(timing.queued_at));
                 stats
                     .codec
                     .record(timing.codec_output_at.duration_since(timing.decode_started_at));
@@ -614,6 +652,49 @@ mod tests {
         assert_eq!(*shown.lock().unwrap(), (1..=20).collect::<Vec<_>>());
         assert!(request.try_recv().is_err(), "no keyframe needed");
         assert_eq!(sink.stats().dropped.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn reports_backlog_over_64_ms() {
+        let histogram = LatencyHistogram::default();
+        histogram.record(Duration::from_millis(300));
+        assert_eq!(
+            histogram.summary().as_deref(),
+            Some("p50 300.00 / p95 300.00 / p99 300.00 ms (1 samples)")
+        );
+    }
+
+    #[test]
+    fn terminal_failure_reports_once_without_requesting_an_idr() {
+        struct Broken(bool);
+        impl FrameDecoder for Broken {
+            fn name(&self) -> &'static str {
+                "broken"
+            }
+            fn supports(&self, _format: VideoFormat) -> bool {
+                true
+            }
+            fn decode(&mut self, _frame: &EncodedFrame, _out: &mut RgbaFrame) -> Result<bool, String> {
+                self.0 = true;
+                Err("no usable video output".into())
+            }
+            fn terminal_error(&self) -> Option<&str> {
+                self.0.then_some("no usable video output")
+            }
+        }
+
+        let (send_error, errors) = mpsc::channel();
+        let (send_idr, idrs) = mpsc::channel();
+        let mut sink = DecodingSink::new(Box::new(Broken(false)), Box::new(|_: &RgbaFrame| {}));
+        sink.attach_failure_handler(Box::new(move |reason| send_error.send(reason).unwrap()));
+        sink.attach_keyframe_requester(KeyframeRequester::new(move || send_idr.send(()).unwrap()));
+        sink.setup(H264, 1280, 720, 60).unwrap();
+        sink.submit(frame(1, true));
+        assert_eq!(errors.recv_timeout(Duration::from_secs(1)).unwrap(), "no usable video output");
+        sink.submit(frame(2, true));
+        sink.cleanup();
+        assert!(errors.try_recv().is_err());
+        assert!(idrs.try_recv().is_err());
     }
 
     #[test]

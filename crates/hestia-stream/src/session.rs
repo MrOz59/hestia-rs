@@ -155,7 +155,10 @@ impl StreamSession {
                                     });
                                     return;
                                 }
-                                VideoFeedback::SinkFailed(e) => warn!("video sink: {e}"),
+                                VideoFeedback::SinkFailed(reason) => {
+                                    listener.on_event(StreamEvent::Terminated { reason, graceful: false });
+                                    return;
+                                }
                             }
                         }
                         match control_rx.recv_timeout(Duration::from_millis(20)) {
