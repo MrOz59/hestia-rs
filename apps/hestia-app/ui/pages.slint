@@ -958,7 +958,7 @@ export component ToolsPage inherits Rectangle {
     callback fetch-clipboard;
 
     VerticalLayout {
-        PageHeader {
+        tools-header := PageHeader {
             title: "Host tools";
             subtitle: root.host-name;
             show-back: Theme.compact;
@@ -1003,7 +1003,7 @@ export component ToolsPage inherits Rectangle {
         }
 
         Flickable {
-            vertical-stretch: 1;
+            height: root.height - tools-header.preferred-height;
             content-width: self.width;
             content-height: tools-form.preferred-height;
             tools-form := HorizontalLayout {
@@ -1150,7 +1150,7 @@ export component ReportPage inherits Rectangle {
     callback send-to-host;
 
     VerticalLayout {
-        PageHeader {
+        report-header := PageHeader {
             title: "Stream report";
             subtitle: root.title;
             show-back: Theme.compact;
@@ -1176,8 +1176,10 @@ export component ReportPage inherits Rectangle {
             }
         }
 
+        // Explicit height: a short report must not leave the extra space to
+        // the header (it would drift down the screen).
         Flickable {
-            vertical-stretch: 1;
+            height: root.height - report-header.preferred-height;
             content-width: self.width;
             content-height: report-form.preferred-height;
             report-form := HorizontalLayout {
