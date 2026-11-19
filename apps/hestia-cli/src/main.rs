@@ -126,6 +126,15 @@ enum Command {
         #[arg(long, value_name = "TEXT")]
         set: Option<String>,
     },
+    /// Hermes: save the host's full diagnostic report (logs, configuration).
+    HostReport {
+        host: String,
+        /// Write here instead of `<data dir>/reports/hermes-<time>.txt` ("-" for stdout).
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    /// Print the host's web UI address.
+    Web { host: String },
     /// Hermes: print the display status; --recover asks the host to recover it.
     Display {
         host: String,
@@ -379,6 +388,30 @@ fn run(cli: Cli) -> Result<()> {
                 None => print!("{}", client.with_api(&id, |api| api.clipboard())??),
             }
         }
+        Command::HostReport { host, output } => {
+            let id = resolve(&client, &host)?.id;
+            let text = client.with_api(&id, |api| api.diagnostics_report())??;
+            match output {
+                Some(path) if path.as_os_str() == "-" => print!("{text}"),
+                Some(path) => {
+                    std::fs::write(&path, &text)?;
+                    println!("Saved {} ({} KiB).", path.display(), text.len().div_ceil(1024));
+                }
+                None => {
+                    let path = hestia_core::report::save_named(
+                        &client.data_dir().join("reports"),
+                        "hermes",
+                        std::time::SystemTime::now(),
+                        &text,
+                    )?;
+                    println!("Saved {} ({} KiB).", path.display(), text.len().div_ceil(1024));
+                }
+            }
+        }
+        Command::Web { host } => {
+            let id = resolve(&client, &host)?.id;
+            println!("{}", client.web_ui_url(&id)?);
+        }
         Command::Display { host, recover, force } => {
             let id = resolve(&client, &host)?.id;
             let value = if recover {
@@ -506,6 +539,43 @@ fn print_snapshot(s: &HostSnapshot) {
         }
         None if s.paired => println!("  Hermes extensions: not available (plain GameStream host)"),
         None => {}
+    }
+    if let Some(d) = &s.diagnostics {
+        if let Some(pf) = &d.preflight {
+            println!("  ready:    {}", if pf.ready { "yes" } else { "NO" });
+            for c in pf.problems() {
+                println!("    [{}] {}: {}", c.status, c.id, c.message);
+            }
+        }
+        if let Some(rt) = &d.runtime {
+            if let Some(enc) = &rt.encoder {
+                if !enc.name.is_empty() {
+                    println!(
+                        "  encoder:  {} ({}), {}",
+                        enc.name,
+                        if enc.hardware { "hardware" } else { "software" },
+                        enc.codecs.join("/")
+                    );
+                }
+            }
+            if let Some(sessions) = &rt.sessions {
+                print!(
+                    "  sessions: {} active, {}",
+                    sessions.active,
+                    if sessions.streaming { "streaming" } else { "idle" }
+                );
+                match sessions.last_termination_text() {
+                    Some(why) if !sessions.streaming => println!(" (last ended: {why})"),
+                    _ => println!(),
+                }
+            }
+            if let Some(p) = &rt.pipeline {
+                println!(
+                    "  pipeline: {:.0} fps, {:.0} kbps, encode {:.2} ms, capture→encode {:.2} ms, {} dropped",
+                    p.fps, p.bitrate_kbps, p.encode_ms, p.capture_to_encode_ms, p.frames_dropped
+                );
+            }
+        }
     }
 }
 

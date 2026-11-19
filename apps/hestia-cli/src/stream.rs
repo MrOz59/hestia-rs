@@ -10,6 +10,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
+use hestia_core::diagnosis;
 use hestia_core::report::{StatsSample, StreamReport};
 use hestia_core::stream::{SessionListener, StreamEvent, StreamSession, VideoCodec, VideoFormat, VideoSink};
 use hestia_core::{DeviceInfo, HestiaClient, logcapture};
@@ -152,6 +153,7 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
         config.session_url.raw
     );
 
+    let fps = config.fps;
     let (tx, rx) = mpsc::channel();
     let session = StreamSession::start(
         config,
@@ -209,34 +211,69 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
                 let decoded = decode_stats.as_ref().map_or(0, |d| d.decoded.load(Ordering::Relaxed));
                 if let Some((at, prev, prev_decoded)) = &last {
                     let secs = at.elapsed().as_secs_f64().max(0.001);
+                    let received = stats.frames - prev.frames;
+                    let lost = stats.lost_frames - prev.lost_frames;
+                    let host_frames = stats.host_latency_frames - prev.host_latency_frames;
+                    let host_ms = (host_frames > 0)
+                        .then(|| (stats.host_latency_us - prev.host_latency_us) as f64 / host_frames as f64 / 1000.0);
+                    let window = diagnosis::Window {
+                        target_fps: fps,
+                        received_fps: received as f64 / secs,
+                        // Without a decoder, judge on what arrived.
+                        decoded_fps: if decode_stats.is_some() {
+                            (decoded - prev_decoded) as f64 / secs
+                        } else {
+                            received as f64 / secs
+                        },
+                        decode_ms: decode_stats.as_ref().map_or(0.0, |d| d.mean_decode_ms()),
+                        network_drop_pct: if received + lost == 0 {
+                            0.0
+                        } else {
+                            lost as f64 * 100.0 / (received + lost) as f64
+                        },
+                        display_drop_pct: 0.0,
+                        host_ms,
+                    };
+                    let verdict = diagnosis::diagnose(&window);
                     report.sample(StatsSample {
-                        fps: (stats.frames - prev.frames) as f64 / secs,
+                        fps: window.received_fps,
                         mbps: (stats.bytes - prev.bytes) as f64 * 8.0 / secs / 1e6,
                         rtt_ms: stats.rtt_ms,
                         rtt_variance_ms: stats.rtt_variance_ms,
                         fec_recovered: stats.recovered_packets,
                         lost_frames: stats.lost_frames,
-                        decoded_fps: decode_stats.as_ref().map(|_| (decoded - prev_decoded) as f64 / secs),
+                        decoded_fps: decode_stats.as_ref().map(|_| window.decoded_fps),
                         decode_ms: decode_stats.as_ref().map(|d| d.mean_decode_ms()),
                         dropped: decode_stats.as_ref().map(|d| d.dropped.load(Ordering::Relaxed)),
+                        host_ms,
+                        verdict: match verdict.bottleneck {
+                            diagnosis::Bottleneck::None => None,
+                            other => Some(other.label()),
+                        },
                     });
                     let mut line = format!(
                         "{:5.1} fps  {:6.2} Mbps  rtt {:3} ms (±{})  fec-recovered {}  lost frames {}",
-                        (stats.frames - prev.frames) as f64 / secs,
+                        window.received_fps,
                         (stats.bytes - prev.bytes) as f64 * 8.0 / secs / 1e6,
                         stats.rtt_ms,
                         stats.rtt_variance_ms,
                         stats.recovered_packets,
                         stats.lost_frames
                     );
+                    if let Some(h) = host_ms {
+                        line += &format!("  host {h:.1} ms");
+                    }
                     if let Some(d) = &decode_stats {
                         line += &format!(
                             "  decoded {:5.1} fps ({:.1} ms, {} dropped, {} errors)",
-                            (decoded - prev_decoded) as f64 / secs,
+                            window.decoded_fps,
                             d.mean_decode_ms(),
                             d.dropped.load(Ordering::Relaxed),
                             d.errors.load(Ordering::Relaxed)
                         );
+                    }
+                    if verdict.bottleneck != diagnosis::Bottleneck::None {
+                        line += &format!("  <- {} ({})", verdict.bottleneck.label(), verdict.key_metric);
                     }
                     eprintln!("{line}");
                 }

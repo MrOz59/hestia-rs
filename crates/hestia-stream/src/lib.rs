@@ -88,6 +88,9 @@ pub struct StreamStats {
     pub lost_frames: u64,
     pub rtt_ms: u32,
     pub rtt_variance_ms: u32,
+    /// Running totals of host-reported frame processing latency.
+    pub host_latency_us: u64,
+    pub host_latency_frames: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]

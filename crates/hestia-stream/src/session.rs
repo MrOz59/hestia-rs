@@ -207,6 +207,8 @@ impl StreamSession {
                                 lost_frames: counters.lost_frames.load(Ordering::Relaxed),
                                 rtt_ms: rtt,
                                 rtt_variance_ms: rtt_var,
+                                host_latency_us: counters.host_latency_us.load(Ordering::Relaxed),
+                                host_latency_frames: counters.host_latency_frames.load(Ordering::Relaxed),
                             }));
                         }
                     }

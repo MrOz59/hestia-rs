@@ -40,7 +40,12 @@ export component StreamView inherits Rectangle {
     in property <bool> show-stats: true;
     in property <bool> fullscreen;
     in property <bool> trackpad: true;
+    // 0 fit, 1 fill (crop), 2 stretch.
+    in property <int> video-scale: 0;
+    callback cycle-scale();
     in-out property <bool> keyboard-open: false;
+    // Short-lived note at the bottom (e.g. how Hermes serves the stream).
+    in property <string> banner;
 
     // text, pressed, repeat, ctrl, alt, shift, meta
     callback key-event(string, bool, bool, bool, bool, bool, bool);
@@ -61,7 +66,9 @@ export component StreamView inherits Rectangle {
     property <bool> menu-open: false;
     property <float> frame-w: root.frame.width > 0 ? root.frame.width : 16;
     property <float> frame-h: root.frame.height > 0 ? root.frame.height : 9;
-    property <float> scale: min(root.width / 1px / root.frame-w, root.height / 1px / root.frame-h);
+    property <float> scale: root.video-scale == 1
+        ? max(root.width / 1px / root.frame-w, root.height / 1px / root.frame-h)
+        : min(root.width / 1px / root.frame-w, root.height / 1px / root.frame-h);
     property <[{id: string, label: string}]> keys: [
         { id: "esc", label: "Esc" },
         { id: "tab", label: "Tab" },
@@ -73,6 +80,8 @@ export component StreamView inherits Rectangle {
     ];
 
     background: black;
+    // Fill mode makes the picture larger than the view.
+    clip: true;
 
     changed keyboard-open => {
         if (!root.keyboard-open) {
@@ -96,8 +105,8 @@ export component StreamView inherits Rectangle {
         }
 
         video := Rectangle {
-            width: root.frame-w * root.scale * 1px;
-            height: root.frame-h * root.scale * 1px;
+            width: root.video-scale == 2 ? parent.width : root.frame-w * root.scale * 1px;
+            height: root.video-scale == 2 ? parent.height : root.frame-h * root.scale * 1px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
 
@@ -172,6 +181,25 @@ export component StreamView inherits Rectangle {
             color: #e6e8ee;
             font-size: 12px;
             wrap: word-wrap;
+        }
+    }
+
+    if root.banner != "" && !root.keyboard-open: Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height - 24px;
+        width: Math.min(banner-text.preferred-width + 32px, root.width - 32px);
+        height: banner-text.preferred-height + 20px;
+        border-radius: 12px;
+        background: #000000c0;
+        banner-text := Text {
+            x: 16px;
+            y: 10px;
+            width: parent.width - 32px;
+            text: root.banner;
+            color: #e6e8ee;
+            font-size: 13px;
+            wrap: word-wrap;
+            horizontal-alignment: center;
         }
     }
 
@@ -281,6 +309,13 @@ export component StreamView inherits Rectangle {
                 text: root.trackpad ? "Touch: trackpad" : "Touch: direct";
                 clicked => {
                     root.toggle-trackpad();
+                }
+            }
+            MenuItem {
+                icon: "monitor";
+                text: root.video-scale == 0 ? "Picture: fit" : root.video-scale == 1 ? "Picture: fill" : "Picture: stretch";
+                clicked => {
+                    root.cycle-scale();
                 }
             }
             MenuItem {

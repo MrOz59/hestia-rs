@@ -161,6 +161,26 @@ impl Controller {
         });
     }
 
+    /// Shows any text report (e.g. Hermes' own) on the report screen, where
+    /// it can be shared or opened like a stream report.
+    pub(super) fn show_text_report(
+        self: &Shared,
+        title: String,
+        text: String,
+        path: Option<PathBuf>,
+        summary: Vec<String>,
+    ) {
+        let last = LastReport {
+            title,
+            text,
+            path,
+            host_id: None,
+        };
+        self.push_report(&last, Some(summary));
+        *self.last_report() = Some(last);
+        self.ui(|ui| ui.set_screen(6));
+    }
+
     /// Settings → "Open last stream report": the one from this run, or the
     /// newest file on disk.
     pub(super) fn open_last_report(self: &Shared) {

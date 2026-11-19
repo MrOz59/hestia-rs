@@ -52,6 +52,45 @@ pub enum AudioLayout {
     Surround71,
 }
 
+/// How the video fits the window (from Hestia Android).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoScale {
+    /// Whole picture, black bars if the aspect ratios differ.
+    #[default]
+    Fit,
+    /// Fill the window, cropping the edges.
+    Fill,
+    /// Fill the window, distorting the picture.
+    Stretch,
+}
+
+impl VideoScale {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fit => "Fit",
+            Self::Fill => "Fill",
+            Self::Stretch => "Stretch",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Fit => Self::Fill,
+            Self::Fill => Self::Stretch,
+            Self::Stretch => Self::Fit,
+        }
+    }
+
+    pub fn index(self) -> i32 {
+        match self {
+            Self::Fit => 0,
+            Self::Fill => 1,
+            Self::Stretch => 2,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StreamSettings {
@@ -76,6 +115,9 @@ pub struct StreamSettings {
     pub touch_trackpad: bool,
     /// Show the session report (stats + logs) when a stream ends.
     pub show_stream_report: bool,
+    /// Preset that produced resolution/fps/bitrate (Custom once edited).
+    pub preset: crate::Preset,
+    pub video_scale: VideoScale,
 }
 
 impl Default for StreamSettings {
@@ -96,6 +138,8 @@ impl Default for StreamSettings {
             clipboard_sync: false,
             touch_trackpad: true,
             show_stream_report: true,
+            preset: crate::Preset::Custom,
+            video_scale: VideoScale::Fit,
         }
     }
 }
@@ -119,6 +163,8 @@ impl StreamSettings {
             "touch",
             if self.touch_trackpad { "trackpad" } else { "direct" },
         );
+        r.field("Settings", "preset", self.preset.label());
+        r.field("Settings", "video scale", self.video_scale.label());
     }
 
     /// Rough default bitrate (kbps) for a resolution/frame rate, in the spirit

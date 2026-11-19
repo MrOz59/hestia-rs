@@ -66,6 +66,7 @@ fn fill_sample_data(ui: &AppWindow) {
             hermes: true,
             version: "1.4".into(),
             status: "Ready to stream".into(),
+            health: 1,
         },
         HostCard {
             id: "b".into(),
@@ -77,6 +78,7 @@ fn fill_sample_data(ui: &AppWindow) {
             hermes: false,
             version: "".into(),
             status: "Last seen yesterday".into(),
+            health: 0,
         },
     ]));
     ui.set_host_name("cachy-desktop".into());
@@ -113,8 +115,22 @@ fn fill_sample_data(ui: &AppWindow) {
     ui.set_session_busy(true);
     ui.set_stream_frame(fake_frame(320, 180));
     ui.set_stream_stats(
-        "1920×1080  ·  60 fps  ·  18.4 Mbps  ·  RTT 3 ms  ·  decode 4.1 ms  ·  FEC 12  ·  lost 0  ·  dropped 0".into(),
+        "1920×1080  ·  60 fps  ·  18.4 Mbps  ·  RTT 3 ms  ·  decode 4.1 ms  ·  host 3.2 ms  ·  FEC 12  ·  lost 0  ·  dropped 0\n⚠ The network is dropping frames. Lower the bitrate, or move closer to the access point / use a wired connection. (4.1% network drops)\n3 spikes in the last ~5 min (mostly network)".into(),
     );
+    // Settings as on a 2400×1080 120 Hz phone with the Balanced preset.
+    ui.set_cfg_resolution_options(strings(&[
+        "1280 × 720",
+        "1920 × 1080",
+        "2400 × 1080 (native)",
+        "2560 × 1440",
+        "3840 × 2160",
+    ]));
+    ui.set_cfg_fps_options(strings(&["30 fps", "60 fps", "90 fps", "120 fps", "144 fps"]));
+    ui.set_cfg_preset(2);
+    ui.set_cfg_resolution(2);
+    ui.set_cfg_fps(1);
+    ui.set_cfg_bitrate(26.0);
+    ui.set_cfg_preset_hint("This display: 2400 × 1080 at 120 Hz".into());
     ui.set_host_hermes(true);
     ui.set_tools_display_status("backend: kms · connector: HDMI-A-1 · mode: 1920x1080@60 · virtual: yes".into());
     ui.set_tools_commands(model(vec![

@@ -12,12 +12,12 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use hestia_core::nvhttp::{AppInfo, PairingOutcome, PairingPin};
-use hestia_core::{DeviceInfo, HestiaClient, HostSnapshot};
+use hestia_core::{DeviceInfo, HestiaClient, HostSnapshot, Preset, presets};
 use log::{info, warn};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::AppWindow;
-use crate::view;
+use crate::{platform, view};
 
 mod report;
 mod streaming;
@@ -186,16 +186,24 @@ impl Controller {
         ui.on_tools_send_clipboard(move |text| c.tools_send_clipboard(text.to_string()));
         let c = self.clone();
         ui.on_tools_fetch_clipboard(move || c.tools_fetch_clipboard());
+        let c = self.clone();
+        ui.on_tools_open_web_ui(move || c.tools_open_web_ui());
+        let c = self.clone();
+        ui.on_tools_host_report(move || c.tools_host_report());
 
         let c = self.clone();
         ui.on_open_settings(move || {
             if let Some(core) = c.core() {
                 let settings = core.settings();
-                c.ui(move |ui| view::load_settings_into(&ui, &settings));
+                c.ui(move |ui| view::load_settings_into(&ui, &settings, platform::native_display()));
             }
         });
         let c = self.clone();
         ui.on_save_settings(move || c.save_settings());
+        let c = self.clone();
+        ui.on_settings_preset_changed(move |index| c.apply_preset(index));
+        let c = self.clone();
+        ui.on_stream_cycle_scale(move || c.cycle_video_scale());
     }
 
     // ------------------------------------------------------------------
@@ -220,7 +228,7 @@ impl Controller {
             let client_id = core.identity().unique_id().to_owned();
             let dir = core.data_dir().display().to_string();
             c.ui(move |ui| {
-                view::load_settings_into(&ui, &settings);
+                view::load_settings_into(&ui, &settings, platform::native_display());
                 ui.set_stream_trackpad(settings.touch_trackpad);
                 ui.set_version_text(view::version_text().into());
                 ui.set_client_id(client_id.into());
@@ -679,6 +687,11 @@ impl Controller {
                 let text: Vec<String> = match core.launch(&id, app_id, &device) {
                     Ok(session) => {
                         report::launched(&session_report, &session);
+                        if let Some(why) = &session.prepare_error {
+                            c.toast(format!(
+                                "Hermes declined to prepare this session ({why}); streaming in standard mode"
+                            ));
+                        }
                         c.ui(|ui| ui.set_session_lines(lines(&["Connecting to the stream…"])));
                         match c.start_stream(id.clone(), &session, session_report.clone()) {
                             Ok(()) => {
@@ -771,6 +784,46 @@ impl Controller {
             Ok(()) => self.toast("Settings saved"),
             Err(e) => self.toast(format!("Could not save settings: {e}")),
         }
+    }
+
+    /// A preset picked in Settings: fill in resolution, frame rate and
+    /// bitrate for this display (saved with the rest on Save).
+    fn apply_preset(self: &Shared, index: i32) {
+        let Some(core) = self.core() else { return };
+        let Some(&preset) = Preset::ALL.get(index.max(0) as usize) else {
+            return;
+        };
+        let weak = self.weak.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let Some(ui) = weak.upgrade() else { return };
+        let native = platform::native_display();
+        let mut settings = view::read_settings_from(&ui, &core.settings());
+        settings.preset = preset;
+        if let Some((w, h, fps, kbps)) = presets::preset_mode(preset, native.unwrap_or((1920, 1080, 60))) {
+            (settings.width, settings.height, settings.fps, settings.bitrate_kbps) = (w, h, fps, kbps);
+        }
+        view::load_settings_into(&ui, &settings, native);
+    }
+
+    /// Fit → Fill → Stretch, from the stream menu; remembered for next time.
+    fn cycle_video_scale(self: &Shared) {
+        let Some(core) = self.core() else { return };
+        let mut settings = core.settings();
+        settings.video_scale = settings.video_scale.next();
+        let scale = settings.video_scale;
+        self.ui(move |ui| {
+            ui.set_stream_video_scale(scale.index());
+            ui.set_cfg_video_scale(scale.index());
+        });
+        self.toast(match scale {
+            hestia_core::VideoScale::Fit => "Picture: fit (whole picture, black bars if needed)",
+            hestia_core::VideoScale::Fill => "Picture: fill (no bars, edges cropped)",
+            hestia_core::VideoScale::Stretch => "Picture: stretch (no bars, distorted)",
+        });
+        spawn("hestia-settings", move || {
+            if let Err(e) = core.set_settings(settings) {
+                warn!("saving the picture scale failed: {e}");
+            }
+        });
     }
 }
 

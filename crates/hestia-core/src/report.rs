@@ -28,6 +28,11 @@ pub struct StatsSample {
     pub decoded_fps: Option<f64>,
     pub decode_ms: Option<f64>,
     pub dropped: Option<u64>,
+    /// Host-reported processing latency for this second.
+    pub host_ms: Option<f64>,
+    /// Bottleneck verdict for this second ("network", "decode"…), None
+    /// when healthy or not judged.
+    pub verdict: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,8 +113,13 @@ fn stats_row(at: Duration, s: &StatsSample) -> String {
         (Some(f), Some(ms), Some(dr)) => format!(" | dec {f:5.1} fps {ms:5.1} ms drop {dr}"),
         _ => String::new(),
     };
+    let host = s.host_ms.map(|h| format!(" | host {h:4.1} ms")).unwrap_or_default();
+    let verdict = s
+        .verdict
+        .map(|v| format!(" | <- {}", v.to_uppercase()))
+        .unwrap_or_default();
     format!(
-        "{} | {:5.1} fps | {:6.2} Mbps | rtt {:3}±{:<3} | fec {:5} | lost {:4}{decode}",
+        "{} | {:5.1} fps | {:6.2} Mbps | rtt {:3}±{:<3} | fec {:5} | lost {:4}{decode}{host}{verdict}",
         elapsed(at),
         s.fps,
         s.mbps,
@@ -220,6 +230,21 @@ impl StreamReport {
                 avg(|s| s.rtt_ms as f64),
                 steady.iter().map(|s| s.rtt_ms).max().unwrap_or(0)
             ));
+            // Seconds the per-second diagnosis flagged, by cause.
+            let mut causes: Vec<(&str, usize)> = Vec::new();
+            for v in steady.iter().filter_map(|s| s.verdict) {
+                match causes.iter_mut().find(|(c, _)| *c == v) {
+                    Some((_, n)) => *n += 1,
+                    None => causes.push((v, 1)),
+                }
+            }
+            causes.sort_by(|a, b| b.1.cmp(&a.1));
+            out.push(if causes.is_empty() {
+                "Diagnosis: no bottleneck detected".to_owned()
+            } else {
+                let parts: Vec<String> = causes.iter().map(|(c, n)| format!("{n} s {c}")).collect();
+                format!("Diagnosis: problems in {} (of {} s)", parts.join(", "), steady.len())
+            });
             if let Some(last) = steady.last() {
                 out.push(format!(
                     "Losses: {} frames lost, {} packets recovered by FEC",
@@ -287,22 +312,29 @@ impl StreamReport {
 
     /// Like [`save`](Self::save) with an already rendered text.
     pub fn save_text(&self, dir: &Path, text: &str) -> io::Result<PathBuf> {
-        std::fs::create_dir_all(dir)?;
-        let path = dir.join(format!("stream-{}.txt", stamp(self.started)));
-        std::fs::write(&path, text)?;
-        prune(dir, KEEP_REPORTS);
-        Ok(path)
+        save_named(dir, "stream", self.started, text)
     }
 }
 
-fn prune(dir: &Path, keep: usize) {
+/// Writes `text` to `dir/<prefix>-<stamp>.txt` and keeps the newest
+/// [`KEEP_REPORTS`] files with that prefix (e.g. Hermes' own reports next
+/// to stream reports).
+pub fn save_named(dir: &Path, prefix: &str, at: SystemTime, text: &str) -> io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(format!("{prefix}-{}.txt", stamp(at)));
+    std::fs::write(&path, text)?;
+    prune(dir, prefix, KEEP_REPORTS);
+    Ok(path)
+}
+
+fn prune(dir: &Path, prefix: &str, keep: usize) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let mut reports: Vec<PathBuf> = entries
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("stream-") && n.ends_with(".txt"))
+                .is_some_and(|n| n.starts_with(&format!("{prefix}-")) && n.ends_with(".txt"))
         })
         .collect();
     reports.sort();
@@ -340,12 +372,16 @@ pub fn clip_middle(text: &str, max_bytes: usize) -> String {
     )
 }
 
-/// The newest saved report in `dir`, if any.
+/// The newest saved stream report in `dir`, if any.
 pub fn latest(dir: &Path) -> Option<PathBuf> {
     let mut reports: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "txt"))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("stream-") && n.ends_with(".txt"))
+        })
         .collect();
     reports.sort();
     reports.pop()
@@ -380,6 +416,8 @@ mod tests {
             decoded_fps: Some(fps),
             decode_ms: Some(4.0),
             dropped: Some(0),
+            host_ms: Some(3.0),
+            verdict: if lost > 1 { Some("network") } else { None },
         }
     }
 
@@ -408,6 +446,7 @@ mod tests {
             "Video: 59.3 fps average (lowest 58.0), 20.0 Mbps",
             "Network: RTT 4 ms average, max 5 ms",
             "Losses: 1 frames lost, 7 packets recovered by FEC",
+            "Diagnosis: no bottleneck detected",
             "== Log (1 lines, times in UTC)",
             "hestia_stream: hello",
         ] {
@@ -415,6 +454,20 @@ mod tests {
         }
         assert!(!text.contains("ignored"));
         assert!(r.summary_lines()[0].starts_with("Result: the app was closed"));
+    }
+
+    #[test]
+    fn counts_flagged_seconds() {
+        let mut r = StreamReport::new("x", 0);
+        for lost in [0, 0, 2, 3, 0] {
+            r.sample(sample(60.0, 3, lost));
+        }
+        let summary = r.summary_lines();
+        assert!(
+            summary.contains(&"Diagnosis: problems in 2 s network (of 4 s)".to_string()),
+            "{summary:?}"
+        );
+        assert!(r.render_with_logs(&[]).contains("| <- NETWORK"));
     }
 
     #[test]
@@ -451,6 +504,7 @@ mod tests {
         for i in 0..(KEEP_REPORTS + 3) {
             std::fs::write(dir.join(format!("stream-20250101-0000{i:02}.txt")), "old").unwrap();
         }
+        let hermes = save_named(&dir, "hermes", SystemTime::now(), "host report").unwrap();
         let r = StreamReport::new("now", 0);
         let path = r.save(&dir).unwrap();
         assert!(
@@ -459,7 +513,9 @@ mod tests {
                 .contains("Hestia RS stream report — now")
         );
         let count = std::fs::read_dir(&dir).unwrap().count();
-        assert_eq!(count, KEEP_REPORTS);
+        // 20 stream reports + the Hermes one (pruned separately).
+        assert_eq!(count, KEEP_REPORTS + 1);
+        assert!(hermes.exists());
         assert_eq!(latest(&dir).as_deref(), Some(path.as_path()));
         let _ = std::fs::remove_dir_all(&dir);
     }

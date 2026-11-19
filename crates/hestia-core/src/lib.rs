@@ -10,7 +10,9 @@
 //! All methods are blocking and thread-safe; call them from worker threads.
 
 pub mod address;
+pub mod diagnosis;
 pub mod logcapture;
+pub mod presets;
 pub mod report;
 pub mod settings;
 pub mod store;
@@ -36,7 +38,8 @@ pub use hestia_api as api;
 pub use hestia_discovery as discovery;
 pub use hestia_nvhttp as nvhttp;
 pub use hestia_stream as stream;
-pub use settings::{AudioLayout, CodecPreference, LaunchMode, StreamSettings};
+pub use presets::Preset;
+pub use settings::{AudioLayout, CodecPreference, LaunchMode, StreamSettings, VideoScale};
 pub use store::Store;
 
 #[derive(Debug, thiserror::Error)]
@@ -118,6 +121,9 @@ pub struct HostSnapshot {
     pub info: Option<ServerInfo>,
     /// Present when the host is Hermes (Hestia protocol v1) and we are paired.
     pub capabilities: Option<Capabilities>,
+    /// Hermes readiness preflight, runtime status and dependencies, when the
+    /// host offers them to this client.
+    pub diagnostics: Option<hestia_api::HostDiagnostics>,
     pub error: Option<String>,
 }
 
@@ -130,6 +136,9 @@ pub struct LaunchedSession {
     pub server_info: ServerInfo,
     /// Hermes session preparation result, when the host supports it.
     pub prepared: Option<SessionPrepareResponse>,
+    /// Why Hermes declined to prepare the session (the app was launched in
+    /// plain GameStream mode instead).
+    pub prepare_error: Option<String>,
     /// Settings in effect when the app was launched.
     pub settings: StreamSettings,
 }
@@ -179,11 +188,14 @@ impl LaunchedSession {
                     r.field("Launch", "Hermes warning", w);
                 }
             }
-            None => r.field(
-                "Launch",
-                "Hermes session",
-                "not prepared (not Hermes, or the API was unavailable)",
-            ),
+            None => match &self.prepare_error {
+                Some(why) => r.field(
+                    "Launch",
+                    "Hermes session",
+                    format!("DECLINED: {why} (plain GameStream used)"),
+                ),
+                None => r.field("Launch", "Hermes session", "not prepared (not a Hermes host)"),
+            },
         }
         r.event(if self.response.resumed {
             "app resumed on the host"
@@ -466,6 +478,7 @@ impl HestiaClient {
                     online: false,
                     info: None,
                     capabilities: None,
+                    diagnostics: None,
                     error: Some(e.to_string()),
                 });
             }
@@ -490,6 +503,17 @@ impl HestiaClient {
         } else {
             None
         };
+        // Readiness preflight for the host health badge (best effort: the
+        // endpoint can be permission-gated or absent on older Hermes).
+        let diagnostics = capabilities
+            .as_ref()
+            .and_then(|_| match HestiaApi::new(&client).host_diagnostics() {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    log::debug!("Hermes diagnostics unavailable on {}: {e}", record.name);
+                    None
+                }
+            });
 
         let updated = self.update_hosts(|hosts| {
             let mut updated = record.clone();
@@ -526,6 +550,7 @@ impl HestiaClient {
             paired,
             info: Some(info),
             capabilities,
+            diagnostics,
             error: None,
         })
     }
@@ -651,7 +676,11 @@ impl HestiaClient {
             request.scale_factor = Some(settings.scale_factor);
         }
 
-        let prepared = self.prepare_hermes_session(&client, &settings, device, app_id);
+        let (prepared, prepare_error) = match self.prepare_hermes_session(&client, &settings, device, app_id) {
+            Some(Ok(prepared)) => (Some(prepared), None),
+            Some(Err(e)) => (None, Some(e)),
+            None => (None, None),
+        };
 
         let response = if server_info.is_busy() {
             client.resume(&request)?
@@ -666,6 +695,7 @@ impl HestiaClient {
             response,
             server_info,
             prepared,
+            prepare_error,
             settings,
         })
     }
@@ -676,7 +706,7 @@ impl HestiaClient {
         settings: &StreamSettings,
         device: &DeviceInfo,
         app_id: u32,
-    ) -> Option<SessionPrepareResponse> {
+    ) -> Option<std::result::Result<SessionPrepareResponse, String>> {
         let api = HestiaApi::new(client);
         let caps = api.capabilities().ok().filter(Capabilities::is_compatible)?;
         let features = &caps.features;
@@ -725,13 +755,44 @@ impl HestiaClient {
                 for warning in &prepared.warnings {
                     warn!("Hermes session warning: {warning}");
                 }
-                Some(prepared)
+                Some(Ok(prepared))
             }
             Err(e) => {
                 warn!("Hermes session prepare failed, continuing with plain GameStream: {e}");
-                None
+                let why = if e.is_permission_denied() {
+                    "this device is not allowed to prepare sessions".to_owned()
+                } else {
+                    e.to_string()
+                };
+                Some(Err(why))
             }
         }
+    }
+
+    /// Hermes: releases this client's prepared session (virtual display,
+    /// Gamescope session) when its stream ends. Best effort; plain hosts and
+    /// errors are ignored. Only this client's session is affected.
+    pub fn end_hermes_session(&self, id: &str) {
+        let Ok(record) = self.host(id) else { return };
+        let client = self.nvhttp(&record);
+        let api = HestiaApi::new(&client);
+        if api.capabilities().is_ok_and(|c| c.is_compatible()) {
+            match api.stop_session() {
+                Ok(()) => info!("Hermes session on {} stopped", record.name),
+                Err(e) => log::debug!("Hermes session stop failed: {e}"),
+            }
+        }
+    }
+
+    /// The host's web UI (Hermes/Sunshine/Apollo serve it on the HTTP port + 1).
+    pub fn web_ui_url(&self, id: &str) -> Result<String> {
+        let record = self.host(id)?;
+        let host = if record.address.contains(':') && !record.address.starts_with('[') {
+            format!("[{}]", record.address)
+        } else {
+            record.address.clone()
+        };
+        Ok(format!("https://{host}:{}", record.http_port + 1))
     }
 
     /// Quits the running app (and, on Hermes, clears the prepared session).
@@ -814,6 +875,7 @@ mod tests {
                 ..Default::default()
             },
             prepared: None,
+            prepare_error: None,
             settings: StreamSettings {
                 bitrate_kbps: 15_000,
                 codec,

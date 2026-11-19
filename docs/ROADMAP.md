@@ -43,8 +43,14 @@
 ## Milestone 3 — polish
 
 - [ ] HDR (10-bit, metadata) end to end
-- [ ] Host diagnostics page (Hermes runtime status, readiness preflight)
-- [ ] Server commands and display recovery in the UI
+- [x] Host diagnostics (Hermes readiness preflight on the host card and tools
+      page, runtime status, full diagnostic report, web UI shortcut)
+- [x] Server commands and display recovery in the UI
+- [x] Stream provenance banner (Hermes stream info: GPU, encoder, capture)
+- [x] Presets (Fast / Balanced / Quality / Battery) from this display's native
+      mode; picture scale fit / fill / stretch
+- [x] Live bottleneck diagnosis (network / decode / display / host) in the
+      overlay and per second in the report
 - [ ] Wake-on-LAN
 - [ ] APK signing and release workflow, Arch/CachyOS package
 - [ ] Android multicast lock / NSD fallback if legacy-unicast mDNS misses hosts

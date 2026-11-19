@@ -11,6 +11,8 @@ export struct HostCard {
     hermes: bool,
     version: string,
     status: string,
+    // Hermes readiness preflight: 0 unknown, 1 ready, 2 warnings, 3 not ready.
+    health: int,
 }
 
 export struct AppCard {
@@ -85,6 +87,10 @@ component HostTile inherits Rectangle {
             if root.host.hermes: Chip {
                 text: root.host.version == "" ? "Hermes" : "Hermes " + root.host.version;
                 tone: Theme.info;
+            }
+            if root.host.health > 0: Chip {
+                text: root.host.health == 1 ? "Ready" : root.host.health == 2 ? "Check" : "Not ready";
+                tone: root.host.health == 1 ? Theme.ok : root.host.health == 2 ? Theme.warn : Theme.danger;
             }
         }
 
@@ -698,6 +704,12 @@ component SectionTitle inherits VerticalLayout {
 }
 
 export component SettingsPage inherits Rectangle {
+    in property <[string]> resolution-options;
+    in property <[string]> fps-options;
+    in-out property <int> preset;
+    in property <string> preset-hint;
+    in-out property <int> video-scale;
+    callback preset-changed(int);
     in-out property <int> resolution;
     in-out property <int> fps;
     in-out property <float> bitrate-mbps;
@@ -767,29 +779,62 @@ export component SettingsPage inherits Rectangle {
                         text: "Video";
                     }
                     SettingRow {
+                        label: "Preset";
+                        hint: root.preset-hint;
+                        ComboBox {
+                            width: root.picker-w;
+                            model: ["Custom", "Fast", "Balanced", "Quality", "Battery saver"];
+                            current-index <=> root.preset;
+                            selected(value) => {
+                                root.preset-changed(self.current-index);
+                            }
+                        }
+                    }
+                    SettingRow {
                         label: "Resolution";
                         ComboBox {
                             width: root.picker-w;
-                            model: ["1280 × 720", "1920 × 1080", "2560 × 1440", "3840 × 2160"];
+                            model: root.resolution-options;
                             current-index <=> root.resolution;
+                            // Editing the mode by hand leaves the preset.
+                            selected(value) => {
+                                root.preset = 0;
+                            }
                         }
                     }
                     SettingRow {
                         label: "Frame rate";
                         ComboBox {
                             width: root.picker-w;
-                            model: ["30 fps", "60 fps", "90 fps", "120 fps", "144 fps"];
+                            model: root.fps-options;
                             current-index <=> root.fps;
+                            selected(value) => {
+                                root.preset = 0;
+                            }
                         }
                     }
                     SettingRow {
                         label: "Bitrate";
-                        hint: Math.round(root.bitrate-mbps) + " Mbps";
+                        hint: (Math.round(root.bitrate-mbps * 4) / 4) + " Mbps";
                         Slider {
                             width: root.slider-w;
-                            minimum: 5;
-                            maximum: 150;
+                            minimum: 1;
+                            maximum: 200;
                             value <=> root.bitrate-mbps;
+                            changed(value) => {
+                                root.preset = 0;
+                            }
+                        }
+                    }
+                    SettingRow {
+                        label: "Picture";
+                        hint: root.video-scale == 0 ? "Whole picture, black bars if the shapes differ"
+                            : root.video-scale == 1 ? "Fills the screen, crops the edges"
+                            : "Fills the screen, distorts the picture";
+                        ComboBox {
+                            width: root.picker-w;
+                            model: ["Fit", "Fill", "Stretch"];
+                            current-index <=> root.video-scale;
                         }
                     }
                     SettingRow {
@@ -904,6 +949,13 @@ export component SettingsPage inherits Rectangle {
     }
 }
 
+export struct PreflightRow {
+    // 1 ok, 2 warning, 3 failure
+    level: int,
+    title: string,
+    message: string,
+}
+
 export struct CommandRow {
     id: int,
     name: string,
@@ -949,9 +1001,13 @@ export component ToolsPage inherits Rectangle {
     in-out property <string> clipboard-text;
     in property <string> permissions;
     in property <[string]> diagnostics;
+    in property <[string]> status-lines;
+    in property <[PreflightRow]> preflight;
     in property <bool> busy;
     callback back;
     callback refresh;
+    callback open-web-ui;
+    callback host-report;
     callback recover-display;
     callback run-command(int);
     callback send-clipboard(string);
@@ -1019,6 +1075,67 @@ export component ToolsPage inherits Rectangle {
                         text: root.message;
                         color: Theme.warn;
                         wrap: word-wrap;
+                    }
+
+                    ToolCard {
+                        title: "Host status";
+                        if root.loading: Text {
+                            text: "Checking…";
+                            color: Theme.muted;
+                            font-size: 13px;
+                        }
+                        for row in root.preflight: HorizontalLayout {
+                            spacing: 10px;
+                            VerticalLayout {
+                                alignment: start;
+                                padding-top: 4px;
+                                Rectangle {
+                                    width: 10px;
+                                    height: 10px;
+                                    border-radius: 5px;
+                                    background: row.level == 1 ? Theme.ok : row.level == 2 ? Theme.warn : Theme.danger;
+                                }
+                            }
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: row.title;
+                                    color: Theme.text;
+                                    font-size: 14px;
+                                    font-weight: 600;
+                                    wrap: word-wrap;
+                                }
+                                if row.message != "": Text {
+                                    text: row.message;
+                                    color: Theme.muted;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                        for line in root.status-lines: Text {
+                            text: line;
+                            color: Theme.muted;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            PillButton {
+                                text: "Open web UI";
+                                clicked => {
+                                    root.open-web-ui();
+                                }
+                            }
+                            PillButton {
+                                text: "Diagnostic report";
+                                enabled: !root.busy;
+                                clicked => {
+                                    root.host-report();
+                                }
+                            }
+                        }
                     }
 
                     ToolCard {
@@ -1121,7 +1238,7 @@ export component ToolsPage inherits Rectangle {
                     }
 
                     if root.diagnostics.length > 0: ToolCard {
-                        title: "Diagnostics";
+                        title: "All diagnostics fields";
                         for line in root.diagnostics: Text {
                             text: line;
                             color: Theme.muted;

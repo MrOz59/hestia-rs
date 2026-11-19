@@ -1,13 +1,63 @@
 //! Mapping between core types and the Slint view models.
 
 use hestia_core::nvhttp::{AppInfo, codecs};
-use hestia_core::{AudioLayout, CodecPreference, HostRecord, HostSnapshot, LaunchMode, StreamSettings};
-use slint::{Image, Rgba8Pixel, SharedPixelBuffer, SharedString};
+use hestia_core::{
+    AudioLayout, CodecPreference, HostRecord, HostSnapshot, LaunchMode, Preset, StreamSettings, VideoScale,
+};
+use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 
 use crate::{AppCard, AppWindow, HostCard};
 
 pub const RESOLUTIONS: [(u32, u32); 4] = [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)];
 pub const FRAME_RATES: [u32; 5] = [30, 60, 90, 120, 144];
+pub const VIDEO_SCALES: [VideoScale; 3] = [VideoScale::Fit, VideoScale::Fill, VideoScale::Stretch];
+
+/// Resolution and frame-rate choices: the common ones, this display's
+/// native mode and whatever is currently set (a preset may pick an
+/// uncommon size), smallest first.
+pub fn mode_options(native: Option<(u32, u32, u32)>, s: &StreamSettings) -> (Vec<(u32, u32)>, Vec<u32>) {
+    let mut sizes: Vec<(u32, u32)> = RESOLUTIONS.to_vec();
+    let mut rates: Vec<u32> = FRAME_RATES.to_vec();
+    if let Some((w, h, hz)) = native {
+        sizes.push((w, h));
+        rates.push(hz);
+    }
+    sizes.push((s.width, s.height));
+    rates.push(s.fps);
+    sizes.sort_by_key(|&(w, h)| (u64::from(w) * u64::from(h), w));
+    sizes.dedup();
+    rates.sort_unstable();
+    rates.dedup();
+    (sizes, rates)
+}
+
+pub fn resolution_label((w, h): (u32, u32), native: Option<(u32, u32, u32)>) -> String {
+    if native.is_some_and(|(nw, nh, _)| (nw, nh) == (w, h)) {
+        format!("{w} × {h} (native)")
+    } else {
+        format!("{w} × {h}")
+    }
+}
+
+/// The numbers in a label, e.g. "2400 × 1080 (native)" → [2400, 1080].
+fn numbers(label: &str) -> Vec<u32> {
+    label
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|n| n.parse().ok())
+        .collect()
+}
+
+/// Kbps from the slider's Mbps, in 250 kbps steps (presets use quarters).
+pub fn bitrate_from_mbps(mbps: f32) -> u32 {
+    (((mbps * 4.0).round() / 4.0) * 1000.0).round().clamp(500.0, 500_000.0) as u32
+}
+
+pub fn preset_hint(native: Option<(u32, u32, u32)>) -> String {
+    match native {
+        Some((w, h, hz)) => format!("This display: {w} × {h} at {hz} Hz"),
+        None => "This display's mode is unknown; presets assume 1920 × 1080 at 60 Hz".to_owned(),
+    }
+}
 pub const AUDIO_LAYOUTS: [AudioLayout; 3] = [AudioLayout::Stereo, AudioLayout::Surround51, AudioLayout::Surround71];
 
 pub fn host_card(record: &HostRecord, snapshot: Option<&HostSnapshot>, checking: bool) -> HostCard {
@@ -17,6 +67,11 @@ pub fn host_card(record: &HostRecord, snapshot: Option<&HostSnapshot>, checking:
         |s| if s.online { s.paired } else { record.is_paired() },
     );
     let caps = snapshot.and_then(|s| s.capabilities.as_ref());
+    // Hermes preflight: only meaningful for a paired, reachable host.
+    let (health, health_text) = match snapshot {
+        Some(s) if s.online && s.paired => crate::hostinfo::health(s.diagnostics.as_ref()),
+        _ => (0, None),
+    };
     let status = match snapshot {
         None if checking => "Contacting host…".to_owned(),
         None => String::new(),
@@ -30,7 +85,7 @@ pub fn host_card(record: &HostRecord, snapshot: Option<&HostSnapshot>, checking:
             } else if busy {
                 "An app is running".into()
             } else {
-                "Ready".into()
+                health_text.unwrap_or_else(|| "Ready".into())
             }
         }
     };
@@ -48,6 +103,7 @@ pub fn host_card(record: &HostRecord, snapshot: Option<&HostSnapshot>, checking:
         hermes: caps.is_some(),
         version: caps.map(|c| c.server_version.as_str()).unwrap_or_default().into(),
         status: status.into(),
+        health,
     }
 }
 
@@ -117,12 +173,18 @@ pub fn art_image(raw: &[u8], width: u32, height: u32) -> Image {
     Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(raw, width, height))
 }
 
-pub fn load_settings_into(ui: &AppWindow, s: &StreamSettings) {
-    let res = RESOLUTIONS
-        .iter()
-        .position(|&(w, h)| w == s.width && h == s.height)
-        .unwrap_or(1);
-    let fps = FRAME_RATES.iter().position(|&f| f == s.fps).unwrap_or(1);
+pub fn load_settings_into(ui: &AppWindow, s: &StreamSettings, native: Option<(u32, u32, u32)>) {
+    let (sizes, rates) = mode_options(native, s);
+    let res = sizes.iter().position(|&m| m == (s.width, s.height)).unwrap_or(0);
+    let fps = rates.iter().position(|&f| f == s.fps).unwrap_or(0);
+    let size_labels: Vec<SharedString> = sizes.iter().map(|&m| resolution_label(m, native).into()).collect();
+    let rate_labels: Vec<SharedString> = rates.iter().map(|f| format!("{f} fps").into()).collect();
+    ui.set_cfg_resolution_options(ModelRc::new(VecModel::from(size_labels)));
+    ui.set_cfg_fps_options(ModelRc::new(VecModel::from(rate_labels)));
+    ui.set_cfg_preset(Preset::ALL.iter().position(|&p| p == s.preset).unwrap_or(0) as i32);
+    ui.set_cfg_preset_hint(preset_hint(native).into());
+    ui.set_cfg_video_scale(s.video_scale.index());
+    ui.set_stream_video_scale(s.video_scale.index());
     let codec = CodecPreference::ALL.iter().position(|&c| c == s.codec).unwrap_or(0);
     let audio = AUDIO_LAYOUTS.iter().position(|&a| a == s.audio).unwrap_or(0);
     ui.set_cfg_resolution(res as i32);
@@ -141,12 +203,27 @@ pub fn load_settings_into(ui: &AppWindow, s: &StreamSettings) {
 
 pub fn read_settings_from(ui: &AppWindow, base: &StreamSettings) -> StreamSettings {
     let pick = |i: i32, len: usize| (i.max(0) as usize).min(len - 1);
-    let (width, height) = RESOLUTIONS[pick(ui.get_cfg_resolution(), RESOLUTIONS.len())];
+    let chosen = |options: ModelRc<SharedString>, index: i32| {
+        options
+            .row_data(index.max(0) as usize)
+            .map(|label| numbers(&label))
+            .unwrap_or_default()
+    };
+    let (width, height) = match chosen(ui.get_cfg_resolution_options(), ui.get_cfg_resolution())[..] {
+        [w, h, ..] if w > 0 && h > 0 => (w, h),
+        _ => (base.width, base.height),
+    };
+    let fps = match chosen(ui.get_cfg_fps_options(), ui.get_cfg_fps())[..] {
+        [f, ..] if f > 0 => f,
+        _ => base.fps,
+    };
     StreamSettings {
         width,
         height,
-        fps: FRAME_RATES[pick(ui.get_cfg_fps(), FRAME_RATES.len())],
-        bitrate_kbps: (ui.get_cfg_bitrate().round() as u32).clamp(1, 500) * 1000,
+        fps,
+        bitrate_kbps: bitrate_from_mbps(ui.get_cfg_bitrate()),
+        preset: Preset::ALL[pick(ui.get_cfg_preset(), Preset::ALL.len())],
+        video_scale: VIDEO_SCALES[pick(ui.get_cfg_video_scale(), VIDEO_SCALES.len())],
         codec: CodecPreference::ALL[pick(ui.get_cfg_codec(), CodecPreference::ALL.len())],
         audio: AUDIO_LAYOUTS[pick(ui.get_cfg_audio(), AUDIO_LAYOUTS.len())],
         hdr: ui.get_cfg_hdr(),
@@ -170,4 +247,42 @@ pub fn version_text() -> String {
         .filter(|id| !id.is_empty())
         .map_or_else(|| "local build".to_owned(), |id| id.chars().take(7).collect());
     format!("Hestia RS {} ({build})", env!("CARGO_PKG_VERSION"))
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+
+    #[test]
+    fn options_include_native_and_current_modes_once() {
+        let mut s = StreamSettings::default();
+        (s.width, s.height, s.fps) = (2146, 964, 60);
+        let (sizes, rates) = mode_options(Some((2400, 1080, 120)), &s);
+        assert_eq!(
+            sizes,
+            vec![
+                (1280, 720),
+                (1920, 1080),
+                (2146, 964),
+                (2400, 1080),
+                (2560, 1440),
+                (3840, 2160)
+            ]
+        );
+        assert_eq!(rates, vec![30, 60, 90, 120, 144]);
+        assert_eq!(
+            resolution_label((2400, 1080), Some((2400, 1080, 120))),
+            "2400 × 1080 (native)"
+        );
+        assert_eq!(numbers("2400 × 1080 (native)"), vec![2400, 1080]);
+        assert_eq!(numbers("120 fps"), vec![120]);
+    }
+
+    #[test]
+    fn bitrate_keeps_quarter_megabits() {
+        assert_eq!(bitrate_from_mbps(46.25), 46_250);
+        assert_eq!(bitrate_from_mbps(3.5), 3_500);
+        assert_eq!(bitrate_from_mbps(23.61), 23_500);
+        assert_eq!(bitrate_from_mbps(0.0), 500);
+    }
 }

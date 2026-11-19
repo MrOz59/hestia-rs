@@ -1,9 +1,9 @@
 import { LineEdit, Spinner } from "std-widgets.slint";
 import { Theme, PillButton, LinkButton, Dialog } from "theme.slint";
-import { HostCard, AppCard, CommandRow, HostsPage, AppsPage, SessionPage, SettingsPage, ToolsPage, ReportPage } from "pages.slint";
+import { HostCard, AppCard, CommandRow, PreflightRow, HostsPage, AppsPage, SessionPage, SettingsPage, ToolsPage, ReportPage } from "pages.slint";
 import { StreamView } from "stream.slint";
 
-export { HostCard, AppCard, CommandRow } from "pages.slint";
+export { HostCard, AppCard, CommandRow, PreflightRow } from "pages.slint";
 
 export component AppWindow inherits Window {
     title: "Hestia";
@@ -105,7 +105,11 @@ export component AppWindow inherits Window {
     in-out property <string> tools-clipboard-text;
     in property <string> tools-permissions;
     in property <[string]> tools-diagnostics;
+    in property <[string]> tools-status-lines;
+    in property <[PreflightRow]> tools-preflight;
     callback open-tools();
+    callback tools-open-web-ui();
+    callback tools-host-report();
     callback tools-refresh();
     callback tools-recover-display();
     callback tools-run-command(int);
@@ -120,6 +124,7 @@ export component AppWindow inherits Window {
     in property <bool> stream-fullscreen;
     in property <bool> stream-trackpad: true;
     in-out property <bool> stream-keyboard-open: false;
+    in property <string> stream-banner;
     callback stream-key(string, bool, bool, bool, bool, bool, bool);
     callback stream-pointer(int, int, float, float, float, float, bool);
     callback stream-scroll(float, float);
@@ -128,11 +133,19 @@ export component AppWindow inherits Window {
     callback stream-special-key(string);
     callback stream-toggle-trackpad();
     callback stream-request-keyframe();
+    in-out property <int> stream-video-scale: 0;
+    callback stream-cycle-scale();
     callback stream-toggle-fullscreen();
     callback stream-disconnect();
     callback stream-quit();
 
     // Settings
+    in-out property <[string]> cfg-resolution-options: ["1280 × 720", "1920 × 1080", "2560 × 1440", "3840 × 2160"];
+    in-out property <[string]> cfg-fps-options: ["30 fps", "60 fps", "90 fps", "120 fps", "144 fps"];
+    in-out property <int> cfg-preset: 0;
+    in-out property <string> cfg-preset-hint;
+    in-out property <int> cfg-video-scale: 0;
+    callback settings-preset-changed(int);
     in-out property <int> cfg-resolution: 1;
     in-out property <int> cfg-fps: 1;
     in-out property <float> cfg-bitrate: 20;
@@ -283,7 +296,9 @@ export component AppWindow inherits Window {
         show-stats: root.stream-show-stats;
         fullscreen: root.stream-fullscreen;
         trackpad: root.stream-trackpad;
+        video-scale: root.stream-video-scale;
         keyboard-open <=> root.stream-keyboard-open;
+        banner: root.stream-banner;
         key-event(text, pressed, repeat, ctrl, alt, shift, meta) => {
             root.stream-key(text, pressed, repeat, ctrl, alt, shift, meta);
         }
@@ -304,6 +319,9 @@ export component AppWindow inherits Window {
         }
         toggle-trackpad => {
             root.stream-toggle-trackpad();
+        }
+        cycle-scale => {
+            root.stream-cycle-scale();
         }
         request-keyframe => {
             root.stream-request-keyframe();
@@ -358,8 +376,16 @@ export component AppWindow inherits Window {
         clipboard-text <=> root.tools-clipboard-text;
         permissions: root.tools-permissions;
         diagnostics: root.tools-diagnostics;
+        status-lines: root.tools-status-lines;
+        preflight: root.tools-preflight;
         back => {
             root.screen = 1;
+        }
+        open-web-ui => {
+            root.tools-open-web-ui();
+        }
+        host-report => {
+            root.tools-host-report();
         }
         refresh => {
             root.tools-refresh();
@@ -381,6 +407,14 @@ export component AppWindow inherits Window {
     if root.screen == 3: SettingsPage {
         width: 100%;
         height: 100%;
+        resolution-options: root.cfg-resolution-options;
+        fps-options: root.cfg-fps-options;
+        preset <=> root.cfg-preset;
+        preset-hint: root.cfg-preset-hint;
+        video-scale <=> root.cfg-video-scale;
+        preset-changed(index) => {
+            root.settings-preset-changed(index);
+        }
         resolution <=> root.cfg-resolution;
         fps <=> root.cfg-fps;
         bitrate-mbps <=> root.cfg-bitrate;

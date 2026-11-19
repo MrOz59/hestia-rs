@@ -395,6 +395,9 @@ pub struct VideoCounters {
     pub frames: AtomicU64,
     pub recovered: AtomicU64,
     pub lost_frames: AtomicU64,
+    /// Sum of host-reported processing latency, and how many frames had it.
+    pub host_latency_us: AtomicU64,
+    pub host_latency_frames: AtomicU64,
 }
 
 pub struct VideoReceiver {
@@ -568,6 +571,12 @@ fn receive_loop(
                         let _ = feedback.send(VideoFeedback::FirstFrame);
                     }
                     counters.frames.fetch_add(1, Ordering::Relaxed);
+                    if frame.host_latency_100us > 0 {
+                        counters
+                            .host_latency_us
+                            .fetch_add(u64::from(frame.host_latency_100us) * 100, Ordering::Relaxed);
+                        counters.host_latency_frames.fetch_add(1, Ordering::Relaxed);
+                    }
                     let encoded = EncodedFrame {
                         frame_number: frame.frame,
                         keyframe: frame.keyframe,

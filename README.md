@@ -48,7 +48,24 @@ server commands) when the host offers them.
   keyboard) replayed on the host, plus Esc, Tab, Enter, Backspace, Win,
   Alt+Tab and Alt+F4; "Fix picture" asks the host for a fresh keyframe.
 - **Host tools** (Hermes): display status and recovery, server commands,
-  clipboard send/fetch, this device's permissions, diagnostics.
+  clipboard send/fetch, this device's permissions, diagnostics, the host's
+  readiness preflight (failures first, also summarised on the host card),
+  runtime status (encoder, sessions, pipeline), the host's full diagnostic
+  report and a shortcut to the Hermes web UI.
+- **Stream provenance**: after the first frame, a banner shows what the host
+  is actually using (GPU, encoder, capture path) from Hermes' stream info; it
+  goes into the report too.
+- **Presets** in Settings: Fast (≤1080p60), Balanced (native, ≤60 fps),
+  Quality (native resolution and refresh, more bitrate) and Battery saver
+  (720p30), computed from this device's display (EDID on Linux,
+  `Display.Mode` on Android) with Hestia desktop's bitrate table. Editing
+  resolution, frame rate or bitrate by hand switches to Custom.
+- **Picture scale**: fit (bars), fill (crop) or stretch, in Settings and the
+  stream menu.
+- **Live diagnosis**: every second the client works out whether the network,
+  the decoder, the display or the host is the bottleneck (Hestia desktop's
+  classifier); the overlay says which and how often it happened in the last
+  five minutes, and the report marks each bad second.
 - **Stream reports**: every session (including one that fails to start)
   writes a report with the client, host and launch details, what was
   negotiated, events, per-second statistics and every log line from launch

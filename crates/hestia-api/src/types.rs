@@ -260,3 +260,269 @@ mod tests {
         assert!(!caps.is_compatible());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Diagnostics document (GET /diagnostics), the parts clients show
+// ---------------------------------------------------------------------------
+
+/// One readiness check from `diagnostics.preflight.checks`. The id set is
+/// open: unknown ids are kept, unknown statuses count as warnings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PreflightCheck {
+    pub id: String,
+    pub status: String,
+    pub message: String,
+}
+
+impl PreflightCheck {
+    pub fn is_ok(&self) -> bool {
+        self.status == "ok"
+    }
+
+    pub fn is_fail(&self) -> bool {
+        self.status == "fail"
+    }
+}
+
+/// `diagnostics.preflight`: is the host ready to stream, and why not.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Preflight {
+    pub ready: bool,
+    pub checks: Vec<PreflightCheck>,
+}
+
+impl Preflight {
+    /// Checks that are not "ok", failures first.
+    pub fn problems(&self) -> Vec<&PreflightCheck> {
+        let mut out: Vec<&PreflightCheck> = self.checks.iter().filter(|c| !c.is_ok() && !c.id.is_empty()).collect();
+        out.sort_by_key(|c| !c.is_fail());
+        out
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EncoderStatus {
+    /// False until Hermes has probed its encoders.
+    pub probed: Option<bool>,
+    pub name: String,
+    pub hardware: bool,
+    pub codecs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionsStatus {
+    pub active: u32,
+    pub streaming: bool,
+    /// `client_quit`, `client_lost`, `handshake_failed`, `protocol_error`,
+    /// `server_stopped`, `permission_revoked` or `unknown`.
+    pub last_termination: String,
+}
+
+impl SessionsStatus {
+    /// The last termination reason as a person reads it.
+    pub fn last_termination_text(&self) -> Option<String> {
+        let text = match self.last_termination.as_str() {
+            "" | "unknown" => return None,
+            "client_quit" => "the client closed the stream",
+            "client_lost" => "the client connection was lost (network or crash)",
+            "handshake_failed" => "the stream handshake failed",
+            "protocol_error" => "a protocol error",
+            "server_stopped" => "stopped by the host",
+            "permission_revoked" => "permission revoked",
+            other => other,
+        };
+        Some(text.to_owned())
+    }
+}
+
+/// Live encoder metrics while a stream runs.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PipelineStatus {
+    pub fps: f64,
+    pub bitrate_kbps: f64,
+    pub encode_ms: f64,
+    pub capture_to_encode_ms: f64,
+    pub frames_encoded: u64,
+    pub frames_dropped: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeStatus {
+    pub encoder: Option<EncoderStatus>,
+    pub sessions: Option<SessionsStatus>,
+    pub pipeline: Option<PipelineStatus>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DependencyStatus {
+    pub available: bool,
+    pub diagnostic: String,
+    #[serde(rename = "manualInstall")]
+    pub manual_install: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Dependencies {
+    pub clipboard: Option<DependencyStatus>,
+}
+
+/// The parts of `GET /diagnostics` that clients present. Every section is
+/// optional: older hosts omit some of them.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostDiagnostics {
+    pub ok: bool,
+    pub preflight: Option<Preflight>,
+    pub runtime: Option<RuntimeStatus>,
+    pub dependencies: Option<Dependencies>,
+}
+
+impl HostDiagnostics {
+    /// Lenient: a section that doesn't parse is treated as absent.
+    pub fn from_value(value: &serde_json::Value) -> Self {
+        let section = |key: &str| value.get(key).cloned().unwrap_or(serde_json::Value::Null);
+        Self {
+            ok: value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+            preflight: serde_json::from_value(section("preflight")).ok(),
+            runtime: serde_json::from_value(section("runtime")).ok(),
+            dependencies: serde_json::from_value(section("dependencies")).ok(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stream provenance (GET /stream/info)
+// ---------------------------------------------------------------------------
+
+/// How Hermes serves the current stream, from its capture-path check just
+/// before the stream started.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StreamReadiness {
+    pub ok: bool,
+    pub frame_seen: bool,
+    /// e.g. "the detached desktop via KWin screencast".
+    pub capture: String,
+    /// e.g. "vaapi", "nvenc".
+    pub encoder: String,
+    /// e.g. "/dev/dri/renderD128 (amdgpu, AMD 1002:7550)"; empty for a
+    /// software encoder.
+    pub gpu: String,
+    pub failure: String,
+}
+
+impl StreamReadiness {
+    /// "AMD 1002:7550 (amdgpu)" from "/dev/dri/renderD128 (amdgpu, AMD 1002:7550)".
+    pub fn gpu_name(&self) -> String {
+        let gpu = &self.gpu;
+        if let (Some(open), true) = (gpu.find(" ("), gpu.ends_with(')')) {
+            if let Some(comma) = gpu[open..].find(", ").map(|i| open + i) {
+                let driver = &gpu[open + 2..comma];
+                let device = &gpu[comma + 2..gpu.len() - 1];
+                return format!("{device} ({driver})");
+            }
+        }
+        gpu.clone()
+    }
+
+    pub fn encoder_name(&self) -> String {
+        self.encoder.to_uppercase()
+    }
+
+    /// "Detached desktop via KWin screencast".
+    pub fn capture_text(&self) -> String {
+        let text = self.capture.strip_prefix("the ").unwrap_or(&self.capture);
+        let mut chars = text.chars();
+        match chars.next() {
+            Some(first) => first.to_uppercase().chain(chars).collect(),
+            None => String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub(crate) struct StreamInfoEnvelope {
+    pub readiness: Option<StreamReadiness>,
+}
+
+/// Size cap for `GET /diagnostics/report` (as Hestia desktop).
+pub const MAX_DIAGNOSTIC_REPORT_BYTES: usize = 4 * 1024 * 1024;
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_diagnostics_sections() {
+        let v = json!({
+            "ok": true,
+            "preflight": {"ready": false, "checks": [
+                {"id": "kms", "status": "ok", "message": ""},
+                {"id": "clipboard", "status": "warn", "message": "wl-clipboard missing"},
+                {"id": "encoder", "status": "fail", "message": "no VAAPI device"},
+                {"status": "fail", "message": "no id: ignored"}
+            ]},
+            "runtime": {
+                "encoder": {"probed": true, "name": "vaapi", "hardware": true, "codecs": ["h264", "hevc"]},
+                "sessions": {"active": 0, "streaming": false, "last_termination": "client_lost"},
+                "pipeline": {"fps": 59.9, "bitrate_kbps": 18000, "encode_ms": 3.2,
+                             "capture_to_encode_ms": 5.1, "frames_encoded": 900, "frames_dropped": 2}
+            },
+            "dependencies": {"clipboard": {"available": false, "diagnostic": "wl-copy not found",
+                                           "manualInstall": "sudo pacman -S wl-clipboard"}},
+            "preflight_extra": "ignored"
+        });
+        let d = HostDiagnostics::from_value(&v);
+        assert!(d.ok);
+        let pf = d.preflight.unwrap();
+        assert!(!pf.ready);
+        let problems: Vec<&str> = pf.problems().iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(problems, ["encoder", "clipboard"], "failures first, nameless ignored");
+        let rt = d.runtime.unwrap();
+        assert_eq!(rt.encoder.unwrap().codecs, ["h264", "hevc"]);
+        assert_eq!(
+            rt.sessions.unwrap().last_termination_text().as_deref(),
+            Some("the client connection was lost (network or crash)")
+        );
+        assert_eq!(rt.pipeline.unwrap().frames_dropped, 2);
+        assert_eq!(
+            d.dependencies.unwrap().clipboard.unwrap().manual_install,
+            "sudo pacman -S wl-clipboard"
+        );
+    }
+
+    #[test]
+    fn missing_or_broken_sections_are_absent() {
+        let d = HostDiagnostics::from_value(&json!({"ok": true, "runtime": "nonsense"}));
+        assert!(d.preflight.is_none() && d.runtime.is_none() && d.dependencies.is_none());
+    }
+
+    #[test]
+    fn readiness_texts() {
+        let r = StreamReadiness {
+            ok: true,
+            capture: "the detached desktop via KWin screencast".into(),
+            encoder: "vaapi".into(),
+            gpu: "/dev/dri/renderD128 (amdgpu, AMD 1002:7550)".into(),
+            ..Default::default()
+        };
+        assert_eq!(r.gpu_name(), "AMD 1002:7550 (amdgpu)");
+        assert_eq!(r.encoder_name(), "VAAPI");
+        assert_eq!(r.capture_text(), "Detached desktop via KWin screencast");
+        let odd = StreamReadiness {
+            gpu: "Intel Arc".into(),
+            ..Default::default()
+        };
+        assert_eq!(odd.gpu_name(), "Intel Arc");
+    }
+}

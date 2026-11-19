@@ -22,6 +22,7 @@ const BASE: &str = "/api/hestia/v1";
 const CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 const CLIPBOARD_TIMEOUT: Duration = Duration::from_secs(1);
+const REPORT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Clipboard payload limit enforced by Hestia/Hermes.
 pub const MAX_CLIPBOARD_BYTES: usize = 64 * 1024;
 
@@ -146,6 +147,41 @@ impl<'a> HestiaApi<'a> {
             return Err(ApiError::Rejected("clipboard text is too large or contains NUL".into()));
         }
         self.post_ok("/clipboard", &serde_json::json!({ "text": text }), CLIPBOARD_TIMEOUT)
+    }
+
+    /// [`Self::diagnostics`] parsed into the sections clients present.
+    pub fn host_diagnostics(&self) -> Result<HostDiagnostics> {
+        Ok(HostDiagnostics::from_value(&self.diagnostics()?))
+    }
+
+    /// The host's full diagnostic report (plain text: logs, device and
+    /// configuration details). Can be large; never log its contents.
+    pub fn diagnostics_report(&self) -> Result<String> {
+        let target = format!("{BASE}/diagnostics/report");
+        let response = self
+            .client
+            .https_request(self.client.api_port(), &Request::get(&target), REPORT_TIMEOUT)?;
+        if !response.is_success() {
+            let body: types::ErrorEnvelope = serde_json::from_slice(&response.body).unwrap_or_default();
+            return Err(ApiError::Host {
+                status: response.status,
+                code: body.error.code,
+                message: body.error.message,
+            });
+        }
+        if response.body.is_empty() || response.body.len() > MAX_DIAGNOSTIC_REPORT_BYTES {
+            return Err(ApiError::Rejected("the diagnostic report is empty or too large".into()));
+        }
+        Ok(String::from_utf8_lossy(&response.body).into_owned())
+    }
+
+    /// How Hermes serves the current stream (capture path, encoder, GPU).
+    /// Hosts without the endpoint answer 404 ([`ApiError::is_unsupported`]).
+    pub fn stream_info(&self) -> Result<StreamReadiness> {
+        let envelope: types::StreamInfoEnvelope = self.get("/stream/info", DEFAULT_TIMEOUT)?;
+        envelope
+            .readiness
+            .ok_or_else(|| ApiError::Rejected("stream info has no readiness check".into()))
     }
 
     pub fn commands(&self) -> Result<Vec<ServerCommand>> {

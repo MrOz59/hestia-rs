@@ -3,11 +3,11 @@
 
 use std::time::Duration;
 
-use hestia_core::api::{ApiError, MAX_CLIPBOARD_BYTES, ServerCommand};
+use hestia_core::api::{ApiError, HostDiagnostics, MAX_CLIPBOARD_BYTES, ServerCommand};
 use slint::{ModelRc, SharedString, VecModel};
 
 use super::{Controller, Shared, spawn};
-use crate::{CommandRow, hostinfo};
+use crate::{CommandRow, PreflightRow, hostinfo, platform};
 
 /// How long an armed "Confirm" button waits for the second tap.
 const CONFIRM_WINDOW: Duration = Duration::from_secs(4);
@@ -49,6 +49,8 @@ impl Controller {
             ui.set_tools_permissions(SharedString::new());
             ui.set_tools_diagnostics(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
             ui.set_tools_commands(ModelRc::new(VecModel::from(Vec::<CommandRow>::new())));
+            ui.set_tools_status_lines(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
+            ui.set_tools_preflight(ModelRc::new(VecModel::from(Vec::<PreflightRow>::new())));
             ui.set_screen(5);
         });
         self.tools_refresh();
@@ -114,6 +116,13 @@ impl Controller {
                 Err(e) if !unsupported => vec![api_error("Diagnostics", e)],
                 Err(_) => Vec::new(),
             };
+            let host_diag = diagnostics.as_ref().ok().map(HostDiagnostics::from_value);
+            let status = host_diag.as_ref().map(hostinfo::status_lines).unwrap_or_default();
+            let preflight = host_diag
+                .as_ref()
+                .and_then(|d| d.preflight.as_ref())
+                .map(hostinfo::preflight_rows)
+                .unwrap_or_default();
 
             {
                 let mut st = c.state();
@@ -132,6 +141,17 @@ impl Controller {
                 ui.set_tools_clipboard_allowed(clipboard_ok);
                 let lines: Vec<SharedString> = diag_lines.into_iter().map(SharedString::from).collect();
                 ui.set_tools_diagnostics(ModelRc::new(VecModel::from(lines)));
+                let status: Vec<SharedString> = status.into_iter().map(SharedString::from).collect();
+                ui.set_tools_status_lines(ModelRc::new(VecModel::from(status)));
+                let rows: Vec<PreflightRow> = preflight
+                    .into_iter()
+                    .map(|(level, title, message)| PreflightRow {
+                        level,
+                        title: title.into(),
+                        message: message.into(),
+                    })
+                    .collect();
+                ui.set_tools_preflight(ModelRc::new(VecModel::from(rows)));
             });
         });
     }
@@ -230,6 +250,57 @@ impl Controller {
                 Ok(Err(e)) => c.toast(api_error("Clipboard", &e)),
                 Err(e) => c.toast(format!("Clipboard: {e}")),
             }
+        });
+    }
+
+    pub(super) fn tools_open_web_ui(self: &Shared) {
+        let Some(id) = self.state().current_host.clone() else {
+            return;
+        };
+        let Some(core) = self.core() else { return };
+        let result = core
+            .web_ui_url(&id)
+            .map_err(|e| e.to_string())
+            .and_then(|url| platform::open_url(&url).map(|()| url));
+        match result {
+            Ok(url) => self.toast(format!("Opening {url} (the host uses a self-signed certificate)")),
+            Err(e) => self.toast(e),
+        }
+    }
+
+    /// Fetches Hermes' full diagnostic report, saves it next to the stream
+    /// reports and opens it on the report screen (to share or keep).
+    pub(super) fn tools_host_report(self: &Shared) {
+        let Some(id) = self.state().current_host.clone() else {
+            return;
+        };
+        self.ui(|ui| ui.set_tools_busy(true));
+        let c = self.clone();
+        spawn("hestia-host-report", move || {
+            let Some(core) = c.core() else { return };
+            let result = core.with_api(&id, |api| api.diagnostics_report());
+            c.ui(|ui| ui.set_tools_busy(false));
+            let text = match result {
+                Ok(Ok(text)) => text,
+                Ok(Err(e)) => return c.toast(api_error("Diagnostic report", &e)),
+                Err(e) => return c.toast(format!("Diagnostic report: {e}")),
+            };
+            let host = core.host(&id).map(|h| h.name).unwrap_or_default();
+            let now = std::time::SystemTime::now();
+            let dir = platform::reports_dir(core.data_dir());
+            let path = match hestia_core::report::save_named(&dir, "hermes", now, &text) {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    log::warn!("could not save the Hermes report: {e}");
+                    None
+                }
+            };
+            let summary = vec![
+                format!("Hermes diagnostic report from {host}"),
+                format!("Fetched {}", hestia_core::report::utc(now)),
+                format!("{} lines, {} KiB", text.lines().count(), text.len().div_ceil(1024)),
+            ];
+            c.show_text_report(format!("Hermes report — {host}"), text, path, summary);
         });
     }
 }
