@@ -32,7 +32,7 @@ fn mime(codec: VideoCodec) -> Option<&'static str> {
     match codec {
         VideoCodec::H264 => Some("video/avc"),
         VideoCodec::Hevc => Some("video/hevc"),
-        _ => None,
+        VideoCodec::Av1 => Some("video/av01"),
     }
 }
 
@@ -63,6 +63,7 @@ pub struct MediaCodecDecoder {
     colorimetry: Colorimetry,
     h264: bool,
     hevc: bool,
+    av1: bool,
     running: Option<Running>,
     /// Software decoder used when the hardware one can't be set up (H.264).
     #[cfg(feature = "openh264")]
@@ -74,22 +75,30 @@ impl MediaCodecDecoder {
     pub fn probe(colorimetry: Colorimetry) -> Option<Self> {
         let h264 = MediaCodec::from_decoder_type("video/avc").is_some();
         let hevc = MediaCodec::from_decoder_type("video/hevc").is_some();
-        info!("MediaCodec decoders: H.264 {h264}, HEVC {hevc}");
+        let av1 = MediaCodec::from_decoder_type("video/av01").is_some();
+        info!("MediaCodec decoders: H.264 {h264}, HEVC {hevc}, AV1 {av1}");
         (h264 || hevc).then_some(Self {
             colorimetry,
             h264,
             hevc,
+            av1,
             running: None,
             #[cfg(feature = "openh264")]
             fallback: None,
         })
     }
 
-    /// The formats to offer the host (HEVC first: same quality for less
-    /// bandwidth).
+    /// The formats to offer the host: HEVC first (same quality for less
+    /// bandwidth), then H.264. AV1 comes last, used only when picked in
+    /// the settings: the NDK can't tell (before Android 9) whether this
+    /// device's AV1 decoder is hardware or a slow software one.
     pub fn formats(&self) -> Vec<VideoFormat> {
         let mut formats = Vec::new();
-        for (ok, codec) in [(self.hevc, VideoCodec::Hevc), (self.h264, VideoCodec::H264)] {
+        for (ok, codec) in [
+            (self.hevc, VideoCodec::Hevc),
+            (self.h264, VideoCodec::H264),
+            (self.av1, VideoCodec::Av1),
+        ] {
             if ok {
                 formats.push(VideoFormat {
                     codec,
@@ -261,7 +270,7 @@ impl FrameDecoder for MediaCodecDecoder {
             && match format.codec {
                 VideoCodec::H264 => self.h264,
                 VideoCodec::Hevc => self.hevc,
-                _ => false,
+                VideoCodec::Av1 => self.av1,
             }
     }
 

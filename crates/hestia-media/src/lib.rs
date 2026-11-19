@@ -13,12 +13,17 @@
 //! * [`null`]: counts frames and packets; for exercising the pipeline.
 //! * [`dump`]: writes the elementary video stream to a file (`ffplay out.h264`).
 //!
-//! * `mediacodec` (Android): hardware H.264/HEVC through `AMediaCodec`,
+//! * `mediacodec` (Android): hardware H.264/HEVC/AV1 through `AMediaCodec`,
 //!   read back via an `AImageReader`; falls back to OpenH264 for H.264.
+//! * `android_audio` (Android): Opus through the system's MediaCodec
+//!   decoder, played with AAudio (surround mixed down to stereo).
 //!
 //! Planned: `vaapi` (Linux, DMA-BUF into the GL view), zero-copy Android
 //! output, surround audio, Android audio.
 
+#[cfg(target_os = "android")]
+pub mod android_audio;
+pub mod audio_fifo;
 #[cfg(feature = "audio")]
 pub mod audio_out;
 pub mod color;
@@ -102,11 +107,15 @@ fn software_decoder(colorimetry: Colorimetry) -> Result<DecoderChoice, String> {
 
 /// Audio playback when this build has it, otherwise a sink that only counts.
 pub fn default_audio_sink() -> Box<dyn AudioSink> {
-    #[cfg(feature = "audio")]
+    #[cfg(target_os = "android")]
+    {
+        Box::new(android_audio::AndroidAudioSink::new())
+    }
+    #[cfg(all(feature = "audio", not(target_os = "android")))]
     {
         Box::new(audio_out::OpusPlaybackSink::new())
     }
-    #[cfg(not(feature = "audio"))]
+    #[cfg(not(any(feature = "audio", target_os = "android")))]
     {
         Box::new(null::NullAudioSink::default())
     }

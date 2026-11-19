@@ -54,10 +54,57 @@ fn clamp8(v: i32) -> u8 {
     v.clamp(0, 255) as u8
 }
 
-/// Writes `width * height` RGBA pixels (alpha 255) into `out`.
+/// Pictures shorter than this convert on one thread.
+const PARALLEL_MIN_ROWS: usize = 360;
+
+/// How many horizontal bands to convert at once (one per core, up to 4).
+fn bands(height: usize) -> usize {
+    if height < PARALLEL_MIN_ROWS {
+        return 1;
+    }
+    std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 4)
+}
+
+/// Splits `height` rows into `n` bands of an even number of rows (so each
+/// band starts on a chroma row): `(first row, rows)`.
+fn band_rows(height: usize, n: usize) -> Vec<(usize, usize)> {
+    let per = (height.div_ceil(n.max(1)) + 1) & !1;
+    (0..height)
+        .step_by(per.max(2))
+        .map(|r| (r, per.min(height - r)))
+        .collect()
+}
+
+/// Writes `width * height` RGBA pixels (alpha 255) into `out`, using up to
+/// four threads for large pictures.
 ///
 /// Panics if the planes or `out` are smaller than the dimensions require.
 pub fn i420_to_rgba(src: &I420<'_>, colorimetry: Colorimetry, out: &mut [u8]) {
+    let (w, h) = (src.width, src.height);
+    assert!(out.len() >= w * h * 4, "RGBA buffer too small");
+    let n = bands(h);
+    if n <= 1 {
+        return i420_rows(src, colorimetry, out);
+    }
+    std::thread::scope(|scope| {
+        let mut rest = &mut out[..w * h * 4];
+        for (row, rows) in band_rows(h, n) {
+            let (band, tail) = std::mem::take(&mut rest).split_at_mut(rows * w * 4);
+            rest = tail;
+            let c = (row / 2) * src.uv_stride;
+            let sub = I420 {
+                y: &src.y[row * src.y_stride..],
+                u: &src.u[c..],
+                v: &src.v[c..],
+                height: rows,
+                ..*src
+            };
+            scope.spawn(move || i420_rows(&sub, colorimetry, band));
+        }
+    });
+}
+
+fn i420_rows(src: &I420<'_>, colorimetry: Colorimetry, out: &mut [u8]) {
     let [y_off, ys, rv, gu, gv, bu] = colorimetry.coefficients();
     let (w, h) = (src.width, src.height);
     assert!(out.len() >= w * h * 4, "RGBA buffer too small");
@@ -130,9 +177,32 @@ pub fn yuv420_to_rgba(src: &Yuv420<'_>, colorimetry: Colorimetry, out: &mut [u8]
             out,
         );
     }
-    let [y_off, ys, rv, gu, gv, bu] = colorimetry.coefficients();
     let (w, h) = (src.width, src.height);
     assert!(out.len() >= w * h * 4, "RGBA buffer too small");
+    let n = bands(h);
+    if n <= 1 {
+        return yuv420_rows(src, colorimetry, out);
+    }
+    std::thread::scope(|scope| {
+        let mut rest = &mut out[..w * h * 4];
+        for (row, rows) in band_rows(h, n) {
+            let (band, tail) = std::mem::take(&mut rest).split_at_mut(rows * w * 4);
+            rest = tail;
+            let sub = Yuv420 {
+                y: &src.y[row * src.y_stride..],
+                u: src.u.get((row / 2) * src.u_stride..).unwrap_or_default(),
+                v: src.v.get((row / 2) * src.v_stride..).unwrap_or_default(),
+                height: rows,
+                ..*src
+            };
+            scope.spawn(move || yuv420_rows(&sub, colorimetry, band));
+        }
+    });
+}
+
+fn yuv420_rows(src: &Yuv420<'_>, colorimetry: Colorimetry, out: &mut [u8]) {
+    let [y_off, ys, rv, gu, gv, bu] = colorimetry.coefficients();
+    let (w, h) = (src.width, src.height);
     let ps = src.uv_pixel_stride.max(1);
 
     for (row, out_row) in out.chunks_exact_mut(w * 4).take(h).enumerate() {
@@ -272,5 +342,54 @@ mod tests {
         };
         yuv420_to_rgba(&as_888, Colorimetry::Bt601Limited, &mut again);
         assert_eq!(again, expected);
+    }
+
+    #[test]
+    fn bands_cover_every_row_and_start_even() {
+        for (h, n) in [(1080, 4), (720, 3), (361, 4), (1081, 4), (2, 4)] {
+            let b = band_rows(h, n);
+            assert_eq!(b.iter().map(|&(_, r)| r).sum::<usize>(), h, "{h}/{n}: {b:?}");
+            assert!(b.iter().all(|&(r, _)| r % 2 == 0), "{b:?}");
+            assert!(b.windows(2).all(|w| w[0].0 + w[0].1 == w[1].0), "{b:?}");
+        }
+    }
+
+    #[test]
+    fn threaded_conversion_matches_one_thread() {
+        let (w, h) = (64usize, 720usize);
+        let y: Vec<u8> = (0..w * h).map(|i| (i * 7 % 251) as u8).collect();
+        let u: Vec<u8> = (0..w * h / 4).map(|i| (i * 13 % 241) as u8).collect();
+        let v: Vec<u8> = (0..w * h / 4).map(|i| (i * 29 % 239) as u8).collect();
+        let src = I420 {
+            y: &y,
+            u: &u,
+            v: &v,
+            y_stride: w,
+            uv_stride: w / 2,
+            width: w,
+            height: h,
+        };
+        let mut single = vec![0u8; w * h * 4];
+        i420_rows(&src, Colorimetry::Bt709Limited, &mut single);
+        let mut threaded = vec![0u8; w * h * 4];
+        i420_to_rgba(&src, Colorimetry::Bt709Limited, &mut threaded);
+        assert_eq!(single, threaded);
+
+        // Interleaved chroma (NV12) through the YUV_420_888 path.
+        let nv12: Vec<u8> = u.iter().zip(&v).flat_map(|(&a, &b)| [a, b]).collect();
+        let semi = Yuv420 {
+            y: &y,
+            u: &nv12,
+            v: &nv12[1..],
+            y_stride: w,
+            u_stride: w,
+            v_stride: w,
+            uv_pixel_stride: 2,
+            width: w,
+            height: h,
+        };
+        let mut nv = vec![0u8; w * h * 4];
+        yuv420_to_rgba(&semi, Colorimetry::Bt709Limited, &mut nv);
+        assert_eq!(nv, single);
     }
 }

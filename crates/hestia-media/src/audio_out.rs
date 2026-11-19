@@ -1,12 +1,9 @@
 //! Opus decode + playback through the system audio API (cpal: ALSA /
 //! PulseAudio / PipeWire on Linux). Feature `audio`.
 //!
-//! The network thread decodes each 5 ms packet straight into a small sample
-//! FIFO that the audio callback drains. The FIFO is kept short: when it grows
-//! past [`MAX_LATENCY_MS`] the oldest samples are dropped, so clock drift
-//! between host and device never turns into growing delay.
+//! The network thread decodes each 5 ms packet straight into the sample
+//! FIFO ([`crate::audio_fifo`]) that the audio callback drains.
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -16,18 +13,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hestia_stream::{AudioFormat, AudioSink};
 use log::{info, warn};
 
-/// Target and maximum buffered audio.
-const TARGET_LATENCY_MS: usize = 30;
-const MAX_LATENCY_MS: usize = 80;
-const SAMPLE_RATE: u32 = 48_000;
-const CHANNELS: usize = 2;
-
-#[derive(Default)]
-struct Fifo {
-    samples: VecDeque<f32>,
-    /// Waiting to refill to the target after an underrun.
-    priming: bool,
-}
+use crate::audio_fifo::{CHANNELS, Fifo, SAMPLE_RATE, fill, lock};
 
 pub struct OpusPlaybackSink {
     decoder: Option<opus::Decoder>,
@@ -51,48 +37,9 @@ impl OpusPlaybackSink {
             decoder: None,
             pcm: vec![0.0; 5760 * CHANNELS],
             frame_samples: 240,
-            fifo: Arc::new(Mutex::new(Fifo {
-                priming: true,
-                ..Default::default()
-            })),
+            fifo: Arc::new(Mutex::new(Fifo::new())),
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
-        }
-    }
-}
-
-fn lock(fifo: &Mutex<Fifo>) -> std::sync::MutexGuard<'_, Fifo> {
-    fifo.lock().unwrap_or_else(|p| p.into_inner())
-}
-
-/// Fills `out` (interleaved, `channels` per frame) from the stereo FIFO.
-fn fill<T: Copy>(fifo: &Mutex<Fifo>, out: &mut [T], channels: usize, convert: impl Fn(f32) -> T, silence: T) {
-    let mut f = lock(fifo);
-    let target = TARGET_LATENCY_MS * SAMPLE_RATE as usize / 1000 * CHANNELS;
-    if f.priming && f.samples.len() < target {
-        out.fill(silence);
-        return;
-    }
-    f.priming = false;
-    for frame in out.chunks_mut(channels) {
-        if f.samples.len() < CHANNELS {
-            f.priming = true;
-            frame.fill(silence);
-            continue;
-        }
-        let (l, r) = (
-            f.samples.pop_front().unwrap_or(0.0),
-            f.samples.pop_front().unwrap_or(0.0),
-        );
-        match frame.len() {
-            1 => frame[0] = convert((l + r) * 0.5),
-            _ => {
-                frame[0] = convert(l);
-                frame[1] = convert(r);
-                for extra in &mut frame[2..] {
-                    *extra = silence;
-                }
-            }
         }
     }
 }
@@ -211,13 +158,7 @@ impl AudioSink for OpusPlaybackSink {
                 return;
             }
         };
-        let mut f = lock(&self.fifo);
-        f.samples.extend(&self.pcm[..samples * CHANNELS]);
-        let max = MAX_LATENCY_MS * SAMPLE_RATE as usize / 1000 * CHANNELS;
-        if f.samples.len() > max {
-            let excess = f.samples.len() - TARGET_LATENCY_MS * SAMPLE_RATE as usize / 1000 * CHANNELS;
-            f.samples.drain(..excess - excess % CHANNELS);
-        }
+        lock(&self.fifo).push(&self.pcm[..samples * CHANNELS]);
     }
 
     fn cleanup(&mut self) {
@@ -232,32 +173,5 @@ impl AudioSink for OpusPlaybackSink {
 impl Drop for OpusPlaybackSink {
     fn drop(&mut self) {
         self.cleanup();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fifo_primes_then_plays_and_handles_mono() {
-        let fifo = Mutex::new(Fifo {
-            priming: true,
-            ..Default::default()
-        });
-        let mut out = [9.0f32; 8];
-        fill(&fifo, &mut out, 2, |s| s, 0.0);
-        assert_eq!(out, [0.0; 8], "silence while priming");
-
-        let target = TARGET_LATENCY_MS * SAMPLE_RATE as usize / 1000 * CHANNELS;
-        lock(&fifo)
-            .samples
-            .extend((0..target).map(|i| if i % 2 == 0 { 0.5 } else { -0.5 }));
-        fill(&fifo, &mut out, 2, |s| s, 0.0);
-        assert_eq!(out, [0.5, -0.5, 0.5, -0.5, 0.5, -0.5, 0.5, -0.5]);
-
-        let mut mono = [1.0f32; 2];
-        fill(&fifo, &mut mono, 1, |s| s, 0.0);
-        assert_eq!(mono, [0.0, 0.0]);
     }
 }

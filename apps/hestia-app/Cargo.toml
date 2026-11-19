@@ -19,7 +19,7 @@ path = "src/main.rs"
 
 [features]
 default = ["openh264"]
-# Software H.264 decoding (the only video decoder so far).
+# Software H.264 decoding (the fallback; Android decodes with MediaCodec).
 openh264 = ["hestia-media/openh264"]
 
 [dependencies]
@@ -31,7 +31,8 @@ image.workspace = true
 log.workspace = true
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
-# Audio playback on the desktop (Android audio comes later).
+# Audio playback on the desktop (cpal + libopus). Android plays audio with
+# AAudio and decodes Opus with the system's MediaCodec, built in.
 hestia-media = { workspace = true, features = ["audio"] }
 env_logger.workspace = true
 directories.workspace = true

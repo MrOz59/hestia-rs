@@ -67,7 +67,7 @@ pub(super) fn begin(title: &str, host_name: &str, device: &DeviceInfo) -> Shared
         "Client",
         "audio output",
         if cfg!(target_os = "android") {
-            "none yet on Android"
+            "AAudio, Opus via MediaCodec (surround mixed to stereo)"
         } else {
             "Opus via cpal (stereo)"
         },

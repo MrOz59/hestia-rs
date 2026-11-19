@@ -23,5 +23,5 @@ opus = { workspace = true, optional = true }
 cpal = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
-# AMediaCodec + AImageReader (hardware decoding).
-ndk = { version = "0.9", default-features = false, features = ["media", "api-level-26"] }
+# AMediaCodec + AImageReader (hardware video, Opus) and AAudio (playback).
+ndk = { version = "0.9", default-features = false, features = ["media", "audio", "api-level-26"] }
