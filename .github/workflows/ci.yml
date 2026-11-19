@@ -114,7 +114,22 @@ jobs:
           cxx=$("$tools/llvm-nm" -D --undefined-only "$so" | awk '{print $NF}' \
             | grep -E '__ndk1|__gxx_personality|^__cxa_(allocate_exception|throw|begin_catch|end_catch|rethrow|guard_)|^_ZT[ISV]|^_Zn[wa]|^_Zd[la]' || true)
           if [ -n "$cxx" ]; then
-            echo "::error::unresolved C++ runtime symbols in libhestia_app.so"; echo "$cxx" | head -40; exit 1
+            echo "::error::unresolved C++ runtime symbols in libhestia_app.so"; echo "$cxx" | head -40
+            echo "--- diagnostics"
+            ls "$ANDROID_HOME/ndk" || true
+            "$tools/clang++" --version | head -1
+            libdir="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android"
+            for lib in libc++_static.a libc++abi.a libc++_shared.so; do
+              echo "$lib: $("$tools/llvm-nm" -A "$libdir/$lib" 2>/dev/null | grep -c hash_memory) hash_memory symbols"
+            done
+            grep -rln "__hash_memory" "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/c++/v1" | head -5 || true
+            for out in target/aarch64-linux-android/release/build/openh264-sys2-*/output; do
+              echo "== $out"; grep -E "^(CXX|CXXFLAGS|CXXSTDLIB|TARGET|cargo:rustc-link-lib)" "$out" | grep -v "= None" | head -20
+            done
+            for a in target/aarch64-linux-android/release/build/openh264-sys2-*/out/*.a; do
+              "$tools/llvm-nm" -A "$a" 2>/dev/null | grep hash_memory | head -3
+            done
+            exit 1
           fi
           echo "no unresolved C++ runtime symbols"
 
