@@ -63,25 +63,43 @@ identity and loads hosts and settings (JSON, atomic writes). Host records are
 keyed by the host's unique id once known and merged when the same PC is both
 discovered and added by hand. `launch()` prepares a Hermes session when
 available, then launches or resumes, and returns a `LaunchedSession` carrying
-the AES key material the streaming layer needs.
+the AES key material the streaming layer needs; `LaunchedSession::
+stream_config()` turns it into a `StreamConfig` (session URL, codec modes,
+audio layout, LAN/WAN packet size, codec preference).
 
-### hestia-stream (in progress)
-Pure-Rust data plane. Done: session URL parsing, RTSP message codec, AES-GCM
-framing of encrypted RTSP, the input event model, sink traits. Next: the RTSP
-handshake and SDP, then the ENet control stream, video RTP + Reed–Solomon FEC,
-audio. See the table in `crates/hestia-stream/src/lib.rs`.
+### hestia-stream
+Pure-Rust data plane, following moonlight-common-c's Sunshine path:
 
-### hestia-media (in progress)
-Backends implementing the sink traits. Today: a null sink with counters and an
-elementary-stream dump sink. Planned: Android MediaCodec into a `Surface`,
-Linux VA-API (DMA-BUF into the renderer), software fallback, Opus + AAudio /
-PipeWire.
+- `rtsp` + `sdp`: the handshake over TCP (AES-GCM framed for `rtspenc://`),
+  DESCRIBE parsing (codecs, feature flags, encryption, Opus layout) and the
+  ANNOUNCE body with every key Hermes reads.
+- `enet`: a small ENet 1.3 client (cgutman fork wire format) — connect,
+  reliable and unsequenced sends, acks, RTT-based retransmission, fragments.
+- `control`: the encrypted control stream (START A/B, 100 ms pings, IDR
+  requests, input; termination, rumble, HDR from the host).
+- `video` + `fec`: RTP/NV video packets, Reed–Solomon recovery identical to
+  nanors, frame reassembly, waiting for an IDR after unrecoverable loss.
+- `audio`: RTP Opus receiver, optional AES-CBC, loss signalled to the sink.
+- `input`: event model → input packets on per-class channels.
+- `session`: `StreamSession` brings it all up in order and reports
+  `StreamEvent`s (stages, first frame, stats, termination).
+
+### hestia-media
+Backends for the sink traits. `DecodingSink` decodes on its own thread with
+any `FrameDecoder` and gives RGBA pictures to a `FramePresenter`; on queue
+overflow or decode errors it drops until the next keyframe and asks for an IDR
+through the session's `KeyframeRequester`. Backends today: OpenH264 (feature
+`openh264`), Opus + cpal playback (feature `audio`), null and dump sinks.
+Planned: Android MediaCodec into a `Surface`, Linux VA-API, surround audio,
+AAudio.
 
 ### hestia-app
 Slint UI (`ui/*.slint`, fluent-dark base style with a custom theme). A
 `Controller` owns the core and pushes view models to the window through
 `upgrade_in_event_loop`; no network call ever runs on the UI thread. The same
-crate builds a desktop binary and an Android `cdylib` (`android_main`).
+crate builds a desktop binary and an Android `cdylib` (`android_main`). The
+stream screen (`ui/stream.slint`) shows frames pushed from the decoder thread
+(only the newest pending frame is kept) and sends input through the session.
 
 ### hestia-cli
 `hestia` binary over the same core, for scripting and for testing hosts without

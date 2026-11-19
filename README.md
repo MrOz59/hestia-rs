@@ -9,11 +9,14 @@ Apollo hosts too, and it uses Hermes' **Hestia protocol v1** extensions
 (capabilities, session preparation, virtual displays, diagnostics, clipboard,
 server commands) when the host offers them.
 
-> **Status: prototype.** The control plane is implemented: discovery, pairing,
-> app list with box art, Hermes capabilities, launching and quitting apps. It is
-> covered by unit tests and CI builds but has not yet been exercised against a
-> live Hermes host. The streaming data plane (video, audio, input) is the next
-> milestone; see [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Status: prototype.** The control plane (discovery, pairing, apps, Hermes
+> capabilities, launch/quit) and a first streaming pipeline (RTSP, encrypted
+> control stream over ENet, video with Reed–Solomon FEC, software H.264
+> decode, keyboard/mouse input, stereo audio on desktop) are implemented. They
+> are covered by unit tests, an end-to-end test against a mock host, an
+> interop test against the real C ENet, and a decode test with a real H.264
+> stream, but **have not yet been exercised against a live Hermes host**.
+> See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## What's implemented
 
@@ -26,8 +29,30 @@ server commands) when the host offers them.
   (virtual display size, HDR, scale factor, Gamescope launch mode), session
   stop, diagnostics, client permissions, clipboard and server commands in the
   API crate.
+- **Streaming** in pure Rust: RTSP handshake (plain and `rtspenc://`), SDP,
+  AES-GCM control stream over a built-in ENet client, video RTP reassembly with
+  Reed–Solomon FEC (byte-compatible with nanors), IDR recovery, Opus audio
+  (AES-CBC), and input packets (keyboard, text, mouse, scroll, touch, pen,
+  gamepad).
+- **Decoding**: OpenH264 software decoding on every platform (H.264 only for
+  now), on its own thread, with frames handed to the UI newest-first so a slow
+  renderer drops frames instead of adding latency.
+- **Stream screen**: video letterboxed in the window, keyboard (US-layout key
+  mapping, text fallback for other characters), absolute mouse, buttons,
+  scroll, touch as mouse, stats overlay, full screen, disconnect / quit.
+  `Ctrl+Alt+Shift+Q` disconnects, `Ctrl+Alt+Shift+S` toggles statistics.
+- **Audio**: stereo Opus playback through cpal on desktop Linux.
 - **UI** in Slint (dark theme, responsive grid) for desktop Linux and Android
   (NativeActivity), and a `hestia` CLI for scripting and testing.
+
+### Known limits of the prototype
+
+- H.264 only (software). HEVC/AV1, VA-API and MediaCodec decoders are next.
+- No audio on Android yet; surround layouts are not played (stereo only).
+- Keys are mapped by the character they produce (US layout), not by physical
+  scancode; characters without a US key are sent as text.
+- Mouse is absolute only (no pointer capture / relative mode), no gamepads in
+  the UI yet.
 
 ## Layout
 
@@ -38,8 +63,8 @@ crates/
   hestia-api         Hermes "Hestia protocol v1" client (/api/hestia/v1/*)
   hestia-discovery   mDNS discovery (legacy-unicast queries, no multicast lock needed)
   hestia-core        UI-agnostic facade: identity + host store, pairing, apps, launch
-  hestia-stream      streaming data plane (RTSP, control, video, audio, input) — WIP
-  hestia-media       decoder/renderer backends behind VideoSink/AudioSink traits — WIP
+  hestia-stream      streaming data plane: RTSP, ENet control, video + FEC, audio, input
+  hestia-media       decoders/players behind VideoSink/AudioSink (OpenH264, Opus + cpal)
 apps/
   hestia-app         Slint GUI (desktop binary + Android cdylib)
   hestia-cli         `hestia` command-line client
@@ -55,10 +80,11 @@ Rust 1.85+ (edition 2024).
 ### Linux
 
 ```sh
-# Debian/Ubuntu build deps for Slint
-sudo apt install libfontconfig1-dev libxkbcommon-dev libwayland-dev
+# Debian/Ubuntu: Slint, audio (Opus, ALSA) and a C++ compiler for OpenH264
+sudo apt install build-essential libfontconfig1-dev libxkbcommon-dev libwayland-dev \
+    libopus-dev libasound2-dev
 # Arch/CachyOS
-sudo pacman -S --needed fontconfig libxkbcommon wayland
+sudo pacman -S --needed base-devel fontconfig libxkbcommon wayland opus alsa-lib
 
 cargo run --release -p hestia-app      # GUI
 cargo run --release -p hestia-cli -- --help
@@ -88,12 +114,25 @@ hestia pair cachy --otp 1234 --passphrase hunter2   # Hermes OTP pairing
 hestia status cachy             # online/paired/codecs + Hermes capabilities
 hestia apps cachy
 hestia launch cachy Desktop --width 2560 --height 1440 --fps 120
+hestia stream cachy Desktop --width 1280 --height 720 --audio   # headless stream + stats
+hestia stream cachy Desktop --snapshot frame.ppm --seconds 5     # save a decoded frame
+hestia stream cachy Desktop --dump capture --seconds 10          # raw capture.h264
 hestia quit cachy
 hestia diagnostics cachy        # Hermes diagnostics JSON
 ```
 
 The CLI and the GUI share the same data directory (`~/.local/share/hestia-rs`,
 overridable with `HESTIA_DATA_DIR`), so pairing in one shows up in the other.
+
+Overrides given to `launch`/`stream` (`--width`, `--fps`, `--bitrate`…) apply to
+that session only; the saved settings are not changed.
+
+## Tests
+
+`cargo test --workspace` runs, among others, an end-to-end session against a
+mock host (RTSP, ENet control, FEC-protected video with losses) and a decode of
+a real H.264 clip. `tools/enet-interop/run.sh` checks the ENet client against
+the C ENet that hosts use (CI runs it too).
 
 ## License
 

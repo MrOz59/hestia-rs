@@ -1,6 +1,6 @@
 # Roadmap
 
-## Milestone 0 — prototype (this commit)
+## Milestone 0 — prototype
 
 - [x] Modular workspace, pure-Rust crypto and TLS
 - [x] Discovery, manual add, host store
@@ -13,22 +13,27 @@
 
 ## Milestone 1 — first frame
 
-- [ ] RTSP handshake (OPTIONS / DESCRIBE / SETUP ×3 / ANNOUNCE / PLAY) with SDP
+- [x] RTSP handshake (OPTIONS / DESCRIBE / SETUP ×3 / ANNOUNCE / PLAY) with SDP
       generation, plain and encrypted (`rtspenc://`)
-- [ ] UDP pings (`X-SS-Ping-Payload`) to open the video/audio paths
-- [ ] Video RTP reassembly + Reed–Solomon FEC (compatible with nanors as used by
+- [x] UDP pings (`X-SS-Ping-Payload`) to open the video/audio paths
+- [x] Video RTP reassembly + Reed–Solomon FEC (compatible with nanors as used by
       Sunshine/Hermes), frame depacketizer, IDR requests
-- [ ] ENet-compatible control stream (start, loss stats, IDR, termination)
-- [ ] Linux decode (VA-API, software fallback) and a video view inside the
-      Slint window
+- [x] ENet-compatible control stream (start, pings, IDR, termination, rumble/HDR
+      messages), verified against the C ENet
+- [x] Software H.264 decode (OpenH264) and a video view inside the Slint window
+- [ ] **Validate against a live Hermes host** (and Sunshine/Apollo)
+- [ ] Linux VA-API decode (HEVC/AV1, DMA-BUF into the renderer)
 - [ ] Android MediaCodec into a Surface
 
 ## Milestone 2 — playable
 
-- [ ] Audio: AES-CBC, FEC, Opus multistream, PipeWire / AAudio output
-- [ ] Input: keyboard, mouse (relative/absolute), scroll, gamepads (with rumble),
-      touch and stylus / S Pen
-- [ ] Stream overlay: stats, quit, keyboard toggle on Android
+- [x] Audio: AES-CBC, Opus stereo, desktop playback (cpal) with drift control
+- [ ] Audio: surround (multistream), Android AAudio output
+- [x] Input: keyboard, text, absolute mouse, buttons, scroll, touch-as-mouse
+- [ ] Input: scancode-based keyboard, relative mouse / pointer capture,
+      gamepads (with rumble), native touch and stylus / S Pen, Android keyboard
+- [x] Stream overlay: stats, full screen, disconnect, quit
+- [ ] Control-stream loss statistics to the host (adaptive bitrate)
 - [ ] Hermes clipboard sync during the stream
 
 ## Milestone 3 — polish
