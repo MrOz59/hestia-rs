@@ -243,9 +243,39 @@ pub fn stream_banner(r: &StreamReadiness, video: &str, rtt_ms: Option<u32>) -> S
     parts.join(" · ")
 }
 
+/// What to check when talking to a host failed at the network level.
+pub fn network_hint(error: &str) -> Option<&'static str> {
+    let e = error.to_ascii_lowercase();
+    if e.contains("timed out") {
+        Some(
+            "No answer from the host. Check that this device is on the host's network, and that the \
+             host's firewall lets Hermes in (TCP 47984, 47989, 47990, 48010; UDP 47998-48000).",
+        )
+    } else if e.contains("connection refused") {
+        Some("The host is reachable but nothing answered on that port. Is Hermes running?")
+    } else if e.contains("unreachable") || e.contains("no route") {
+        Some("This device has no route to the host. Check the address and that you're on the host's network.")
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_hints() {
+        let timeout = "network error: 192.168.1.205:47989: connection timed out";
+        assert!(network_hint(timeout).is_some_and(|h| h.contains("firewall")));
+        assert!(
+            network_hint("network error: Connection refused (os error 111)")
+                .is_some_and(|h| h.contains("Hermes running"))
+        );
+        assert!(network_hint("network error: No route to host (os error 113)").is_some());
+        assert_eq!(network_hint("host refused pairing (stage 1)"), None);
+        assert_eq!(network_hint("That PIN didn't match"), None);
+    }
     use serde_json::json;
 
     #[test]

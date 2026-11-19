@@ -728,6 +728,7 @@ export component SettingsPage inherits Rectangle {
     callback back;
     callback save;
     callback open-last-report;
+    callback open-app-log;
 
     // Pickers get at most ~45% of the row so labels keep their room.
     property <length> picker-w: Math.min(Theme.compact ? 160px : 170px, (root.width - 2 * Theme.page-padding) * 0.45);
@@ -916,10 +917,17 @@ export component SettingsPage inherits Rectangle {
                     HorizontalLayout {
                         alignment: start;
                         padding-bottom: 4px;
+                        spacing: 8px;
                         PillButton {
-                            text: "Open last stream report";
+                            text: "Last stream report";
                             clicked => {
                                 root.open-last-report();
+                            }
+                        }
+                        PillButton {
+                            text: "App log";
+                            clicked => {
+                                root.open-app-log();
                             }
                         }
                     }

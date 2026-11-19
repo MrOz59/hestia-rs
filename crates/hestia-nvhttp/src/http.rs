@@ -81,18 +81,31 @@ pub fn authority(host: &str, port: u16) -> String {
     }
 }
 
-/// Opens a TCP connection, trying every resolved address in turn.
+static ROUTE_HOOK: std::sync::OnceLock<fn(&SocketAddr)> = std::sync::OnceLock::new();
+
+/// Registers a function called with every address before connecting to it.
+/// The Android app uses it to send LAN traffic over the Wi-Fi network when
+/// mobile data is the default network.
+pub fn set_route_hook(hook: fn(&SocketAddr)) {
+    let _ = ROUTE_HOOK.set(hook);
+}
+
+/// Opens a TCP connection, trying every resolved address in turn. Errors
+/// name the address that failed.
 pub fn connect(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
     let host = host.trim_start_matches('[').trim_end_matches(']');
     let addrs: Vec<SocketAddr> = (host, port).to_socket_addrs()?.collect();
     let mut last_err = io::Error::new(io::ErrorKind::NotFound, format!("{host} did not resolve"));
     for addr in addrs {
+        if let Some(hook) = ROUTE_HOOK.get() {
+            hook(&addr);
+        }
         match TcpStream::connect_timeout(&addr, timeout) {
             Ok(stream) => {
                 stream.set_nodelay(true).ok();
                 return Ok(stream);
             }
-            Err(e) => last_err = e,
+            Err(e) => last_err = io::Error::new(e.kind(), format!("{addr}: {e}")),
         }
     }
     Err(last_err)

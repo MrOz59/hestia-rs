@@ -147,6 +147,8 @@ impl Controller {
         ui.on_report_send_to_host(move || c.report_send_to_host());
         let c = self.clone();
         ui.on_open_last_report(move || c.open_last_report());
+        let c = self.clone();
+        ui.on_open_app_log(move || c.open_app_log());
 
         let c = self.clone();
         ui.on_stream_key(move |text, pressed, repeat, ctrl, alt, shift, meta| {
@@ -446,7 +448,13 @@ impl Controller {
                     "The host is busy with another pairing attempt. Try again in a moment.".to_owned()
                 }
                 Ok((PairingOutcome::Failed(why), _)) => why,
-                Err(e) => e.to_string(),
+                Err(e) => {
+                    let text = e.to_string();
+                    match crate::hostinfo::network_hint(&text) {
+                        Some(hint) => format!("{text}\n{hint}"),
+                        None => text,
+                    }
+                }
             };
             c.ui(move |ui| {
                 ui.set_pair_busy(false);

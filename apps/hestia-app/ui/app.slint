@@ -92,6 +92,7 @@ export component AppWindow inherits Window {
     callback report-export();
     callback report-send-to-host();
     callback open-last-report();
+    callback open-app-log();
 
     // Host tools (Hermes)
     in property <bool> tools-loading;
@@ -432,6 +433,9 @@ export component AppWindow inherits Window {
         show-report <=> root.cfg-show-report;
         open-last-report => {
             root.open-last-report();
+        }
+        open-app-log => {
+            root.open-app-log();
         }
         back => {
             root.screen = root.settings-return;

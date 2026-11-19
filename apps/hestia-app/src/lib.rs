@@ -4,6 +4,7 @@
 mod controller;
 mod hostinfo;
 mod keymap;
+mod netroute;
 mod platform;
 mod touch;
 mod typing;
@@ -33,6 +34,8 @@ fn android_main(app: slint::android::AndroidApp) {
     );
     let _ = hestia_core::logcapture::install(Box::new(logcat), log::LevelFilter::Info);
     platform::set_android_app(app.clone());
+    // Reach LAN hosts over Wi-Fi even when Android prefers mobile data.
+    hestia_core::nvhttp::http::set_route_hook(platform::route_for);
     let data_dir = app
         .internal_data_path()
         .unwrap_or_else(|| PathBuf::from("/data/local/tmp/hestia-rs"));

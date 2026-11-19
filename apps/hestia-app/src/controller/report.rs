@@ -181,6 +181,43 @@ impl Controller {
         self.ui(|ui| ui.set_screen(6));
     }
 
+    /// Settings → "App log": everything logged since the app started, with
+    /// the hosts' last known state, on the report screen (share / save).
+    pub(super) fn open_app_log(self: &Shared) {
+        let Some(core) = self.core() else { return };
+        let now = std::time::SystemTime::now();
+        let lines = logcapture::lines_since(0);
+        let mut text = format!(
+            "Hestia RS app log — {}\n{}\nThis display: {:?}\n\nHosts:\n",
+            report::utc(now),
+            view::version_text(),
+            platform::native_display(),
+        );
+        let snapshots = self.state().snapshots.clone();
+        for host in core.hosts() {
+            let state = match snapshots.get(&host.id) {
+                None => "not checked yet".to_owned(),
+                Some(s) if s.online => format!("online, {}", if s.paired { "paired" } else { "not paired" }),
+                Some(s) => format!("offline: {}", s.error.as_deref().unwrap_or("no answer")),
+            };
+            text += &format!("  {} ({}:{}) — {state}\n", host.name, host.address, host.http_port);
+        }
+        text += &format!("\nLog ({} lines):\n", lines.len());
+        text += &lines.join("\n");
+        let path = match report::save_named(&platform::reports_dir(core.data_dir()), "app", now, &text) {
+            Ok(path) => Some(path),
+            Err(e) => {
+                warn!("could not save the app log: {e}");
+                None
+            }
+        };
+        let summary = vec![
+            format!("App log, {}", report::utc(now)),
+            format!("{} log lines since the app started", lines.len()),
+        ];
+        self.show_text_report("App log".to_owned(), text, path, summary);
+    }
+
     /// Settings → "Open last stream report": the one from this run, or the
     /// newest file on disk.
     pub(super) fn open_last_report(self: &Shared) {

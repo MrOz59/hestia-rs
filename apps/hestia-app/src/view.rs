@@ -14,7 +14,7 @@ pub const VIDEO_SCALES: [VideoScale; 3] = [VideoScale::Fit, VideoScale::Fill, Vi
 
 /// Resolution and frame-rate choices: the common ones, this display's
 /// native mode and whatever is currently set (a preset may pick an
-/// uncommon size), smallest first.
+/// uncommon size), narrowest first.
 pub fn mode_options(native: Option<(u32, u32, u32)>, s: &StreamSettings) -> (Vec<(u32, u32)>, Vec<u32>) {
     let mut sizes: Vec<(u32, u32)> = RESOLUTIONS.to_vec();
     let mut rates: Vec<u32> = FRAME_RATES.to_vec();
@@ -24,7 +24,7 @@ pub fn mode_options(native: Option<(u32, u32, u32)>, s: &StreamSettings) -> (Vec
     }
     sizes.push((s.width, s.height));
     rates.push(s.fps);
-    sizes.sort_by_key(|&(w, h)| (u64::from(w) * u64::from(h), w));
+    sizes.sort_unstable();
     sizes.dedup();
     rates.sort_unstable();
     rates.dedup();
