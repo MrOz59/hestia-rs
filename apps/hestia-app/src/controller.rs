@@ -683,7 +683,7 @@ impl Controller {
             spawn("hestia-launch", move || {
                 let Some(core) = c.core() else { return };
                 let session_report = report::begin(&title, &host_name, &device);
-                let mut failure = String::new();
+                let failure: String;
                 let text: Vec<String> = match core.launch(&id, app_id, &device) {
                     Ok(session) => {
                         report::launched(&session_report, &session);

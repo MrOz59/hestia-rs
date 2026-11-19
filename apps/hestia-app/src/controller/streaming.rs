@@ -352,8 +352,13 @@ impl Controller {
             first_frame: AtomicBool::new(false),
             provenance_requested: AtomicBool::new(false),
         });
-        let session = StreamSession::start(config, Box::new(sink), hestia_media::default_audio_sink(), listener)
-            .map_err(|e| e.to_string())?;
+        let session = StreamSession::start(
+            config,
+            Box::new(sink),
+            hestia_media::default_audio_sink(),
+            listener.clone(),
+        )
+        .map_err(|e| e.to_string())?;
         let codec = format!("{:?}", session.negotiated().video_format.codec);
         info!("streaming {size} {codec} from {}", launched.host.name);
         *listener.video.lock().unwrap_or_else(|p| p.into_inner()) = format!("{size}@{} {codec}", launched.request.fps);

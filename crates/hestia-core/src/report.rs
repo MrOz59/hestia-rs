@@ -238,7 +238,7 @@ impl StreamReport {
                     None => causes.push((v, 1)),
                 }
             }
-            causes.sort_by(|a, b| b.1.cmp(&a.1));
+            causes.sort_by_key(|c| std::cmp::Reverse(c.1));
             out.push(if causes.is_empty() {
                 "Diagnosis: no bottleneck detected".to_owned()
             } else {
