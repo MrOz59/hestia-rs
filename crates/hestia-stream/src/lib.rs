@@ -2,63 +2,70 @@
 //!
 //! Once `/launch` succeeds, a GameStream client:
 //!
-//! 1. **RTSP handshake** (TCP 48010, AES-GCM framed when `rtspenc://`):
-//!    OPTIONS, DESCRIBE (host SDP: codecs, audio layout), SETUP for audio,
-//!    video and control (learns ports, session id, ping payload), ANNOUNCE
-//!    (our SDP: resolution, fps, bitrate, packet size, FEC, encryption) and PLAY.
-//! 2. **Control stream** (ENet over UDP 47999, AES-GCM): start packets,
-//!    periodic loss stats, IDR requests, input, rumble/HDR/termination.
-//! 3. **Video** (RTP over UDP 47998): pings to open the path, packet
-//!    reassembly, Reed–Solomon FEC recovery, frame depacketization.
-//! 4. **Audio** (RTP over UDP 48000): AES-CBC decryption, RS FEC, Opus.
-//! 5. **Input**: events encoded into input packets on the control stream.
+//! 1. **RTSP handshake** ([`rtsp`], TCP 48010, AES-GCM framed when
+//!    `rtspenc://`): OPTIONS, DESCRIBE (host SDP), SETUP for audio, video and
+//!    control (ports, session id, ping payload, connect data), ANNOUNCE (our
+//!    SDP, [`sdp`]) and PLAY.
+//! 2. **Control stream** ([`control`] over [`enet`], UDP 47999, AES-GCM):
+//!    start packets, periodic pings, IDR requests, input; termination, rumble
+//!    and HDR state from the host.
+//! 3. **Video** ([`video`], RTP over UDP 47998): pings to open the path,
+//!    FEC-block reassembly with Reed–Solomon recovery ([`fec`]), frame
+//!    depacketization.
+//! 4. **Audio** ([`audio`], RTP over UDP 48000): Opus packets, optional AES-CBC.
+//! 5. **Input** ([`input`]): events encoded into input packets sent on the
+//!    control stream.
 //!
-//! Status of this crate:
-//!
-//! | Piece                      | State            |
-//! |----------------------------|------------------|
-//! | Session URL / RTSP messages| done (`rtsp`)    |
-//! | Encrypted RTSP framing     | done (`rtsp`)    |
-//! | Input event model          | done (`input`)   |
-//! | Sink traits (decoder API)  | done (`sink`)    |
-//! | RTSP handshake + SDP       | next             |
-//! | ENet control stream        | planned          |
-//! | Video RTP + FEC            | planned          |
-//! | Audio RTP + FEC            | planned          |
-//!
-//! [`StreamSession::start`] reports [`StreamError::Unimplemented`] until the
-//! handshake lands, so front-ends can already wire the session lifecycle.
+//! [`StreamSession`] runs all of it; decoders plug in through the
+//! [`VideoSink`] / [`AudioSink`] traits.
 
+pub mod audio;
+pub mod control;
+pub mod enet;
+pub mod fec;
 pub mod input;
+#[cfg(test)]
+mod mock_host;
 pub mod rtsp;
+pub mod sdp;
+pub mod session;
 pub mod sink;
+pub mod video;
 
 use std::fmt;
 
 pub use input::InputEvent;
 pub use rtsp::SessionUrl;
+pub use session::StreamSession;
 pub use sink::{AudioFormat, AudioSink, EncodedFrame, SubmitResult, VideoCodec, VideoFormat, VideoSink};
 
 /// Everything needed to open the stream, taken from the launch request and
 /// the host's `/launch` answer.
 #[derive(Debug, Clone)]
 pub struct StreamConfig {
-    pub host: String,
     pub session_url: SessionUrl,
-    /// Host app version quad (`7.1.431.-1`), which gates protocol features.
-    pub app_version: Vec<i32>,
+    /// `ServerCodecModeSupport` from `/serverinfo`.
+    pub server_codec_modes: u32,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
     pub bitrate_kbps: u32,
-    /// Codecs we can decode, best first.
+    /// Max UDP payload for video packets (rounded down to a multiple of 16).
+    pub packet_size: u32,
+    /// Formats the decoder handles, best first.
     pub video_formats: Vec<VideoFormat>,
     pub audio_channels: u8,
+    pub audio_channel_mask: u32,
     /// `rikey` / `rikeyid` from `/launch`.
     pub remote_input_key: [u8; 16],
     pub remote_input_key_id: u32,
-    /// Max UDP payload for video packets.
-    pub packet_size: u32,
+    pub streaming_remotely: bool,
+}
+
+impl StreamConfig {
+    /// Typical LAN packet size (Moonlight uses 1392 locally, 1024 remotely).
+    pub const LAN_PACKET_SIZE: u32 = 1392;
+    pub const WAN_PACKET_SIZE: u32 = 1024;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,16 +77,25 @@ pub enum StreamStage {
     Input,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StreamStats {
+    pub frames: u64,
+    pub packets: u64,
+    pub bytes: u64,
+    pub recovered_packets: u64,
+    pub lost_frames: u64,
+    pub rtt_ms: u32,
+    pub rtt_variance_ms: u32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
     StageStarting(StreamStage),
     StageFailed(StreamStage, String),
     Connected,
-    /// Packet loss / latency summary, roughly once a second.
-    Quality {
-        loss_percent: f32,
-        rtt_ms: u32,
-    },
+    FirstFrame,
+    /// Roughly once a second.
+    Stats(StreamStats),
     Rumble {
         gamepad: u8,
         low: u16,
@@ -88,6 +104,7 @@ pub enum StreamEvent {
     HdrMode(bool),
     Terminated {
         reason: String,
+        graceful: bool,
     },
 }
 
@@ -97,7 +114,6 @@ pub trait SessionListener: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamError {
-    Unimplemented(&'static str),
     Rtsp(String),
     Io(String),
 }
@@ -105,47 +121,21 @@ pub enum StreamError {
 impl fmt::Display for StreamError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unimplemented(what) => write!(f, "{what} is not implemented yet"),
-            Self::Rtsp(e) => write!(f, "RTSP: {e}"),
-            Self::Io(e) => write!(f, "network: {e}"),
+            Self::Rtsp(e) => write!(f, "{e}"),
+            Self::Io(e) => write!(f, "{e}"),
         }
     }
 }
 
 impl std::error::Error for StreamError {}
 
-impl From<rtsp::RtspError> for StreamError {
-    fn from(e: rtsp::RtspError) -> Self {
-        Self::Rtsp(e.to_string())
+/// True for RFC 1918 / ULA / link-local addresses (stream "locally").
+pub fn is_private_address(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.segments()[0];
+            v6.is_loopback() || (s & 0xfe00) == 0xfc00 || (s & 0xffc0) == 0xfe80
+        }
     }
-}
-
-/// A running stream. Dropping it tears the connection down.
-pub struct StreamSession {
-    config: StreamConfig,
-}
-
-impl StreamSession {
-    pub fn start(
-        config: StreamConfig,
-        _video: Box<dyn VideoSink>,
-        _audio: Box<dyn AudioSink>,
-        listener: Box<dyn SessionListener>,
-    ) -> Result<Self, StreamError> {
-        listener.on_event(StreamEvent::StageStarting(StreamStage::Rtsp));
-        let err = StreamError::Unimplemented("the RTSP handshake");
-        listener.on_event(StreamEvent::StageFailed(StreamStage::Rtsp, err.to_string()));
-        let _ = config;
-        Err(err)
-    }
-
-    pub fn config(&self) -> &StreamConfig {
-        &self.config
-    }
-
-    pub fn send_input(&self, _event: InputEvent) {}
-
-    pub fn request_keyframe(&self) {}
-
-    pub fn stop(self) {}
 }

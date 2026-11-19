@@ -9,6 +9,7 @@ pub mod hex;
 pub mod identity;
 pub mod pairing;
 pub mod pem;
+pub mod stream;
 
 pub use identity::ClientIdentity;
 pub use pairing::PairingHash;

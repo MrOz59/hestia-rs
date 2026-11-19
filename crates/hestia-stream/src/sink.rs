@@ -70,7 +70,8 @@ impl AudioFormat {
 
 pub trait AudioSink: Send {
     fn setup(&mut self, format: &AudioFormat) -> Result<(), String>;
-    /// One Opus packet (already decrypted and FEC-recovered).
+    /// One Opus packet (already decrypted). An empty slice marks a lost
+    /// packet so the decoder can run packet-loss concealment.
     fn submit(&mut self, opus_packet: &[u8]);
     fn cleanup(&mut self) {}
 }

@@ -54,6 +54,15 @@ jobs:
             target/release/hestia
           if-no-files-found: error
 
+  interop:
+    name: Interop (ENet vs cgutman/enet)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: ENet client against the C ENet server
+        run: tools/enet-interop/run.sh
+
   android:
     name: Android (arm64)
     runs-on: ubuntu-latest
