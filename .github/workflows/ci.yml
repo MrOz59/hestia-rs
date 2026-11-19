@@ -49,6 +49,14 @@ jobs:
       - name: Release build
         run: cargo build --release -p hestia-app -p hestia-cli
 
+      - name: UI screenshots (headless, software renderer)
+        run: cargo run --release -p hestia-app --example screenshots -- screenshots
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hestia-rs-screenshots
+          path: screenshots/*.png
+
       - uses: actions/upload-artifact@v4
         with:
           name: hestia-rs-linux-x86_64
@@ -221,6 +229,9 @@ jobs:
           else
             echo "::warning::no APK in this run"
           fi
+          if ls artifacts/hestia-rs-screenshots/*.png >/dev/null 2>&1; then
+            (cd artifacts/hestia-rs-screenshots && zip -q ../../dist/ui-screenshots.zip *.png)
+          fi
           (cd dist && sha256sum * > SHA256SUMS)
           ls -l dist
 
@@ -233,7 +244,8 @@ jobs:
             echo "Automatic build of \`main\` at ${GITHUB_SHA} ($(date -u '+%Y-%m-%d %H:%M UTC'))."
             echo
             echo "- **Android (arm64):** \`hestia-rs-android-arm64.apk\`"
-            echo "- **Linux (x86_64):** \`hestia-rs-linux-x86_64.tar.gz\` (needs libopus and ALSA)"
+            echo "- **Linux (x86_64):** \`hestia-rs-linux-x86_64.tar.gz\` (needs libopus, ALSA and a recent glibc)"
+            echo "- **Screenshots:** \`ui-screenshots.zip\` (phone and desktop, rendered headless)"
             echo
             if git rev-parse -q --verify refs/tags/nightly >/dev/null; then
               echo "### Changes since the previous nightly"

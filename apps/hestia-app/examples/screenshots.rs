@@ -1,0 +1,171 @@
+//! Renders the main screens headless (Slint software renderer) at phone and
+//! desktop sizes, with sample data, into PNG files:
+//!
+//!     cargo run -p hestia-app --example screenshots -- out-dir
+//!
+//! CI attaches the results to the nightly release, so each build's UI can be
+//! checked without a device. The software renderer is close to, but not
+//! pixel-identical with, the GPU renderers the app uses (no drop shadows).
+
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
+use hestia_app::{AppCard, AppWindow, HostCard};
+use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+use slint::platform::{Platform, WindowAdapter, WindowEvent};
+use slint::{
+    ComponentHandle, Image, ModelRc, PhysicalSize, Rgb8Pixel, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel,
+};
+
+struct Headless(Rc<MinimalSoftwareWindow>);
+
+impl Platform for Headless {
+    fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+        Ok(self.0.clone())
+    }
+}
+
+fn model<T: Clone + 'static>(items: Vec<T>) -> ModelRc<T> {
+    ModelRc::new(VecModel::from(items))
+}
+
+fn strings(items: &[&str]) -> ModelRc<SharedString> {
+    model(items.iter().map(|s| SharedString::from(*s)).collect())
+}
+
+/// A stand-in "video frame": a dark gradient with a lighter band.
+fn fake_frame(width: u32, height: u32) -> Image {
+    let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
+    for (i, px) in buffer.make_mut_slice().iter_mut().enumerate() {
+        let (x, y) = (i as u32 % width, i as u32 / width);
+        let band = if (height / 3..height / 3 + height / 6).contains(&y) {
+            60
+        } else {
+            0
+        };
+        *px = Rgba8Pixel {
+            r: (20 + x * 60 / width + band) as u8,
+            g: (30 + y * 50 / height + band) as u8,
+            b: (60 + band) as u8,
+            a: 255,
+        };
+    }
+    Image::from_rgba8(buffer)
+}
+
+fn fill_sample_data(ui: &AppWindow) {
+    ui.set_starting(false);
+    ui.set_hosts(model(vec![
+        HostCard {
+            id: "a".into(),
+            name: "cachy-desktop".into(),
+            address: "192.168.1.20:47989".into(),
+            online: true,
+            checking: false,
+            paired: true,
+            hermes: true,
+            version: "1.4".into(),
+            status: "Ready to stream".into(),
+        },
+        HostCard {
+            id: "b".into(),
+            name: "living-room".into(),
+            address: "192.168.1.31:47989".into(),
+            online: false,
+            checking: false,
+            paired: false,
+            hermes: false,
+            version: "".into(),
+            status: "Last seen yesterday".into(),
+        },
+    ]));
+    ui.set_host_name("cachy-desktop".into());
+    ui.set_host_detail("192.168.1.20 · Hermes 1.4".into());
+    ui.set_host_chips(strings(&["HEVC", "AV1", "HDR", "Virtual display", "Gamescope"]));
+    let apps = [
+        "Desktop",
+        "Steam Big Picture",
+        "Cyberpunk 2077",
+        "Hades II",
+        "Elden Ring",
+        "Stardew Valley",
+    ];
+    ui.set_apps(model(
+        apps.iter()
+            .enumerate()
+            .map(|(i, title)| AppCard {
+                id: i as i32 + 1,
+                title: (*title).into(),
+                art: Image::default(),
+                has_art: false,
+                running: i == 2,
+                hdr: i == 2,
+            })
+            .collect(),
+    ));
+    ui.set_app_running(true);
+    ui.set_client_id("6F3A9C21D4E0B7F1".into());
+    ui.set_data_dir("/data/user/0/com.mroz59.hestia.rs/files".into());
+    ui.set_version_text("Hestia RS 0.1.0 (preview)".into());
+    ui.set_session_title("Cyberpunk 2077".into());
+    ui.set_session_subtitle("cachy-desktop".into());
+    ui.set_session_lines(strings(&["Connecting to the stream…"]));
+    ui.set_session_busy(true);
+    ui.set_stream_frame(fake_frame(320, 180));
+    ui.set_stream_stats(
+        "1920×1080  ·  60 fps  ·  18.4 Mbps  ·  RTT 3 ms  ·  decode 4.1 ms  ·  FEC 12  ·  lost 0  ·  dropped 0".into(),
+    );
+    ui.set_pair_host_name("cachy-desktop".into());
+    ui.set_pair_pin("4821".into());
+    ui.set_pair_status("Waiting for the host…".into());
+    ui.set_pair_busy(true);
+}
+
+fn save(window: &MinimalSoftwareWindow, size: PhysicalSize, path: &Path) {
+    slint::platform::update_timers_and_animations();
+    window.request_redraw();
+    let (w, h) = (size.width as usize, size.height as usize);
+    let mut pixels = vec![Rgb8Pixel::default(); w * h];
+    window.draw_if_needed(|renderer| {
+        renderer.render(&mut pixels, w);
+    });
+    let bytes: Vec<u8> = pixels.iter().flat_map(|p| [p.r, p.g, p.b]).collect();
+    image::RgbImage::from_raw(size.width, size.height, bytes)
+        .expect("buffer size")
+        .save(path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    println!("{}", path.display());
+}
+
+fn main() {
+    let out = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "screenshots".into()));
+    std::fs::create_dir_all(&out).expect("output directory");
+
+    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    slint::platform::set_platform(Box::new(Headless(window.clone()))).expect("platform");
+    let ui = AppWindow::new().expect("window");
+    fill_sample_data(&ui);
+    ui.show().expect("show");
+
+    // (name, logical width, height, scale): a 412dp phone and a desktop window.
+    for (form, lw, lh, scale) in [("phone", 412u32, 915u32, 2.0f32), ("desktop", 1180, 760, 1.0)] {
+        window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
+        let size = PhysicalSize::new((lw as f32 * scale) as u32, (lh as f32 * scale) as u32);
+        window.set_size(size);
+
+        let shots: [(&str, i32, bool); 6] = [
+            ("hosts", 0, false),
+            ("apps", 1, false),
+            ("launching", 2, false),
+            ("settings", 3, false),
+            ("pairing", 0, true),
+            ("stream", 4, false),
+        ];
+        for (name, screen, pairing) in shots {
+            ui.set_pair_visible(pairing);
+            ui.set_screen(screen);
+            save(&window, size, &out.join(format!("{form}-{name}.png")));
+        }
+        ui.set_pair_visible(false);
+    }
+}

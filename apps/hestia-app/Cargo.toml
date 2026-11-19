@@ -39,6 +39,10 @@ directories.workspace = true
 slint = { workspace = true, features = ["backend-android-activity-06"] }
 android_logger.workspace = true
 
+[dev-dependencies]
+# examples/screenshots.rs renders headless with the software renderer.
+slint = { workspace = true, features = ["renderer-software"] }
+
 [build-dependencies]
 slint-build.workspace = true
 
