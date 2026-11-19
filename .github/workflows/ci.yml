@@ -12,6 +12,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Shown in the app's Settings → About and in `hestia --version` builds.
+  HESTIA_BUILD_ID: ${{ github.sha }}
 
 jobs:
   linux:
@@ -156,24 +158,32 @@ jobs:
       - name: Package APK (cargo-apk)
         id: apk
         continue-on-error: true
-        # Signed with a throwaway key generated per run (uninstall before
-        # installing a newer CI APK). Swap in repository secrets for releases.
+        # Signed with the key in the ANDROID_KEYSTORE_BASE64 /
+        # ANDROID_KEYSTORE_PASSWORD secrets, so nightly APKs install over each
+        # other. Without them a throwaway key is generated per run (then each
+        # build must be uninstalled before installing the next).
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
           cargo install cargo-apk --locked
-          keytool -genkeypair -keystore "$RUNNER_TEMP/ci.keystore" -storepass android -keypass android \
-            -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Hestia RS CI"
-          export CARGO_APK_RELEASE_KEYSTORE="$RUNNER_TEMP/ci.keystore"
-          export CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android
+          keystore="$RUNNER_TEMP/release.keystore"
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$keystore"
+            export CARGO_APK_RELEASE_KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
+            echo "signing with the repository key"
+          else
+            keytool -genkeypair -keystore "$keystore" -storepass android -keypass android \
+              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Hestia RS CI"
+            export CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android
+            echo "::warning::ANDROID_KEYSTORE_BASE64/PASSWORD not set: APK signed with a throwaway key"
+          fi
+          export CARGO_APK_RELEASE_KEYSTORE="$keystore"
           set +e
           cargo apk build --release -p hestia-app --lib
           status=$?
-          echo "cargo apk exit status: $status"
-          ls -l target/release/apk/ 2>&1
-          for apk in target/release/apk/*.apk; do
-            [ -f "$apk" ] || continue
-            python3 -c 'import sys, zipfile; [print(i.file_size, i.filename) for i in zipfile.ZipFile(sys.argv[1]).infolist()]' "$apk"
-            "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose "$apk" | head -5
-          done
+          rm -f "$keystore"
+          [ $status -eq 0 ] && "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs target/release/apk/hestia-rs.apk | head -3
           exit $status
 
       - uses: actions/upload-artifact@v4
@@ -181,3 +191,59 @@ jobs:
         with:
           name: hestia-rs-android-arm64-apk
           path: target/release/apk/hestia-rs.apk
+
+  # Every push to main replaces the "nightly" pre-release with fresh builds.
+  nightly:
+    name: Nightly release
+    needs: [linux, android, interop]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package
+        run: |
+          mkdir -p dist staging/hestia-rs
+          linux=artifacts/hestia-rs-linux-x86_64
+          install -m 755 "$linux/hestia-app" "$linux/hestia" staging/hestia-rs/
+          cp README.md LICENSE staging/hestia-rs/
+          tar -C staging -czf dist/hestia-rs-linux-x86_64.tar.gz hestia-rs
+          if [ -f artifacts/hestia-rs-android-arm64-apk/hestia-rs.apk ]; then
+            cp artifacts/hestia-rs-android-arm64-apk/hestia-rs.apk dist/hestia-rs-android-arm64.apk
+          else
+            echo "::warning::no APK in this run"
+          fi
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -l dist
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          short=${GITHUB_SHA::7}
+          {
+            echo "Automatic build of \`main\` at ${GITHUB_SHA} ($(date -u '+%Y-%m-%d %H:%M UTC'))."
+            echo
+            echo "- **Android (arm64):** \`hestia-rs-android-arm64.apk\`"
+            echo "- **Linux (x86_64):** \`hestia-rs-linux-x86_64.tar.gz\` (needs libopus and ALSA)"
+            echo
+            if git rev-parse -q --verify refs/tags/nightly >/dev/null; then
+              echo "### Changes since the previous nightly"
+              git log --no-merges --format='- %s (%h)' nightly..HEAD | head -50
+            else
+              echo "### Latest changes"
+              git log --no-merges --format='- %s (%h)' -15
+            fi
+          } > notes.md
+          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+          git push origin :refs/tags/nightly 2>/dev/null || true
+          gh release create nightly dist/* --prerelease --target "$GITHUB_SHA" \
+            --title "Nightly $(date -u +%Y-%m-%d) ($short)" --notes-file notes.md

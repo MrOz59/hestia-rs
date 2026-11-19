@@ -12,7 +12,16 @@ export component AppWindow inherits Window {
     min-width: 340px;
     min-height: 480px;
     background: Theme.bg;
-    default-font-size: 14px;
+    default-font-size: Theme.body-size;
+    forward-focus: keys;
+
+    // Phone-sized (or narrow) windows get the compact layout.
+    init => {
+        Theme.compact = self.width < 640px;
+    }
+    changed width => {
+        Theme.compact = self.width < 640px;
+    }
 
     // 0 = hosts, 1 = apps, 2 = session (launching / errors), 3 = settings, 4 = stream
     in-out property <int> screen: 0;
@@ -98,9 +107,65 @@ export component AppWindow inherits Window {
     in-out property <bool> cfg-clipboard;
     in property <string> client-id;
     in property <string> data-dir;
+    in property <string> version-text;
     property <int> settings-return: 0;
     callback open-settings();
     callback save-settings();
+
+    // Escape (and the Android back key, if the platform reports it as
+    // Escape) closes dialogs and walks back through the screens.
+    function go-back() -> bool {
+        if (root.pair-visible) {
+            root.pair-cancel();
+            return true;
+        }
+        if (root.add-visible) {
+            if (!root.add-busy) {
+                root.add-visible = false;
+            }
+            return true;
+        }
+        if (root.screen == 3) {
+            root.screen = root.settings-return;
+            return true;
+        }
+        if (root.screen == 2) {
+            root.back-to-apps();
+            return true;
+        }
+        if (root.screen == 1) {
+            root.back-to-hosts();
+            return true;
+        }
+        return false;
+    }
+
+    keys := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Escape && root.go-back()) {
+                return accept;
+            }
+            return reject;
+        }
+    }
+    // The stream view and text fields take focus; give it back afterwards.
+    changed screen => {
+        if (root.screen != 4) {
+            keys.focus();
+        }
+    }
+    changed add-visible => {
+        if (!root.add-visible) {
+            keys.focus();
+        }
+    }
+    changed pair-visible => {
+        if (!root.pair-visible) {
+            keys.focus();
+        }
+    }
 
     if root.screen == 0: HostsPage {
         width: 100%;
@@ -211,6 +276,7 @@ export component AppWindow inherits Window {
         clipboard <=> root.cfg-clipboard;
         client-id: root.client-id;
         data-dir: root.data-dir;
+        version: root.version-text;
         back => {
             root.screen = root.settings-return;
         }
@@ -402,7 +468,8 @@ export component AppWindow inherits Window {
     // ---------------------------------------------------------------
     if root.toast != "": Rectangle {
         x: (root.width - self.width) / 2;
-        y: root.height - self.height - 24px;
+        // Above the floating "Add host" button on phones.
+        y: root.height - self.height - (Theme.compact && root.screen == 0 ? 92px : 24px);
         width: Math.min(toast-text.preferred-width + 40px, root.width - 32px);
         height: toast-text.preferred-height + 24px;
         border-radius: 12px;

@@ -1,5 +1,5 @@
 import { ComboBox, Slider, Switch, Spinner } from "std-widgets.slint";
-import { Theme, PillButton, LinkButton, Chip } from "theme.slint";
+import { Theme, PillButton, LinkButton, Chip, IconButton, Fab, MenuItem } from "theme.slint";
 
 export struct HostCard {
     id: string,
@@ -43,7 +43,7 @@ component HostTile inherits Rectangle {
     animate background { duration: 120ms; }
 
     VerticalLayout {
-        padding: 18px;
+        padding: Theme.compact ? 16px : 18px;
         spacing: 8px;
 
         HorizontalLayout {
@@ -186,17 +186,32 @@ component AppTile inherits Rectangle {
 component PageHeader inherits HorizontalLayout {
     in property <string> title;
     in property <string> subtitle;
-    padding: Theme.page-padding;
+    in property <bool> show-back: false;
+    callback back;
+    padding-left: Theme.compact && root.show-back ? 6px : Theme.page-padding;
+    padding-right: Theme.compact ? 8px : Theme.page-padding;
+    padding-top: Theme.compact ? 10px : Theme.page-padding;
     padding-bottom: 8px;
-    spacing: 10px;
+    spacing: Theme.compact ? 2px : 10px;
+
+    if root.show-back: VerticalLayout {
+        alignment: center;
+        IconButton {
+            icon: "back";
+            clicked => {
+                root.back();
+            }
+        }
+    }
 
     VerticalLayout {
         alignment: center;
         horizontal-stretch: 1;
+        padding-left: Theme.compact && root.show-back ? 4px : 0px;
         Text {
             text: root.title;
             color: Theme.text;
-            font-size: 26px;
+            font-size: Theme.compact ? 22px : 26px;
             font-weight: 800;
             overflow: elide;
         }
@@ -220,11 +235,13 @@ export component HostsPage inherits Rectangle {
     callback settings;
 
     property <length> pad: Theme.page-padding;
-    property <length> gap: 16px;
+    property <length> gap: Theme.compact ? 12px : 16px;
     property <length> min-tile: 260px;
     property <int> cols: Math.max(1, Math.floor((root.width - 2 * root.pad + root.gap) / (root.min-tile + root.gap)));
     property <length> tile-w: (root.width - 2 * root.pad - (root.cols - 1) * root.gap) / root.cols;
-    property <length> tile-h: 168px;
+    property <length> tile-h: Theme.compact ? 150px : 168px;
+    // Room under the last row for the floating button.
+    property <length> bottom-space: Theme.compact ? 96px : root.pad;
 
     VerticalLayout {
         PageHeader {
@@ -238,7 +255,25 @@ export component HostsPage inherits Rectangle {
                     indeterminate: true;
                 }
             }
-            VerticalLayout {
+            if Theme.compact: VerticalLayout {
+                alignment: center;
+                IconButton {
+                    icon: "refresh";
+                    clicked => {
+                        root.refresh();
+                    }
+                }
+            }
+            if Theme.compact: VerticalLayout {
+                alignment: center;
+                IconButton {
+                    icon: "settings";
+                    clicked => {
+                        root.settings();
+                    }
+                }
+            }
+            if !Theme.compact: VerticalLayout {
                 alignment: center;
                 PillButton {
                     text: "Refresh";
@@ -247,7 +282,7 @@ export component HostsPage inherits Rectangle {
                     }
                 }
             }
-            VerticalLayout {
+            if !Theme.compact: VerticalLayout {
                 alignment: center;
                 PillButton {
                     text: "Settings";
@@ -256,7 +291,7 @@ export component HostsPage inherits Rectangle {
                     }
                 }
             }
-            VerticalLayout {
+            if !Theme.compact: VerticalLayout {
                 alignment: center;
                 PillButton {
                     text: "Add host";
@@ -283,7 +318,7 @@ export component HostsPage inherits Rectangle {
             Text {
                 text: "Hosts running Hermes (or Sunshine/Apollo) on this network show up here automatically. You can also add one by its IP address.";
                 color: Theme.muted;
-                font-size: 14px;
+                font-size: Theme.body-size;
                 wrap: word-wrap;
                 horizontal-alignment: center;
             }
@@ -292,7 +327,7 @@ export component HostsPage inherits Rectangle {
         if root.hosts.length > 0: Flickable {
             vertical-stretch: 1;
             content-width: self.width;
-            content-height: Math.ceil(root.hosts.length / root.cols) * (root.tile-h + root.gap) + root.pad;
+            content-height: Math.ceil(root.hosts.length / root.cols) * (root.tile-h + root.gap) + root.bottom-space;
 
             for host[i] in root.hosts: HostTile {
                 x: root.pad + Math.mod(i, root.cols) * (root.tile-w + root.gap);
@@ -304,6 +339,16 @@ export component HostsPage inherits Rectangle {
                     root.open-host(host.id);
                 }
             }
+        }
+    }
+
+    if Theme.compact: Fab {
+        x: root.width - self.width - 16px;
+        y: root.height - self.height - 20px;
+        icon: "add";
+        text: "Add host";
+        clicked => {
+            root.add-host();
         }
     }
 }
@@ -320,9 +365,10 @@ export component AppsPage inherits Rectangle {
     callback quit-app;
     callback forget;
 
+    property <bool> menu-open: false;
     property <length> pad: Theme.page-padding;
-    property <length> gap: 16px;
-    property <length> min-tile: 150px;
+    property <length> gap: Theme.compact ? 12px : 16px;
+    property <length> min-tile: Theme.compact ? 140px : 150px;
     property <int> cols: Math.max(2, Math.floor((root.width - 2 * root.pad + root.gap) / (root.min-tile + root.gap)));
     property <length> tile-w: (root.width - 2 * root.pad - (root.cols - 1) * root.gap) / root.cols;
     property <length> tile-h: root.tile-w * 4 / 3 + 44px;
@@ -331,7 +377,20 @@ export component AppsPage inherits Rectangle {
         PageHeader {
             title: root.host-name;
             subtitle: root.host-detail;
-            VerticalLayout {
+            show-back: Theme.compact;
+            back => {
+                root.back();
+            }
+            if Theme.compact: VerticalLayout {
+                alignment: center;
+                IconButton {
+                    icon: "more";
+                    clicked => {
+                        root.menu-open = !root.menu-open;
+                    }
+                }
+            }
+            if !Theme.compact: VerticalLayout {
                 alignment: center;
                 PillButton {
                     text: "Back";
@@ -340,7 +399,7 @@ export component AppsPage inherits Rectangle {
                     }
                 }
             }
-            if root.app-running: VerticalLayout {
+            if !Theme.compact && root.app-running: VerticalLayout {
                 alignment: center;
                 PillButton {
                     text: "Quit app";
@@ -350,7 +409,7 @@ export component AppsPage inherits Rectangle {
                     }
                 }
             }
-            VerticalLayout {
+            if !Theme.compact: VerticalLayout {
                 alignment: center;
                 PillButton {
                     text: "Forget";
@@ -361,15 +420,59 @@ export component AppsPage inherits Rectangle {
             }
         }
 
-        if root.chips.length > 0: HorizontalLayout {
+        // Host facts; scrolls sideways on narrow screens instead of clipping.
+        if root.chips.length > 0: Flickable {
+            height: 32px;
+            content-height: 32px;
+            content-width: chip-row.preferred-width + 2 * root.pad;
+            chip-row := HorizontalLayout {
+                x: root.pad;
+                y: 2px;
+                width: self.preferred-width;
+                height: 24px;
+                spacing: 6px;
+                for chip in root.chips: Chip {
+                    text: chip;
+                    tone: Theme.info;
+                }
+            }
+        }
+
+        // Phones: what's running and a big Quit, instead of a header button.
+        if Theme.compact && root.app-running: HorizontalLayout {
             padding-left: root.pad;
             padding-right: root.pad;
             padding-bottom: 8px;
-            spacing: 6px;
-            alignment: start;
-            for chip in root.chips: Chip {
-                text: chip;
-                tone: Theme.info;
+            Rectangle {
+                height: 56px;
+                border-radius: 14px;
+                background: Theme.accent.transparentize(0.86);
+                border-width: 1px;
+                border-color: Theme.accent.transparentize(0.6);
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 6px;
+                    spacing: 8px;
+                    Text {
+                        text: "An app is running on this host";
+                        color: Theme.text;
+                        font-size: 14px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        PillButton {
+                            text: "Quit";
+                            danger: true;
+                            clicked => {
+                                root.quit-app();
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -389,9 +492,11 @@ export component AppsPage inherits Rectangle {
         if !root.loading && root.apps.length == 0: VerticalLayout {
             vertical-stretch: 1;
             alignment: center;
+            padding: 24px;
             Text {
                 text: "This host has no apps you are allowed to see.";
                 color: Theme.muted;
+                wrap: word-wrap;
                 horizontal-alignment: center;
             }
         }
@@ -409,6 +514,45 @@ export component AppsPage inherits Rectangle {
                 app: app;
                 clicked => {
                     root.launch(app.id);
+                }
+            }
+        }
+    }
+
+    // Overflow menu (phones).
+    if root.menu-open: TouchArea {
+        clicked => {
+            root.menu-open = false;
+        }
+    }
+    if root.menu-open: Rectangle {
+        x: root.width - self.width - 8px;
+        y: 60px;
+        width: 240px;
+        height: menu.preferred-height;
+        border-radius: 14px;
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000090;
+        menu := VerticalLayout {
+            padding: 6px;
+            if root.app-running: MenuItem {
+                icon: "stop";
+                text: "Quit running app";
+                danger: true;
+                clicked => {
+                    root.menu-open = false;
+                    root.quit-app();
+                }
+            }
+            MenuItem {
+                icon: "delete";
+                text: "Forget this host";
+                clicked => {
+                    root.menu-open = false;
+                    root.forget();
                 }
             }
         }
@@ -491,17 +635,21 @@ export component SessionPage inherits Rectangle {
 component SettingRow inherits HorizontalLayout {
     in property <string> label;
     in property <string> hint;
-    spacing: 16px;
-    min-height: 48px;
+    spacing: Theme.compact ? 12px : 16px;
+    min-height: Theme.compact ? 60px : 48px;
+    padding-top: Theme.compact ? 4px : 0px;
+    padding-bottom: Theme.compact ? 4px : 0px;
 
     VerticalLayout {
         alignment: center;
         horizontal-stretch: 1;
+        spacing: 2px;
         Text {
             text: root.label;
             color: Theme.text;
-            font-size: 14px;
+            font-size: Theme.body-size;
             font-weight: 600;
+            wrap: word-wrap;
         }
         if root.hint != "": Text {
             text: root.hint;
@@ -518,6 +666,12 @@ component SettingRow inherits HorizontalLayout {
     }
 }
 
+component SectionTitle inherits Text {
+    color: Theme.accent;
+    font-size: 13px;
+    font-weight: 700;
+}
+
 export component SettingsPage inherits Rectangle {
     in-out property <int> resolution;
     in-out property <int> fps;
@@ -532,14 +686,23 @@ export component SettingsPage inherits Rectangle {
     in-out property <bool> clipboard;
     in property <string> client-id;
     in property <string> data-dir;
+    in property <string> version;
     callback back;
     callback save;
+
+    // Pickers get at most ~45% of the row so labels keep their room.
+    property <length> picker-w: Math.min(Theme.compact ? 160px : 170px, (root.width - 2 * Theme.page-padding) * 0.45);
+    property <length> slider-w: Math.min(200px, (root.width - 2 * Theme.page-padding) * 0.45);
 
     VerticalLayout {
         PageHeader {
             title: "Settings";
             subtitle: "Applied to the next session";
-            VerticalLayout {
+            show-back: Theme.compact;
+            back => {
+                root.back();
+            }
+            if !Theme.compact: VerticalLayout {
                 alignment: center;
                 PillButton {
                     text: "Back";
@@ -571,18 +734,15 @@ export component SettingsPage inherits Rectangle {
                     width: Math.min(640px, root.width - 2 * Theme.page-padding);
                     padding-top: 8px;
                     padding-bottom: 32px;
-                    spacing: 6px;
+                    spacing: Theme.compact ? 2px : 6px;
 
-                    Text {
+                    SectionTitle {
                         text: "Video";
-                        color: Theme.accent;
-                        font-size: 13px;
-                        font-weight: 700;
                     }
                     SettingRow {
                         label: "Resolution";
                         ComboBox {
-                            width: 170px;
+                            width: root.picker-w;
                             model: ["1280 × 720", "1920 × 1080", "2560 × 1440", "3840 × 2160"];
                             current-index <=> root.resolution;
                         }
@@ -590,7 +750,7 @@ export component SettingsPage inherits Rectangle {
                     SettingRow {
                         label: "Frame rate";
                         ComboBox {
-                            width: 170px;
+                            width: root.picker-w;
                             model: ["30 fps", "60 fps", "90 fps", "120 fps", "144 fps"];
                             current-index <=> root.fps;
                         }
@@ -599,7 +759,7 @@ export component SettingsPage inherits Rectangle {
                         label: "Bitrate";
                         hint: Math.round(root.bitrate-mbps) + " Mbps";
                         Slider {
-                            width: 200px;
+                            width: root.slider-w;
                             minimum: 5;
                             maximum: 150;
                             value <=> root.bitrate-mbps;
@@ -609,7 +769,7 @@ export component SettingsPage inherits Rectangle {
                         label: "Codec";
                         hint: "Auto picks the best one both sides support";
                         ComboBox {
-                            width: 170px;
+                            width: root.picker-w;
                             model: ["Auto", "H.264", "HEVC", "AV1"];
                             current-index <=> root.codec;
                         }
@@ -622,11 +782,8 @@ export component SettingsPage inherits Rectangle {
                         }
                     }
 
-                    Text {
+                    SectionTitle {
                         text: "Hermes";
-                        color: Theme.accent;
-                        font-size: 13px;
-                        font-weight: 700;
                     }
                     SettingRow {
                         label: "Virtual display";
@@ -649,16 +806,13 @@ export component SettingsPage inherits Rectangle {
                         }
                     }
 
-                    Text {
+                    SectionTitle {
                         text: "Audio & host";
-                        color: Theme.accent;
-                        font-size: 13px;
-                        font-weight: 700;
                     }
                     SettingRow {
                         label: "Speakers";
                         ComboBox {
-                            width: 170px;
+                            width: root.picker-w;
                             model: ["Stereo", "5.1 surround", "7.1 surround"];
                             current-index <=> root.audio;
                         }
@@ -677,11 +831,13 @@ export component SettingsPage inherits Rectangle {
                         }
                     }
 
-                    Text {
+                    SectionTitle {
                         text: "About";
-                        color: Theme.accent;
+                    }
+                    Text {
+                        text: root.version;
+                        color: Theme.text;
                         font-size: 13px;
-                        font-weight: 700;
                     }
                     Text {
                         text: "Client id: " + root.client-id;

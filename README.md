@@ -111,6 +111,26 @@ effort) an APK as workflow artifacts. It also checks that `libhestia_app.so`
 has no unresolved C++ runtime symbols. The CI APK is signed with a throwaway
 key per run: uninstall the previous one before installing a new build.
 
+## Nightly builds
+
+Every push to `main` that passes CI replaces the **`nightly`** pre-release
+(Releases page) with an Android APK (`hestia-rs-android-arm64.apk`), a Linux
+tarball and `SHA256SUMS`. The release notes list the commits since the
+previous nightly; Settings → About in the app shows which commit a build is.
+
+So that each nightly APK installs over the previous one, CI signs it with the
+key in the `ANDROID_KEYSTORE_BASE64` / `ANDROID_KEYSTORE_PASSWORD` repository
+secrets (without them it falls back to a throwaway key per build):
+
+```sh
+keytool -genkeypair -keystore hestia-nightly.p12 -storetype PKCS12 -alias hestia \
+    -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Hestia RS"
+base64 -w0 hestia-nightly.p12 | gh secret set ANDROID_KEYSTORE_BASE64 -R MrOz59/hestia-rs
+gh secret set ANDROID_KEYSTORE_PASSWORD -R MrOz59/hestia-rs   # the password typed above
+```
+
+Keep the keystore somewhere safe: a different key means uninstalling once.
+
 ## CLI
 
 ```sh

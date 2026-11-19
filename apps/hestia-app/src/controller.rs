@@ -179,6 +179,7 @@ impl Controller {
             let dir = core.data_dir().display().to_string();
             c.ui(move |ui| {
                 view::load_settings_into(&ui, &settings);
+                ui.set_version_text(view::version_text().into());
                 ui.set_client_id(client_id.into());
                 ui.set_data_dir(dir.into());
                 ui.set_starting(false);

@@ -1,5 +1,5 @@
 import { Spinner } from "std-widgets.slint";
-import { Theme, PillButton } from "theme.slint";
+import { Theme, Icon, MenuItem } from "theme.slint";
 
 // Full-window video with input capture. Keyboard, mouse and touch go to the
 // host; Ctrl+Alt+Shift+Q disconnects, Ctrl+Alt+Shift+S toggles statistics.
@@ -102,16 +102,20 @@ export component StreamView inherits Rectangle {
     if root.show-stats && root.stats != "": Rectangle {
         x: 12px;
         y: 12px;
-        width: stats-text.preferred-width + 20px;
+        // Wraps on narrow screens instead of running under the menu button.
+        property <length> max-w: root.width - 84px;
+        width: Theme.compact ? self.max-w : Math.min(stats-text.preferred-width + 20px, self.max-w);
         height: stats-text.preferred-height + 12px;
         border-radius: 10px;
         background: #000000a8;
         stats-text := Text {
             x: 10px;
             y: 6px;
+            width: parent.width - 20px;
             text: root.stats;
             color: #e6e8ee;
             font-size: 12px;
+            wrap: word-wrap;
         }
     }
 
@@ -119,17 +123,16 @@ export component StreamView inherits Rectangle {
     Rectangle {
         x: parent.width - self.width - 12px;
         y: 12px;
-        width: 40px;
-        height: 40px;
-        border-radius: 20px;
+        width: Theme.control-height;
+        height: Theme.control-height;
+        border-radius: self.height / 2;
         background: handle.has-hover || root.menu-open ? #ffffff30 : #00000070;
         animate background { duration: 120ms; }
-        Text {
-            text: "☰";
-            color: white;
-            font-size: 18px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
+        Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            name: root.menu-open ? "close" : "menu";
+            tint: white;
         }
         handle := TouchArea {
             clicked => {
@@ -140,39 +143,44 @@ export component StreamView inherits Rectangle {
 
     if root.menu-open: Rectangle {
         x: parent.width - self.width - 12px;
-        y: 60px;
-        width: 220px;
+        y: Theme.control-height + 20px;
+        width: 240px;
         height: menu.preferred-height;
         border-radius: Theme.radius;
-        background: Theme.card;
+        background: Theme.surface;
         border-width: 1px;
         border-color: Theme.border;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000090;
 
         menu := VerticalLayout {
             width: 100%;
-            padding: 12px;
-            spacing: 8px;
-            PillButton {
+            padding: 6px;
+            MenuItem {
+                icon: "stats";
                 text: root.show-stats ? "Hide statistics" : "Show statistics";
                 clicked => {
                     root.toggle-stats();
                 }
             }
-            PillButton {
+            MenuItem {
+                icon: "fullscreen";
                 text: root.fullscreen ? "Leave full screen" : "Full screen";
                 clicked => {
                     root.toggle-fullscreen();
                     root.menu-open = false;
                 }
             }
-            PillButton {
+            MenuItem {
+                icon: "logout";
                 text: "Disconnect";
                 clicked => {
                     root.menu-open = false;
                     root.disconnect();
                 }
             }
-            PillButton {
+            MenuItem {
+                icon: "stop";
                 text: "Quit app";
                 danger: true;
                 clicked => {
@@ -180,7 +188,7 @@ export component StreamView inherits Rectangle {
                     root.quit-app();
                 }
             }
-            Text {
+            if !Theme.compact: Text {
                 text: "Ctrl+Alt+Shift+Q disconnects";
                 color: Theme.muted;
                 font-size: 11px;

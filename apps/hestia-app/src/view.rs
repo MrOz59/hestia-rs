@@ -161,3 +161,11 @@ pub fn read_settings_from(ui: &AppWindow, base: &StreamSettings) -> StreamSettin
         ..base.clone()
     }
 }
+
+/// "Hestia RS 0.1.0 (abc1234)"; CI sets HESTIA_BUILD_ID to the commit.
+pub fn version_text() -> String {
+    let build = option_env!("HESTIA_BUILD_ID")
+        .filter(|id| !id.is_empty())
+        .map_or_else(|| "local build".to_owned(), |id| id.chars().take(7).collect());
+    format!("Hestia RS {} ({build})", env!("CARGO_PKG_VERSION"))
+}
