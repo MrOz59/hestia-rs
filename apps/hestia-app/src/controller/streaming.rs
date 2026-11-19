@@ -5,11 +5,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use hestia_core::{LaunchedSession, ManagedStream, StreamHost};
 use hestia_core::diagnosis::{self, Bottleneck, SpikeHistory};
 use hestia_core::report::StatsSample;
 use hestia_core::stream::input::{Modifiers, MouseButton};
 use hestia_core::stream::{InputEvent, SessionListener, StreamEvent, StreamStats};
+use hestia_core::{LaunchedSession, ManagedStream, StreamHost};
 use hestia_media::{DecodeStats, DecoderChoice, DecodingSink, FramePresenter, LatencyHistogram, RgbaFrame};
 use log::{info, warn};
 use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer, SharedString};
@@ -114,7 +114,9 @@ impl FramePresenter for UiPresenter {
                 ui.set_stream_frame(Image::from_rgba8(buffer));
                 let delivered_at = Instant::now();
                 stats.handoff.record(delivered_at.duration_since(frame.decoded_at));
-                stats.receive_to_ui.record(delivered_at.duration_since(frame.received_at));
+                stats
+                    .receive_to_ui
+                    .record(delivered_at.duration_since(frame.received_at));
                 if stats.delivered.fetch_add(1, Ordering::Relaxed) == 0 {
                     ui.set_stream_status(SharedString::new());
                 }
@@ -374,7 +376,12 @@ impl Controller {
             ui.set_stream_status("Waiting for video…".into());
         });
         let session = host
-            .connect(config, Box::new(sink), hestia_media::default_audio_sink(), listener.clone())
+            .connect(
+                config,
+                Box::new(sink),
+                hestia_media::default_audio_sink(),
+                listener.clone(),
+            )
             .map_err(|e| {
                 present.closed.store(true, Ordering::Release);
                 e.to_string()
@@ -440,9 +447,21 @@ impl Controller {
                 r.field("Decoder totals", "decoded", decode.decoded.load(Ordering::Relaxed));
                 r.field("Decoder totals", "dropped", decode.dropped.load(Ordering::Relaxed));
                 r.field("Decoder totals", "errors", decode.errors.load(Ordering::Relaxed));
-                r.field("Decoder totals", "backlog drops", decode.dropped_backlog.load(Ordering::Relaxed));
-                r.field("Video delivery", "handed to Slint", present.delivered.load(Ordering::Relaxed));
-                r.field("Video delivery", "replaced before handoff", present.superseded.load(Ordering::Relaxed));
+                r.field(
+                    "Decoder totals",
+                    "backlog drops",
+                    decode.dropped_backlog.load(Ordering::Relaxed),
+                );
+                r.field(
+                    "Video delivery",
+                    "handed to Slint",
+                    present.delivered.load(Ordering::Relaxed),
+                );
+                r.field(
+                    "Video delivery",
+                    "replaced before handoff",
+                    present.superseded.load(Ordering::Relaxed),
+                );
                 for (stage, histogram) in decode.latency_stages().into_iter().chain([
                     ("RGBA ready to Slint handoff", &present.handoff),
                     ("first packet to Slint handoff", &present.receive_to_ui),

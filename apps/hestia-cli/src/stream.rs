@@ -93,7 +93,8 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
     let mut decode_stats: Option<Arc<DecodeStats>> = None;
     let (formats, video_sink): (Vec<VideoFormat>, Box<dyn VideoSink>) = match opts.mode {
         VideoMode::Decode => {
-            let (decoder, formats) = hestia_media::decoder_with(Colorimetry::default(), opts.settings.hardware_decoding)?;
+            let (decoder, formats) =
+                hestia_media::decoder_with(Colorimetry::default(), opts.settings.hardware_decoding)?;
             let snapshot = opts.snapshot.clone();
             let started = Instant::now();
             let mut saved = false;
@@ -307,7 +308,11 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
         report.field("Decoder totals", "decoded", d.decoded.load(Ordering::Relaxed));
         report.field("Decoder totals", "dropped", d.dropped.load(Ordering::Relaxed));
         report.field("Decoder totals", "errors", d.errors.load(Ordering::Relaxed));
-        report.field("Decoder totals", "backlog drops", d.dropped_backlog.load(Ordering::Relaxed));
+        report.field(
+            "Decoder totals",
+            "backlog drops",
+            d.dropped_backlog.load(Ordering::Relaxed),
+        );
         for (stage, histogram) in d.latency_stages() {
             if let Some(summary) = histogram.summary() {
                 report.field("Video latency", stage, summary);

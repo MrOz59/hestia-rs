@@ -873,7 +873,9 @@ impl HestiaClient {
     /// Claims the preparation for a streaming launch. Dropping this before
     /// connecting also rolls back a launch cancelled by the local client.
     pub fn stream_host(&self, launch: &LaunchedSession) -> StreamHost {
-        StreamHost { hermes: launch.prepared.as_ref().map(|_| self.nvhttp(&launch.host)) }
+        StreamHost {
+            hermes: launch.prepared.as_ref().map(|_| self.nvhttp(&launch.host)),
+        }
     }
 
     /// Hermes: releases this client's prepared session (virtual display,

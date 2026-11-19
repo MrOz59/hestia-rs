@@ -304,7 +304,8 @@ impl FrameDecoder for MediaCodecDecoder {
 
     fn decode(&mut self, frame: &EncodedFrame, out: &mut RgbaFrame) -> Result<bool, String> {
         let now = Instant::now();
-        self.decode_timed(frame, out, FrameTiming::new(frame, now, now)).map(|t| t.is_some())
+        self.decode_timed(frame, out, FrameTiming::new(frame, now, now))
+            .map(|t| t.is_some())
     }
 
     fn reset(&mut self) -> Result<(), String> {

@@ -244,7 +244,10 @@ impl FrameAssembler {
             match block.add(info, packet, self.shard_len) {
                 Ok(recovered) => {
                     self.stats.recovered_packets += recovered as u64;
-                    if frame.blocks[..=frame.last_block].iter().all(|b| b.as_ref().is_some_and(Block::complete)) {
+                    if frame.blocks[..=frame.last_block]
+                        .iter()
+                        .all(|b| b.as_ref().is_some_and(Block::complete))
+                    {
                         let payloads: Vec<_> = frame
                             .blocks
                             .iter()
@@ -274,7 +277,9 @@ impl FrameAssembler {
         while let Some(first) = self.pending.first_mut() {
             let next = self.next_frame.expect("buffered frames have a sequence start");
             let number = first.number;
-            if number == next && let Some(result) = first.result.take() {
+            if number == next
+                && let Some(result) = first.result.take()
+            {
                 self.pending.remove(0);
                 self.next_frame = Some(next.wrapping_add(1));
                 match result {
@@ -292,8 +297,12 @@ impl FrameAssembler {
             // Evidence of a newer frame starts the deadline. A slow sender
             // alone is never treated as packet loss.
             let future_index = if number == next { 1 } else { 0 };
-            let Some(future) = self.pending.get(future_index..) else { break };
-            let Some(oldest_arrival) = future.iter().map(|frame| frame.received_at).min() else { break };
+            let Some(future) = self.pending.get(future_index..) else {
+                break;
+            };
+            let Some(oldest_arrival) = future.iter().map(|frame| frame.received_at).min() else {
+                break;
+            };
             let newest = self.pending.last().expect("we have at least one future frame");
             if newest.number.wrapping_sub(next) <= MAX_FRAME_LOOKAHEAD
                 && now.saturating_duration_since(oldest_arrival) < REORDER_WINDOW

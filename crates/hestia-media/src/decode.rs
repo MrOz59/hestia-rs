@@ -125,7 +125,9 @@ pub struct LatencyHistogram {
 
 impl Default for LatencyHistogram {
     fn default() -> Self {
-        Self { buckets: std::array::from_fn(|_| AtomicU64::new(0)) }
+        Self {
+            buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
     }
 }
 
@@ -144,17 +146,25 @@ impl LatencyHistogram {
         let percentile = |p: u64| {
             let target = (total * p).div_ceil(100);
             let mut cumulative = 0;
-            let bucket = counts.iter().position(|n| {
-                cumulative += *n;
-                cumulative >= target
-            }).unwrap_or(256);
+            let bucket = counts
+                .iter()
+                .position(|n| {
+                    cumulative += *n;
+                    cumulative >= target
+                })
+                .unwrap_or(256);
             if bucket == 256 {
                 "≥63.75".to_owned()
             } else {
                 format!("{:.2}", bucket as f64 * 0.25)
             }
         };
-        Some(format!("p50 {} / p95 {} / p99 {} ms ({total} samples)", percentile(50), percentile(95), percentile(99)))
+        Some(format!(
+            "p50 {} / p95 {} / p99 {} ms ({total} samples)",
+            percentile(50),
+            percentile(95),
+            percentile(99)
+        ))
     }
 }
 
@@ -307,7 +317,10 @@ impl VideoSink for DecodingSink {
         let now = Instant::now();
         let mut queue = self.shared.queue();
         let overloaded = queue.frames.len() == QUEUE_DEPTH
-            || queue.frames.front().is_some_and(|f| now.duration_since(f.queued_at) > queue.max_age);
+            || queue
+                .frames
+                .front()
+                .is_some_and(|f| now.duration_since(f.queued_at) > queue.max_age);
         if overloaded {
             let dropped = queue.invalidate();
             self.shared.dropped_backlog(dropped);
@@ -322,8 +335,15 @@ impl VideoSink for DecodingSink {
         }
         queue.waiting_for_keyframe = false;
         let generation = queue.generation;
-        self.shared.stats.receive_to_queue.record(now.saturating_duration_since(frame.received_at));
-        queue.frames.push_back(QueuedFrame { frame, queued_at: now, generation });
+        self.shared
+            .stats
+            .receive_to_queue
+            .record(now.saturating_duration_since(frame.received_at));
+        queue.frames.push_back(QueuedFrame {
+            frame,
+            queued_at: now,
+            generation,
+        });
         drop(queue);
         self.shared.ready.notify_one();
         SubmitResult::Ok
@@ -354,9 +374,16 @@ fn decode_loop(
     let mut logged_size = (0, 0);
     let mut decoder_generation = 0;
     loop {
-        let mut queue = shared.ready.wait_while(shared.queue(), |q| q.frames.is_empty() && !q.closed)
+        let mut queue = shared
+            .ready
+            .wait_while(shared.queue(), |q| q.frames.is_empty() && !q.closed)
             .unwrap_or_else(|e| e.into_inner());
-        let Some(QueuedFrame { frame, queued_at, generation }) = queue.frames.pop_front() else {
+        let Some(QueuedFrame {
+            frame,
+            queued_at,
+            generation,
+        }) = queue.frames.pop_front()
+        else {
             break;
         };
         let started = Instant::now();
@@ -395,10 +422,18 @@ fn decode_loop(
                 picture.decoded_at = Instant::now();
                 let stats = &shared.stats;
                 let decode_time = picture.decoded_at.duration_since(timing.decode_started_at);
-                stats.decode_time_us.fetch_add(decode_time.as_micros() as u64, Ordering::Relaxed);
-                stats.queue_wait.record(timing.decode_started_at.duration_since(timing.queued_at));
-                stats.codec.record(timing.codec_output_at.duration_since(timing.decode_started_at));
-                stats.frame_conversion.record(picture.decoded_at.duration_since(timing.codec_output_at));
+                stats
+                    .decode_time_us
+                    .fetch_add(decode_time.as_micros() as u64, Ordering::Relaxed);
+                stats
+                    .queue_wait
+                    .record(timing.decode_started_at.duration_since(timing.queued_at));
+                stats
+                    .codec
+                    .record(timing.codec_output_at.duration_since(timing.decode_started_at));
+                stats
+                    .frame_conversion
+                    .record(picture.decoded_at.duration_since(timing.codec_output_at));
                 stats.decoded.fetch_add(1, Ordering::Relaxed);
                 if (picture.width, picture.height) != logged_size {
                     logged_size = (picture.width, picture.height);

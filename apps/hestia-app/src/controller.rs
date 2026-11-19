@@ -827,7 +827,11 @@ impl Controller {
     fn cancel_launch(self: &Shared) -> bool {
         {
             let mut state = self.state();
-            if !state.launching.as_ref().is_some_and(|(seq, _)| *seq == state.launch_seq) {
+            if !state
+                .launching
+                .as_ref()
+                .is_some_and(|(seq, _)| *seq == state.launch_seq)
+            {
                 return false;
             }
             state.launch_seq += 1;
