@@ -185,6 +185,9 @@ pub struct StreamSettings {
     pub show_menu_button: bool,
     /// Use the platform's hardware decoder when there is one.
     pub hardware_decoding: bool,
+    /// Android: hardware-decoded pictures go straight to the GPU (no CPU
+    /// copy or conversion); off reads them back on the CPU.
+    pub gpu_video: bool,
     /// Touch mode; unset in settings saved before it existed, which only
     /// had `touch_trackpad` (see [`StreamSettings::touch`]).
     pub touch_mode: Option<TouchMode>,
@@ -215,6 +218,7 @@ impl Default for StreamSettings {
             video_scale: VideoScale::Fit,
             show_menu_button: !cfg!(target_os = "android"),
             hardware_decoding: true,
+            gpu_video: true,
             touch_mode: None,
             onscreen_controller: false,
             orientation: StreamOrientation::Landscape,
@@ -264,6 +268,9 @@ impl StreamSettings {
             "hardware decoding",
             if self.hardware_decoding { "on" } else { "off" },
         );
+        if cfg!(target_os = "android") {
+            r.field("Settings", "zero-copy video", if self.gpu_video { "on" } else { "off" });
+        }
     }
 
     /// Rough default bitrate (kbps) for a resolution/frame rate, in the spirit

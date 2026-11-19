@@ -1,7 +1,10 @@
 //! Android hardware decoding with `AMediaCodec`.
 //!
-//! The codec decodes into an `AImageReader` surface in `YUV_420_888`, the
-//! one output the NDK can read portably. Some devices' decoders produce
+//! When the UI can draw hardware buffers ([`crate::gpu_video`]), the codec
+//! renders into GPU buffers the UI samples directly: zero-copy, the colour
+//! conversion done by the GPU. Otherwise (or if that fails) it decodes into
+//! an `AImageReader` surface in `YUV_420_888`, the one output the NDK can
+//! read portably on the CPU. Some devices' decoders produce
 //! pictures the image reader can't lock for reading; after a few such
 //! failures the codec is restarted with its own output buffers instead
 //! (NV12/I420 and Qualcomm's aligned NV12, laid out as its output format
@@ -23,8 +26,13 @@ use ndk::media::media_codec::{
 use ndk::media::media_format::MediaFormat;
 use ndk::native_window::NativeWindow;
 
+use std::sync::Arc;
+
+use ndk::hardware_buffer::HardwareBufferUsage;
+
 use crate::color::{Colorimetry, Yuv420, yuv420_to_rgba};
 use crate::decode::{FrameDecoder, FrameTiming, RgbaFrame};
+use crate::gpu_video::{GpuPicture, GpuVideo, SharedReader};
 use crate::{EncodedFrame, VideoFormat};
 
 /// How long a call waits for an input buffer, and for its picture.
@@ -48,7 +56,9 @@ const COLOR_QCOM_YUV420_SEMI_PLANAR_32M: i32 = 0x7FA3_0C04;
 /// Where the codec puts its pictures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Output {
-    /// An image reader's surface.
+    /// GPU buffers the UI draws directly (zero-copy).
+    Gpu,
+    /// An image reader's surface, read on the CPU.
     Images,
     /// The codec's own output buffers.
     Buffers,
@@ -67,9 +77,13 @@ fn mime(codec: VideoCodec) -> Option<&'static str> {
 /// only the decoder thread uses them after setup.
 struct Running {
     codec: MediaCodec,
+    output: Output,
     /// The image reader and its surface (kept referenced while the codec
-    /// renders to it); none with buffer output.
-    images: Option<(ImageReader, NativeWindow)>,
+    /// renders to it); none with buffer output. Shared with the GPU
+    /// pictures still out, which must not outlive it.
+    images: Option<(Arc<SharedReader>, NativeWindow)>,
+    /// GPU output: the stream's number for its pictures.
+    generation: u64,
     /// Buffer output's picture layout, from the codec's output format.
     layout: Option<BufferLayout>,
     width: i32,
@@ -158,14 +172,23 @@ impl MediaCodecDecoder {
         let mime = mime(format.codec).ok_or("unsupported codec")?;
         let codec = MediaCodec::from_decoder_type(mime).ok_or_else(|| format!("no decoder for {mime}"))?;
         let (w, h) = (width as i32, height as i32);
-        let images = match output {
+        let reader = match output {
+            // A few buffers: one being drawn, one waiting, the codec's own.
+            Output::Gpu => Some(
+                ImageReader::new_with_usage(w, h, ImageFormat::PRIVATE, HardwareBufferUsage::GPU_SAMPLED_IMAGE, 4)
+                    .map_err(|e| format!("GPU image reader: {e:?}"))?,
+            ),
             Output::Images => {
-                let reader =
-                    ImageReader::new(w, h, ImageFormat::YUV_420_888, 4).map_err(|e| format!("image reader: {e:?}"))?;
-                let window = reader.window().map_err(|e| format!("image reader surface: {e:?}"))?;
-                Some((reader, window))
+                Some(ImageReader::new(w, h, ImageFormat::YUV_420_888, 4).map_err(|e| format!("image reader: {e:?}"))?)
             }
             Output::Buffers => None,
+        };
+        let images = match reader {
+            Some(reader) => {
+                let window = reader.window().map_err(|e| format!("image reader surface: {e:?}"))?;
+                Some((Arc::new(SharedReader(reader)), window))
+            }
+            None => None,
         };
         let media = |color: Option<i32>| {
             let mut media = Self::media_format(mime, w, h, fps);
@@ -192,7 +215,13 @@ impl MediaCodecDecoder {
         info!("MediaCodec {mime} {w}x{h}@{fps} started ({output:?} output)");
         Ok(Running {
             codec,
+            output,
             images,
+            generation: if output == Output::Gpu {
+                GpuVideo::global().begin()
+            } else {
+                0
+            },
             layout: None,
             width: w,
             height: h,
@@ -230,12 +259,12 @@ impl MediaCodecDecoder {
     /// caller asks for a keyframe either way.
     fn fall_back(&mut self, why: &str) -> Result<(), String> {
         let (format, width, height, fps) = self.config.ok_or("decoder not configured")?;
-        let tried_buffers = self.running.as_ref().is_some_and(|r| r.images.is_none());
+        let tried_buffers = self.running.as_ref().is_some_and(|r| r.output == Output::Buffers);
         // Some devices allow one hardware decoder at a time: stop this one first.
         self.running = None;
         (self.pictures, self.failures) = (0, 0);
         if !tried_buffers {
-            warn!("MediaCodec pictures can't be read through an image reader ({why}); using its output buffers");
+            warn!("MediaCodec pictures can't be used this way ({why}); using its output buffers");
             match Self::start(format, width, height, fps, Output::Buffers) {
                 Ok(running) => {
                     self.running = Some(running);
@@ -400,7 +429,7 @@ impl Running {
         };
         let deadline = Instant::now() + if wait { IMAGE_WAIT } else { Duration::ZERO };
         loop {
-            match reader.acquire_latest_image() {
+            match reader.0.acquire_latest_image() {
                 Ok(AcquireResult::Image(image)) => return Ok(Some(image)),
                 Ok(AcquireResult::NoBufferAvailable) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_micros(500));
@@ -453,8 +482,9 @@ impl FrameDecoder for MediaCodecDecoder {
         if self.fallback.is_some() {
             return "OpenH264 (software; MediaCodec failed)";
         }
-        match &self.running {
-            Some(running) if running.images.is_none() => "MediaCodec (hardware, buffer output)",
+        match self.running.as_ref().map(|r| r.output) {
+            Some(Output::Gpu) => "MediaCodec (hardware, zero-copy to the GPU)",
+            Some(Output::Buffers) => "MediaCodec (hardware, buffer output)",
             _ => "MediaCodec (hardware)",
         }
     }
@@ -472,7 +502,19 @@ impl FrameDecoder for MediaCodecDecoder {
     fn configure(&mut self, format: VideoFormat, width: u32, height: u32, fps: u32) -> Result<(), String> {
         self.config = Some((format, width, height, fps));
         (self.pictures, self.failures, self.fatal) = (0, 0, None);
-        match Self::start(format, width, height, fps, Output::Images) {
+        let gpu = GpuVideo::global();
+        let started = if gpu.usable() {
+            Self::start(format, width, height, fps, Output::Gpu).or_else(|e| {
+                warn!("MediaCodec GPU output unavailable ({e}); reading pictures on the CPU");
+                Self::start(format, width, height, fps, Output::Images)
+            })
+        } else {
+            if let Some(why) = gpu.failure() {
+                info!("zero-copy video is off for this run: {why}");
+            }
+            Self::start(format, width, height, fps, Output::Images)
+        };
+        match started {
             Ok(running) => {
                 self.running = Some(running);
                 Ok(())
@@ -522,6 +564,13 @@ impl FrameDecoder for MediaCodecDecoder {
         }
         if let Some(fatal) = &self.fatal {
             return Err(fatal.clone());
+        }
+        // The UI couldn't draw GPU pictures: decode for the CPU instead.
+        if self.running.as_ref().is_some_and(|r| r.output == Output::Gpu)
+            && let Some(why) = GpuVideo::global().failure()
+        {
+            self.fall_back(&format!("GPU renderer: {why}"))?;
+            return Err("switched video output; waiting for a keyframe".into());
         }
         let colorimetry = self.colorimetry;
         let result = self.running_decode(frame, out, timing, colorimetry);
@@ -596,6 +645,20 @@ impl MediaCodecDecoder {
         let Some((_, timing)) = running.pending.remove(index) else {
             return Ok(None);
         };
+        if running.output == Output::Gpu {
+            let reader = running
+                .images
+                .as_ref()
+                .map(|(r, _)| r.clone())
+                .ok_or("no image reader")?;
+            let picture =
+                GpuPicture::new(image, reader, running.generation).map_err(|e| format!("{UNREADABLE}: {e}"))?;
+            out.width = picture.width;
+            out.height = picture.height;
+            out.on_gpu = true;
+            GpuVideo::global().put(picture);
+            return Ok(Some(timing));
+        }
         convert(&image, colorimetry, (running.width, running.height), out).map_err(|e| format!("{UNREADABLE}: {e}"))?;
         Ok(Some(timing))
     }

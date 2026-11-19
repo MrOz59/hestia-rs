@@ -35,9 +35,11 @@ server commands) when the host offers them.
   (AES-CBC), and input packets (keyboard, text, mouse, scroll, touch, pen,
   gamepad).
 - **Decoding**: on Android, the hardware decoder (MediaCodec: H.264, HEVC,
-  AV1) read through an image reader, or through its own output buffers on
-  devices whose pictures the image reader can't lock; OpenH264 (software
-  H.264) on desktop and as the fallback. Decoding runs on its own thread
+  AV1) renders into GPU buffers that the UI draws directly, like Moonlight:
+  no CPU copy, YUV to RGB in the GPU's sampler (Settings → Zero-copy video).
+  Without it (or if the GPU path fails) pictures are read on the CPU, through
+  an image reader or the codec's own output buffers; OpenH264 (software
+  H.264) on desktop and as the last fallback. Decoding runs on its own thread
   and, like Moonlight, never drops a compressed frame for being late (each
   one is a reference for the next; dropping one costs a keyframe): bursts
   decode through and only the newest picture is shown. When keyframes don't
@@ -109,8 +111,7 @@ server commands) when the host offers them.
 
 ### Known limits of the prototype
 
-- Desktop decodes H.264 in software only (VA-API is next); Android
-  converts decoded pictures to RGBA on the CPU (zero-copy is next).
+- Desktop decodes H.264 in software only (VA-API is next).
 - Surround audio is mixed down to stereo.
 - Keys are mapped by the character they produce (US layout), not by physical
   scancode; characters without a US key are sent as text.

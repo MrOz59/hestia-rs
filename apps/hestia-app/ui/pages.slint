@@ -727,6 +727,9 @@ export component SettingsPage inherits Rectangle {
     in-out property <bool> show-report;
     in-out property <bool> show-menu-button;
     in-out property <bool> hardware-decoding;
+    in-out property <bool> gpu-video;
+    // Settings that only exist on Android.
+    in property <bool> android;
     // 0 landscape, 1 portrait, 2 follow the device
     in-out property <int> orientation;
     callback custom-resolution(string);
@@ -879,6 +882,13 @@ export component SettingsPage inherits Rectangle {
                         hint: "Faster and lighter on the battery; turn off to compare with the software decoder (H.264 only)";
                         Switch {
                             checked <=> root.hardware-decoding;
+                        }
+                    }
+                    if root.android && root.hardware-decoding: SettingRow {
+                        label: "Zero-copy video";
+                        hint: "The decoder's pictures go straight to the GPU, like Moonlight; turn off to read them on the CPU";
+                        Switch {
+                            checked <=> root.gpu-video;
                         }
                     }
                     SettingRow {

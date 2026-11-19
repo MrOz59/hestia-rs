@@ -162,9 +162,15 @@ impl FramePresenter for UiPresenter {
             if let Some(frame) = frame
                 && !stats.closed.load(Ordering::Acquire)
             {
-                // Copy only a frame the UI will actually hand to its renderer.
-                let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&frame.data, frame.width, frame.height);
-                ui.set_stream_frame(Image::from_rgba8(buffer));
+                if frame.on_gpu {
+                    // Zero-copy: the GPU renderer draws it in this redraw.
+                    ui.window().request_redraw();
+                } else {
+                    // Copy only a frame the UI will actually hand to its renderer.
+                    let buffer =
+                        SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&frame.data, frame.width, frame.height);
+                    ui.set_stream_frame(Image::from_rgba8(buffer));
+                }
                 let delivered_at = Instant::now();
                 stats.handoff.record(delivered_at.duration_since(frame.decoded_at));
                 stats
@@ -534,6 +540,11 @@ impl Controller {
             session.stop();
             {
                 let mut r = report::lock(&session_report);
+                r.field(
+                    "Decoder totals",
+                    "decoder",
+                    *decode.decoder.lock().unwrap_or_else(|p| p.into_inner()),
+                );
                 r.field("Decoder totals", "decoded", decode.decoded.load(Ordering::Relaxed));
                 r.field("Decoder totals", "dropped", decode.dropped.load(Ordering::Relaxed));
                 r.field("Decoder totals", "errors", decode.errors.load(Ordering::Relaxed));
@@ -574,6 +585,9 @@ impl Controller {
             let show_report = c.finish_report(session_report, &outcome, Some(host_id.clone()));
             platform::set_keyboard_visible(false);
             platform::set_stream_mode(false, hestia_core::StreamOrientation::default());
+            // Zero-copy video: the renderer lets go of the last picture.
+            #[cfg(target_os = "android")]
+            hestia_media::gpu_video::GpuVideo::global().end();
             platform::set_gamepads_streaming(false);
             c.ui(move |ui| {
                 if ui.get_stream_fullscreen() {

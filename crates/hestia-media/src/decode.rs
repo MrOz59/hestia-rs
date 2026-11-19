@@ -21,6 +21,9 @@ pub struct RgbaFrame {
     pub width: u32,
     pub height: u32,
     pub data: Vec<u8>,
+    /// The picture went to the GPU renderer (Android zero-copy, see
+    /// `gpu_video`); `data` doesn't hold it.
+    pub on_gpu: bool,
     pub frame_number: u32,
     /// When the first packet of the frame arrived.
     pub received_at: Instant,
@@ -34,6 +37,7 @@ impl Default for RgbaFrame {
             width: 0,
             height: 0,
             data: Vec::new(),
+            on_gpu: false,
             frame_number: 0,
             received_at: now,
             decoded_at: now,
@@ -46,6 +50,7 @@ impl RgbaFrame {
     pub fn reshape(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
+        self.on_gpu = false;
         self.data.resize(width as usize * height as usize * 4, 0);
     }
 }
@@ -174,6 +179,8 @@ impl LatencyHistogram {
 
 #[derive(Debug, Default)]
 pub struct DecodeStats {
+    /// The decoder in use, as it calls itself now (fallbacks change it).
+    pub decoder: Mutex<&'static str>,
     pub decoded: AtomicU64,
     pub dropped: AtomicU64,
     pub errors: AtomicU64,
@@ -302,6 +309,7 @@ impl VideoSink for DecodingSink {
             "video decoder: {} for {format:?} {width}x{height}@{fps}",
             decoder.name()
         );
+        *self.shared.stats.decoder.lock().unwrap_or_else(|p| p.into_inner()) = decoder.name();
         let presenter = self.presenter.take().ok_or("decoder already set up")?;
         // Bursts (Wi-Fi, VPNs, keyframes) are decoded through; only a
         // decoder that can't keep up at all is reset (see QUEUE_DEPTH).
@@ -427,6 +435,13 @@ fn decode_loop(
             decoder.decode_timed(&frame, &mut picture, timing)
         };
 
+        let name = decoder.name();
+        let mut current = shared.stats.decoder.lock().unwrap_or_else(|p| p.into_inner());
+        if *current != name {
+            info!("video decoder now: {name}");
+            *current = name;
+        }
+        drop(current);
         let mut queue = shared.queue();
         if queue.generation != generation {
             // A newer keyframe may already be queued. Its generation owns recovery.

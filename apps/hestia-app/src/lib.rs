@@ -3,6 +3,8 @@
 
 mod controller;
 mod gamepad;
+#[cfg(target_os = "android")]
+mod gpu_render;
 mod hostinfo;
 mod keymap;
 mod netroute;
@@ -62,6 +64,10 @@ pub fn pad_preview(width: f32, height: f32) -> Vec<PadControl> {
 /// Builds the window and runs the event loop until it closes.
 pub fn run(data_dir: PathBuf) -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
+    ui.set_is_android(cfg!(target_os = "android"));
+    // Hardware-decoded video drawn straight from GPU buffers.
+    #[cfg(target_os = "android")]
+    gpu_render::install(&ui);
     let controller = controller::Controller::new(&ui);
     controller.wire(&ui);
     controller.start(data_dir);

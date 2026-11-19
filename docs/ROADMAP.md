@@ -25,7 +25,8 @@
 - [ ] Linux VA-API decode (HEVC/AV1, DMA-BUF into the renderer)
 - [x] Android MediaCodec (H.264/HEVC/AV1) via AImageReader, with output
       buffers (NV12/I420/Qualcomm NV12) and software H.264 as fallbacks
-- [ ] Android zero-copy output (MediaCodec into a Surface)
+- [x] Android zero-copy output (MediaCodec into GPU buffers, drawn as an
+      external texture inside Slint's GL context)
 
 ## Milestone 2 — playable
 

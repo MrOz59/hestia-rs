@@ -213,6 +213,7 @@ pub fn load_settings_into(ui: &AppWindow, s: &StreamSettings, native: Option<(u3
     ui.set_cfg_show_report(s.show_stream_report);
     ui.set_cfg_show_menu_button(s.show_menu_button);
     ui.set_cfg_hardware_decoding(s.hardware_decoding);
+    ui.set_cfg_gpu_video(s.gpu_video);
     ui.set_cfg_orientation(
         hestia_core::StreamOrientation::ALL
             .iter()
@@ -260,6 +261,7 @@ pub fn read_settings_from(ui: &AppWindow, base: &StreamSettings) -> StreamSettin
         show_stream_report: ui.get_cfg_show_report(),
         show_menu_button: ui.get_cfg_show_menu_button(),
         hardware_decoding: ui.get_cfg_hardware_decoding(),
+        gpu_video: ui.get_cfg_gpu_video(),
         orientation: hestia_core::StreamOrientation::ALL
             [pick(ui.get_cfg_orientation(), hestia_core::StreamOrientation::ALL.len())],
         ..base.clone()

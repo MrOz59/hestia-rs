@@ -174,6 +174,8 @@ export component AppWindow inherits Window {
     in-out property <bool> cfg-show-report: true;
     in-out property <bool> cfg-show-menu-button: false;
     in-out property <bool> cfg-hardware-decoding: true;
+    in-out property <bool> cfg-gpu-video: true;
+    in property <bool> is-android: false;
     in-out property <int> cfg-orientation: 0;
     callback settings-custom-resolution(string);
     in property <string> client-id;
@@ -485,6 +487,8 @@ export component AppWindow inherits Window {
             show-report <=> root.cfg-show-report;
         show-menu-button <=> root.cfg-show-menu-button;
         hardware-decoding <=> root.cfg-hardware-decoding;
+        gpu-video <=> root.cfg-gpu-video;
+        android: root.is-android;
         orientation <=> root.cfg-orientation;
         custom-resolution(text) => {
             root.settings-custom-resolution(text);

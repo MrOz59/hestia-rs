@@ -14,12 +14,12 @@
 //! * [`dump`]: writes the elementary video stream to a file (`ffplay out.h264`).
 //!
 //! * `mediacodec` (Android): hardware H.264/HEVC/AV1 through `AMediaCodec`,
-//!   read back via an `AImageReader`; falls back to OpenH264 for H.264.
+//!   rendered into GPU buffers the UI draws directly (`gpu_video`), or read
+//!   back on the CPU; falls back to OpenH264 for H.264.
 //! * `android_audio` (Android): Opus through the system's MediaCodec
 //!   decoder, played with AAudio (surround mixed down to stereo).
 //!
-//! Planned: `vaapi` (Linux, DMA-BUF into the GL view), zero-copy Android
-//! output, surround audio, Android audio.
+//! Planned: `vaapi` (Linux, DMA-BUF into the GL view), surround audio.
 
 #[cfg(target_os = "android")]
 pub mod android_audio;
@@ -29,6 +29,8 @@ pub mod audio_out;
 pub mod color;
 pub mod decode;
 pub mod dump;
+#[cfg(target_os = "android")]
+pub mod gpu_video;
 #[cfg(target_os = "android")]
 pub mod mediacodec;
 pub mod null;

@@ -764,6 +764,8 @@ impl Controller {
                 let session_report = report::begin(&title, &host_name, &device);
                 let failure: String;
                 let settings = core.settings();
+                #[cfg(target_os = "android")]
+                hestia_media::gpu_video::GpuVideo::global().set_wanted(settings.gpu_video);
                 let decoder =
                     hestia_media::decoder_with(hestia_media::Colorimetry::default(), settings.hardware_decoding);
                 let launched = decoder.and_then(|decoder| {
