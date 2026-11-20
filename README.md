@@ -104,16 +104,23 @@ server commands) when the host offers them.
 - **Audio**: stereo Opus playback through cpal on desktop Linux; on Android,
   Opus decoded by the system's MediaCodec and played with AAudio (surround
   mixed down to stereo).
-- **Game controllers on Android**: up to four (buttons, sticks, triggers,
-  d-pad), with rumble on the controller's motor or the phone's. They drive
-  the host only while streaming; otherwise they navigate the app.
+- **Game controllers**: up to four (buttons, sticks, triggers, d-pad), with
+  rumble. On Android, on the controller's motor or the phone's; on desktop
+  Linux, read straight from evdev (no SDL/libudev) with force-feedback
+  rumble and hot plugging. They drive the host only while streaming;
+  otherwise (Android) they navigate the app: A confirms, B goes back.
+- **Android TV**: a launcher banner and entry, nothing touch-only required,
+  and the whole app works with a remote: arrows move a focus ring over the
+  host and app grids and their actions, form screens move from control to
+  control, and the stream menu (Back) is walked with the D-pad.
 - **Touch extras**: two-finger tap right-clicks, two-finger drag scrolls,
   three-finger tap opens the keyboard.
 - **Wake-on-LAN**: tapping an offline host wakes it (once its MAC address is
   known) and waits for it to come up.
 - **Slint patch**: `third_party/i-slint-backend-android-activity` is Slint's
-  Android backend with an input hook (controllers) and a fix for mouse-wheel
-  scrolling, which crashed upstream (see its `PATCHES.md`).
+  Android backend with an input hook (controllers), a fix for mouse-wheel
+  scrolling, which crashed upstream, and remote/controller keys for the UI
+  (see its `PATCHES.md`).
 - **UI** in Slint (dark theme, responsive grid) for desktop Linux and Android
   (NativeActivity), and a `hestia` CLI for scripting and testing.
 
@@ -161,7 +168,7 @@ cargo run --release -p hestia-app      # GUI
 cargo run --release -p hestia-cli -- --help
 ```
 
-### Android (arm64)
+### Android
 
 Use **NDK r30** (or whichever NDK matches skia-bindings' prebuilt Skia, see
 the CI workflow): Slint renders with Skia on Android, and an older NDK's libc++
@@ -173,20 +180,24 @@ rustup target add aarch64-linux-android
 cargo install cargo-ndk cargo-apk
 # native library only
 cargo ndk -t arm64-v8a --platform 26 build --release -p hestia-app --lib
-# or an installable APK
+# or a quick arm64 APK
 cargo apk build --release -p hestia-app --lib
 ```
 
-CI builds both and uploads the Linux binaries, the Android library and (best
-effort) an APK as workflow artifacts. It also checks that `libhestia_app.so`
-has no unresolved C++ runtime symbols. The CI APK is signed with a throwaway
-key per run: uninstall the previous one before installing a new build.
+Release APKs come from `scripts/android-package.sh` (aapt2, zipalign,
+apksigner) with `apps/hestia-app/android/` (manifest with the Android TV
+entry and banner, icons): it takes `<abi>/libhestia_app.so` for any of
+arm64-v8a, armeabi-v7a, x86_64 and x86 and makes one universal APK plus one
+per ABI. CI builds the four ABIs (the 32-bit ones compile Skia from source,
+which has no prebuilt binaries for them), checks that each library has no
+unresolved C++ runtime symbols and packages them.
 
 ## Nightly builds
 
 Every push to `main` that passes CI replaces the **`nightly`** pre-release
-(Releases page) with an Android APK (`hestia-rs-android-arm64.apk`), a Linux
-tarball and `SHA256SUMS`. The release notes list the commits since the
+(Releases page) with the Android APKs (`hestia-rs-android-universal.apk` for
+any device, phones, tablets, Android TV and Chromebooks, or the smaller
+`hestia-rs-android-<abi>.apk`), a Linux tarball and `SHA256SUMS`. The release notes list the commits since the
 previous nightly; Settings → About in the app shows which commit a build is.
 
 So that each nightly APK installs over the previous one, CI signs it with the

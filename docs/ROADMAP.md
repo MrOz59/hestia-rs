@@ -39,8 +39,11 @@
       with rumble on the controller or the phone; two-finger scroll
 - [x] Touch modes (trackpad, mouse, native multi-touch), on-screen
       controller, pinch zoom and pan, stream orientation, custom resolution
-- [ ] Input: scancode-based keyboard, desktop pointer capture, desktop
-      gamepads, stylus / S Pen
+- [x] Desktop game controllers (Linux evdev, rumble, hot plug)
+- [x] Android TV: launcher banner, remote navigation (grids, forms, stream
+      menu), controller A/B in the app; universal APK (all four ABIs)
+- [ ] Input: scancode-based keyboard, desktop pointer capture, stylus /
+      S Pen
 - [x] Stream overlay: stats, full screen, keyframe request, disconnect, quit
 - [x] Hermes host tools: display recovery, server commands, clipboard,
       permissions, diagnostics (app and CLI)
