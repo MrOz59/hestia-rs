@@ -535,10 +535,10 @@ export component StreamView inherits Rectangle {
             property <int> list-pos: root.menu-focus < 2 ? -1 : root.menu-focus - 2 - (!root.clipboard-actions && root.menu-focus > 4 ? 2 : 0);
             property <length> item-top: 6px + self.list-pos * Theme.control-height;
             changed list-pos => {
-                if (self.list-pos >= 0 && self.item-top + self.viewport-y < 0) {
-                    self.viewport-y = -self.item-top;
-                } else if (self.list-pos >= 0 && self.item-top + Theme.control-height + self.viewport-y > self.height) {
-                    self.viewport-y = self.height - self.item-top - Theme.control-height - 6px;
+                if (self.list-pos >= 0 && self.item-top + self.content-y < 0) {
+                    self.content-y = -self.item-top;
+                } else if (self.list-pos >= 0 && self.item-top + Theme.control-height + self.content-y > self.height) {
+                    self.content-y = self.height - self.item-top - Theme.control-height - 6px;
                 }
             }
             menu-list := VerticalLayout {

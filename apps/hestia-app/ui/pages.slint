@@ -470,10 +470,10 @@ export component HostsPage inherits Rectangle {
             property <int> focused-row: root.nav >= 0 ? Math.floor(root.nav / root.cols) : -1;
             property <length> row-top: 8px + self.focused-row * (root.tile-h + root.gap);
             changed focused-row => {
-                if (self.focused-row >= 0 && self.row-top + self.viewport-y < 0) {
-                    self.viewport-y = 8px - self.row-top;
-                } else if (self.focused-row >= 0 && self.row-top + root.tile-h + self.viewport-y > self.height) {
-                    self.viewport-y = self.height - self.row-top - root.tile-h - root.gap;
+                if (self.focused-row >= 0 && self.row-top + self.content-y < 0) {
+                    self.content-y = 8px - self.row-top;
+                } else if (self.focused-row >= 0 && self.row-top + root.tile-h + self.content-y > self.height) {
+                    self.content-y = self.height - self.row-top - root.tile-h - root.gap;
                 }
             }
 
@@ -796,10 +796,10 @@ export component AppsPage inherits Rectangle {
             property <int> focused-row: root.nav >= 0 ? Math.floor(root.nav / root.cols) : -1;
             property <length> row-top: 8px + self.focused-row * (root.tile-h + root.gap);
             changed focused-row => {
-                if (self.focused-row >= 0 && self.row-top + self.viewport-y < 0) {
-                    self.viewport-y = 8px - self.row-top;
-                } else if (self.focused-row >= 0 && self.row-top + root.tile-h + self.viewport-y > self.height) {
-                    self.viewport-y = self.height - self.row-top - root.tile-h - root.gap;
+                if (self.focused-row >= 0 && self.row-top + self.content-y < 0) {
+                    self.content-y = 8px - self.row-top;
+                } else if (self.focused-row >= 0 && self.row-top + root.tile-h + self.content-y > self.height) {
+                    self.content-y = self.height - self.row-top - root.tile-h - root.gap;
                 }
             }
 
