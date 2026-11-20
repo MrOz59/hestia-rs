@@ -212,14 +212,24 @@ fn press(window: &MinimalSoftwareWindow, key: Key, times: usize) {
     }
 }
 
-fn save(window: &MinimalSoftwareWindow, size: PhysicalSize, path: &Path) {
-    settle();
+/// Draws the window into a fresh buffer.
+fn render(window: &MinimalSoftwareWindow, size: PhysicalSize) -> Vec<Rgb8Pixel> {
     window.request_redraw();
     let (w, h) = (size.width as usize, size.height as usize);
     let mut pixels = vec![Rgb8Pixel::default(); w * h];
     window.draw_if_needed(|renderer| {
         renderer.render(&mut pixels, w);
     });
+    pixels
+}
+
+fn save(window: &MinimalSoftwareWindow, size: PhysicalSize, path: &Path) {
+    // Animations (page fades, dialogs) start when a frame first draws
+    // them: draw once, let them run, then draw the picture to keep.
+    settle();
+    render(window, size);
+    settle();
+    let pixels = render(window, size);
     let bytes: Vec<u8> = pixels.iter().flat_map(|p| [p.r, p.g, p.b]).collect();
     image::RgbImage::from_raw(size.width, size.height, bytes)
         .expect("buffer size")

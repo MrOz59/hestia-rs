@@ -501,9 +501,9 @@ component AppTile inherits Focusable {
         if !root.app.has-art: Rectangle {
             background: @linear-gradient(160deg, Theme.card-hover 0%, Theme.bg 100%);
             Icon {
-                x: parent.width - self.width - 12px;
-                y: parent.height - self.height - 12px;
-                width: parent.width * 0.4;
+                x: parent.width - self.width - 14px;
+                y: 14px;
+                width: parent.width * 0.34;
                 height: self.width;
                 name: "gamepad";
                 tint: Theme.text.transparentize(0.94);
@@ -2287,7 +2287,7 @@ export component ToolsPage inherits Rectangle {
                             label: cmd.name;
                             hint: cmd.armed ? "Press again to run it" : (cmd.confirm ? "Asks before it runs" : "");
                             value: cmd.armed ? "Confirm" : "Run";
-                            danger: cmd.confirm && !cmd.armed;
+                            value-danger: cmd.confirm && !cmd.armed;
                             highlight: cmd.armed;
                             enabled: root.commands-allowed && !root.busy;
                             want-focus: root.nav == 100 + i;

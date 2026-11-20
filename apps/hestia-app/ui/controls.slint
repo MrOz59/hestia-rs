@@ -258,6 +258,7 @@ export component SliderRow inherits RowBase {
                 background: Theme.bg;
             }
             Rectangle {
+                x: 0px;
                 y: (parent.height - self.height) / 2;
                 width: knob.x + knob.width / 2;
                 height: 6px;
@@ -300,6 +301,8 @@ export component ActionRow inherits RowBase {
     // Short text at the end ("Run", "Open").
     in property <string> value;
     in property <bool> danger: false;
+    // The value pill alone in red (an action that asks before it runs).
+    in property <bool> value-danger: false;
     in property <bool> highlight: false;
 
     accessible-role: button;
@@ -332,10 +335,10 @@ export component ActionRow inherits RowBase {
                 height: 30px;
                 width: value-text.preferred-width + 26px;
                 border-radius: 15px;
-                background: root.highlight ? Theme.accent : (root.danger ? Theme.danger.transparentize(0.85) : Theme.bg);
+                background: root.highlight ? Theme.accent : (root.danger || root.value-danger ? Theme.danger.transparentize(0.85) : Theme.bg);
                 value-text := Text {
                     text: root.value;
-                    color: root.highlight ? Theme.on-accent : (root.danger ? Theme.danger : Theme.text);
+                    color: root.highlight ? Theme.on-accent : (root.danger || root.value-danger ? Theme.danger : Theme.text);
                     font-size: Theme.caption-size;
                     font-weight: 700;
                     horizontal-alignment: center;
