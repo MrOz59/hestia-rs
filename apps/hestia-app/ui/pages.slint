@@ -170,7 +170,7 @@ export component HostsPage inherits Rectangle {
     property <int> nav: -1;
     in property <int> refocus;
     changed refocus => {
-        start.focus();
+        home-scope.focus();
         root.nav = -1;
     }
 
@@ -251,7 +251,7 @@ export component HostsPage inherits Rectangle {
         return true;
     }
 
-    start := FocusScope {
+    home-scope := FocusScope {
         width: 0px;
         height: 0px;
         init => {
@@ -745,7 +745,7 @@ export component AppsPage inherits Rectangle {
     property <int> nav: -1;
     in property <int> refocus;
     changed refocus => {
-        start.focus();
+        home-scope.focus();
         root.nav = -1;
     }
     // Overlays: 1 confirm quitting the app, 2 confirm forgetting the host;
@@ -756,7 +756,7 @@ export component AppsPage inherits Rectangle {
     property <bool> overlay: root.confirm != 0 || root.sheet-open;
     changed overlay => {
         if (!root.overlay && root.nav == -1) {
-            start.focus();
+            home-scope.focus();
         }
     }
     pure function at(i: int) -> bool {
@@ -849,7 +849,7 @@ export component AppsPage inherits Rectangle {
         return true;
     }
 
-    start := FocusScope {
+    home-scope := FocusScope {
         width: 0px;
         height: 0px;
         init => {
@@ -1173,7 +1173,7 @@ export component SessionPage inherits Rectangle {
     property <int> nav: -1;
     in property <int> refocus;
     changed refocus => {
-        start.focus();
+        home-scope.focus();
         root.nav = -1;
     }
     function move(from: int, key: string) -> bool {
@@ -1199,7 +1199,7 @@ export component SessionPage inherits Rectangle {
     opacity: root.shown ? 1 : 0;
     animate opacity { duration: 200ms; easing: ease-out; }
 
-    start := FocusScope {
+    home-scope := FocusScope {
         width: 0px;
         height: 0px;
         init => {
@@ -1371,14 +1371,14 @@ export component SettingsPage inherits Rectangle {
     property <int> nav: -1;
     in property <int> refocus;
     changed refocus => {
-        start.focus();
+        home-scope.focus();
         root.nav = -1;
     }
     // The open option list: the index of the row it belongs to.
     property <int> sheet: -1;
     changed sheet => {
         if (root.sheet < 0 && root.nav == -1) {
-            start.focus();
+            home-scope.focus();
         }
     }
     property <int> profile-count: root.profile-names.length;
@@ -1468,7 +1468,7 @@ export component SettingsPage inherits Rectangle {
     opacity: root.shown ? 1 : 0;
     animate opacity { duration: 200ms; easing: ease-out; }
 
-    start := FocusScope {
+    home-scope := FocusScope {
         width: 0px;
         height: 0px;
         init => {
@@ -2001,7 +2001,7 @@ export component ToolsPage inherits Rectangle {
     property <int> nav: -1;
     in property <int> refocus;
     changed refocus => {
-        start.focus();
+        home-scope.focus();
         root.nav = -1;
     }
     property <int> command-count: root.commands.length;
@@ -2061,7 +2061,7 @@ export component ToolsPage inherits Rectangle {
     opacity: root.shown ? 1 : 0;
     animate opacity { duration: 200ms; easing: ease-out; }
 
-    start := FocusScope {
+    home-scope := FocusScope {
         width: 0px;
         height: 0px;
         init => {
@@ -2431,7 +2431,7 @@ export component ReportPage inherits Rectangle {
     property <int> nav: -1;
     in property <int> refocus;
     changed refocus => {
-        start.focus();
+        home-scope.focus();
         root.nav = -1;
     }
     function move(from: int, key: string) -> bool {
@@ -2478,7 +2478,7 @@ export component ReportPage inherits Rectangle {
     opacity: root.shown ? 1 : 0;
     animate opacity { duration: 200ms; easing: ease-out; }
 
-    start := FocusScope {
+    home-scope := FocusScope {
         width: 0px;
         height: 0px;
         init => {
