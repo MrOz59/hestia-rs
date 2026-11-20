@@ -1,12 +1,15 @@
-//! Session-owned handoff from the decoder to Slint and the native renderer.
+//! Slint and native renderer adapters for a stream's picture mailbox.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+#[cfg(target_os = "android")]
+use std::sync::Mutex;
 use std::time::Instant;
 
 use hestia_core::StreamSettings;
 #[cfg(target_os = "android")]
 use hestia_media::gpu_video::{GpuOutput, GpuRendererStatus};
+use hestia_media::picture_mailbox::{DisplayUpdate, PictureKind, PictureMailbox};
 use hestia_media::{Colorimetry, DecodedFrame, DecoderChoice, FramePresenter, LatencyHistogram, RecoveryLatency};
 use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer, SharedString};
 
@@ -49,13 +52,6 @@ impl StreamVideo {
     }
 }
 
-#[derive(Default)]
-struct PendingPicture {
-    latest: Option<DecodedFrame>,
-    spare: Option<DecodedFrame>,
-    scheduled: bool,
-}
-
 #[cfg(target_os = "android")]
 #[derive(Default)]
 pub(crate) struct GpuVideoStats {
@@ -67,12 +63,10 @@ pub(crate) struct GpuVideoStats {
     pub(crate) recovery: RecoveryLatency,
 }
 
-/// One stream's picture slot and presentation metrics. A slow renderer
-/// consumes the newest picture and releases any superseded native buffer.
+/// One stream's link to the window and its presentation metrics.
 #[derive(Default)]
 pub(crate) struct Presentation {
-    pending: Mutex<PendingPicture>,
-    closed: AtomicBool,
+    pictures: PictureMailbox,
     pub(crate) delivered: AtomicU64,
     pub(crate) superseded: AtomicU64,
     pub(crate) handoff: LatencyHistogram,
@@ -101,8 +95,7 @@ impl Presentation {
     }
 
     pub(crate) fn close(&self) {
-        self.closed.store(true, Ordering::Release);
-        self.pending.lock().unwrap_or_else(|p| p.into_inner()).latest.take();
+        self.pictures.close();
     }
 
     pub(crate) fn superseded(&self) -> u64 {
@@ -114,51 +107,41 @@ impl Presentation {
 
     /// Returns whether a callback needs to be scheduled on the UI thread.
     fn enqueue(&self, frame: &mut DecodedFrame) -> bool {
-        let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
-        if self.closed.load(Ordering::Acquire) {
+        let Some(update) = self.pictures.push(frame, || self.gpu_available()) else {
             return false;
-        }
-        #[cfg(target_os = "android")]
-        if frame.rgba().is_none() && !self.gpu_available() {
-            return false;
-        }
-        let reusable = if let Some(mut older) = pending.latest.take() {
-            if older.rgba().is_some() {
-                self.superseded.fetch_add(1, Ordering::Relaxed);
-                older
-            } else {
-                #[cfg(target_os = "android")]
-                self.gpu.superseded.fetch_add(1, Ordering::Relaxed);
-                older.discard_native();
-                pending.spare.take().unwrap_or(older)
-            }
-        } else {
-            pending.spare.take().unwrap_or_default()
         };
-        pending.latest = Some(std::mem::replace(frame, reusable));
-        !std::mem::replace(&mut pending.scheduled, true)
+        match update.superseded {
+            Some(PictureKind::Cpu) => {
+                self.superseded.fetch_add(1, Ordering::Relaxed);
+            }
+            #[cfg(target_os = "android")]
+            Some(PictureKind::Native) => {
+                self.gpu.superseded.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+        update.schedule
     }
 
-    #[cfg(target_os = "android")]
     pub(crate) fn gpu_available(&self) -> bool {
-        !self.closed.load(Ordering::Acquire) && self.output.as_ref().is_some_and(|output| output.available())
+        #[cfg(target_os = "android")]
+        {
+            !self.pictures.is_closed() && self.output.as_ref().is_some_and(|output| output.available())
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            false
+        }
     }
 
     #[cfg(target_os = "android")]
     pub(crate) fn discard_gpu(&self) {
-        let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
-        if pending.latest.as_ref().is_some_and(|frame| frame.rgba().is_none()) {
-            pending.latest.take();
-        }
+        self.pictures.discard_native();
     }
 
     #[cfg(target_os = "android")]
     pub(crate) fn take_gpu(&self) -> Option<DecodedFrame> {
-        let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
-        if pending.latest.as_ref()?.rgba().is_some() {
-            return None;
-        }
-        let frame = pending.latest.take()?;
+        let frame = self.pictures.take_native()?;
         self.gpu_available().then_some(frame)
     }
 }
@@ -201,28 +184,19 @@ impl FramePresenter for UiPresenter {
         }
         let presentation = self.presentation.clone();
         let _ = self.weak.upgrade_in_event_loop(move |ui| {
-            let mut pending = presentation.pending.lock().unwrap_or_else(|p| p.into_inner());
-            pending.scheduled = false;
-            if presentation.closed.load(Ordering::Acquire) {
-                return;
-            }
-            #[cfg(target_os = "android")]
-            if pending.latest.as_ref().is_some_and(|frame| frame.rgba().is_none()) {
-                if presentation.gpu_available() {
+            let frame = match presentation.pictures.next_for_display(|| presentation.gpu_available()) {
+                Some(DisplayUpdate::Cpu(frame)) => frame,
+                Some(DisplayUpdate::RedrawNative) => {
+                    #[cfg(target_os = "android")]
                     presentation.gpu.redraw_requests.fetch_add(1, Ordering::Relaxed);
-                    drop(pending);
                     ui.window().request_redraw();
-                } else {
-                    pending.latest.take();
+                    return;
                 }
-                return;
-            }
-
-            let Some(frame) = pending.latest.take() else { return };
-            drop(pending);
+                None => return,
+            };
             let Some(data) = frame.rgba() else { return };
             let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(data, frame.width, frame.height);
-            if presentation.closed.load(Ordering::Acquire) {
+            if presentation.pictures.is_closed() {
                 return;
             }
             ui.set_stream_frame(Image::from_rgba8(buffer));
@@ -237,38 +211,7 @@ impl FramePresenter for UiPresenter {
             if presentation.delivered.fetch_add(1, Ordering::Relaxed) == 0 {
                 ui.set_stream_status(SharedString::new());
             }
-            presentation.pending.lock().unwrap_or_else(|p| p.into_inner()).spare = Some(frame);
+            presentation.pictures.recycle_cpu(frame);
         });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn newest_frame_wins_and_a_closed_session_cannot_queue_more() {
-        let previous = Presentation::default();
-        let next = Presentation::default();
-        let mut frame = DecodedFrame::default();
-        let pixels = frame.reshape(2, 1).as_ptr();
-        frame.frame_number = 1;
-        assert!(previous.enqueue(&mut frame));
-        frame.reshape(2, 1);
-        frame.frame_number = 2;
-        assert!(!previous.enqueue(&mut frame), "only one UI callback is scheduled");
-        assert_eq!(previous.superseded(), 1);
-        assert_eq!(frame.rgba().unwrap().as_ptr(), pixels, "reuse the previous CPU buffer");
-        assert_eq!(
-            previous.pending.lock().unwrap().latest.as_ref().unwrap().frame_number,
-            2
-        );
-
-        previous.close();
-        frame.frame_number = 3;
-        assert!(!previous.enqueue(&mut frame));
-        assert!(previous.pending.lock().unwrap().latest.is_none());
-        assert!(next.enqueue(&mut frame));
-        assert_eq!(next.pending.lock().unwrap().latest.as_ref().unwrap().frame_number, 3);
     }
 }
