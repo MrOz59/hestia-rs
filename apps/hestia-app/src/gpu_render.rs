@@ -14,6 +14,7 @@
 
 use std::ffi::{CStr, c_char, c_void};
 use std::num::NonZeroU32;
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::ptr;
 
 use hestia_media::gpu_video::{GpuPicture, GpuVideo};
@@ -88,6 +89,7 @@ mod ffi {
     pub const EGL_IMAGE_PRESERVED_KHR: c_int = 0x30D2;
     pub const EGL_NATIVE_BUFFER_ANDROID: c_uint = 0x3140;
     pub const EGL_TRUE: c_int = 1;
+    pub const EGL_SYNC_NATIVE_FENCE_ANDROID: c_uint = 0x3144;
 
     #[link(name = "GLESv3")]
     unsafe extern "C" {
@@ -162,6 +164,8 @@ mod ffi {
         );
         pub fn glEnableVertexAttribArray(index: GLuint);
         pub fn glDrawArrays(mode: GLenum, first: GLint, count: GLsizei);
+        pub fn glFlush();
+        pub fn glFinish();
     }
 
     #[link(name = "EGL")]
@@ -183,6 +187,9 @@ mod ffi {
     ) -> *mut c_void;
     /// `eglDestroyImageKHR`.
     pub type DestroyImage = unsafe extern "C" fn(display: *mut c_void, image: *mut c_void) -> c_uint;
+    pub type CreateSync = unsafe extern "C" fn(*mut c_void, c_uint, *const c_int) -> *mut c_void;
+    pub type DestroySync = unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_uint;
+    pub type DupNativeFenceFd = unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int;
     /// `glEGLImageTargetTexture2DOES` (GL_OES_EGL_image_external).
     pub type ImageTargetTexture = unsafe extern "C" fn(target: GLenum, image: *mut c_void);
 }
@@ -213,6 +220,9 @@ struct Extensions {
     create_image: CreateImage,
     destroy_image: DestroyImage,
     image_target_texture: ImageTargetTexture,
+    create_sync: CreateSync,
+    destroy_sync: DestroySync,
+    dup_native_fence_fd: DupNativeFenceFd,
 }
 
 /// GL objects of the conversion pass (created on first use, inside the
@@ -281,6 +291,8 @@ impl Gl {
             "EGL_KHR_image_base",
             "EGL_ANDROID_image_native_buffer",
             "EGL_ANDROID_get_native_client_buffer",
+            "EGL_KHR_fence_sync",
+            "EGL_ANDROID_native_fence_sync",
         ] {
             if !egl_ext.split_whitespace().any(|e| e == needed) {
                 return Err(format!("{needed} is missing"));
@@ -294,6 +306,10 @@ impl Gl {
             destroy_image: proc_address(c"eglDestroyImageKHR").ok_or_else(|| missing("eglDestroyImageKHR"))?,
             image_target_texture: proc_address(c"glEGLImageTargetTexture2DOES")
                 .ok_or_else(|| missing("glEGLImageTargetTexture2DOES"))?,
+            create_sync: proc_address(c"eglCreateSyncKHR").ok_or_else(|| missing("eglCreateSyncKHR"))?,
+            destroy_sync: proc_address(c"eglDestroySyncKHR").ok_or_else(|| missing("eglDestroySyncKHR"))?,
+            dup_native_fence_fd: proc_address(c"eglDupNativeFenceFDANDROID")
+                .ok_or_else(|| missing("eglDupNativeFenceFDANDROID"))?,
         };
         info!("zero-copy video ready ({version})");
         Ok(Self { ext, objects: None })
@@ -336,6 +352,26 @@ impl Gl {
             // The texture keeps the buffer referenced for the draw.
             (self.ext.destroy_image)(display, image);
             result
+        }
+    }
+
+    /// Exports a fence after the last GL read of the MediaCodec image.
+    fn release_fence(&self) -> Result<OwnedFd, String> {
+        // SAFETY: the rendering notifier has made this display and context
+        // current. The exported fd has independent ownership from the sync.
+        unsafe {
+            let display = eglGetCurrentDisplay();
+            let sync = (self.ext.create_sync)(display, EGL_SYNC_NATIVE_FENCE_ANDROID, [EGL_NONE].as_ptr());
+            if sync.is_null() {
+                return Err("eglCreateSyncKHR failed for the video release fence".into());
+            }
+            glFlush();
+            let fd = (self.ext.dup_native_fence_fd)(display, sync);
+            (self.ext.destroy_sync)(display, sync);
+            if fd < 0 {
+                return Err("eglDupNativeFenceFDANDROID failed for video".into());
+            }
+            Ok(OwnedFd::from_raw_fd(fd))
         }
     }
 
@@ -591,13 +627,11 @@ impl SavedState {
     }
 }
 
-/// Lives in the rendering notifier: the GL side, and the picture on screen
-/// (kept until the next one is drawn, so the codec can't overwrite it
-/// while the GPU still reads it).
+/// The imported image is released with a fence after drawing. Slint keeps
+/// sampling only our RGBA target texture in the same GL context.
 struct Renderer {
     weak: slint::Weak<AppWindow>,
     gl: Option<Gl>,
-    shown: Option<GpuPicture>,
     /// The stream view shows our texture (for this stream, at this size).
     image_set: Option<(u64, (u32, u32))>,
 }
@@ -606,38 +640,36 @@ impl Renderer {
     fn setup(&mut self, api: &GraphicsAPI<'_>) {
         let gpu = GpuVideo::global();
         if !matches!(api, GraphicsAPI::NativeOpenGL { .. }) {
-            info!("zero-copy video unavailable: the renderer doesn't use OpenGL");
-            gpu.set_renderer_ready(false);
+            gpu.fail("the renderer does not use OpenGL".into());
             return;
         }
         match Gl::new() {
             Ok(gl) => {
                 self.gl = Some(gl);
-                gpu.set_renderer_ready(true);
+                gpu.renderer_ready();
             }
             Err(e) => {
-                info!("zero-copy video unavailable: {e}");
-                gpu.set_renderer_ready(false);
+                gpu.fail(e);
             }
         }
     }
 
     fn before_rendering(&mut self) {
         let gpu = GpuVideo::global();
-        // A stream ended (or a new one began): let go of the old picture.
-        if self.shown.as_ref().is_some_and(|p| p.generation != gpu.generation()) {
-            self.shown = None;
-        }
         let Some(gl) = self.gl.as_mut() else { return };
         let Some(picture) = gpu.take() else { return };
-        if picture.generation != gpu.generation() {
+        if picture.generation() != gpu.generation() {
             return;
         }
-        match gl.draw(&picture) {
-            Ok((texture, resized)) => {
-                let key = (picture.generation, (picture.width, picture.height));
-                // The previous buffer goes back to the codec now.
-                self.shown = Some(picture);
+        let result = gl.draw(&picture).and_then(|draw| {
+            let fence = gl.release_fence()?;
+            Ok((draw, fence))
+        });
+        match result {
+            Ok(((texture, resized), fence)) => {
+                let key = (picture.generation(), (picture.width, picture.height));
+                picture.record_draw();
+                picture.release(fence);
                 if resized || self.image_set != Some(key) {
                     let Some(id) = NonZeroU32::new(texture) else { return };
                     // SAFETY: a live RGBA texture of this context, of that size.
@@ -647,31 +679,38 @@ impl Renderer {
                     .build();
                     if let Some(ui) = self.weak.upgrade() {
                         ui.set_stream_frame(image);
+                        ui.set_stream_status(slint::SharedString::new());
                     }
                     self.image_set = Some(key);
                 }
             }
             Err(e) => {
+                // On failure there may already be commands reading this
+                // image. Finish them once before returning it without a fence.
+                // SAFETY: the rendering notifier owns the current GL context.
+                unsafe { glFinish() };
                 gpu.fail(e);
-                gl.delete();
-                self.gl = None;
-                gpu.set_renderer_ready(false);
+                self.clear_image();
+                if let Some(mut gl) = self.gl.take() {
+                    gl.delete();
+                }
             }
         }
     }
 
-    fn teardown(&mut self) {
-        let gpu = GpuVideo::global();
-        gpu.set_renderer_ready(false);
-        self.shown = None;
-        if let Some(mut gl) = self.gl.take() {
-            gl.delete();
-        }
-        // The texture is gone with the context: don't leave it on screen.
+    fn clear_image(&mut self) {
         if self.image_set.take().is_some()
             && let Some(ui) = self.weak.upgrade()
         {
             ui.set_stream_frame(slint::Image::default());
+        }
+    }
+
+    fn teardown(&mut self) {
+        GpuVideo::global().renderer_paused();
+        self.clear_image();
+        if let Some(mut gl) = self.gl.take() {
+            gl.delete();
         }
     }
 }
@@ -681,7 +720,6 @@ pub fn install(ui: &AppWindow) {
     let mut renderer = Renderer {
         weak: ui.as_weak(),
         gl: None,
-        shown: None,
         image_set: None,
     };
     let result = ui.window().set_rendering_notifier(move |state, api| match state {

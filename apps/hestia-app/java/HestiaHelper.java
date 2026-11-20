@@ -3,6 +3,8 @@ package com.mroz59.hestia;
 import android.app.Activity;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
+import android.media.MediaCodecInfo;
+import android.media.MediaCodecList;
 import android.os.Build;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
@@ -35,6 +37,42 @@ public final class HestiaHelper {
 
     /** The keyboard deleted `count` characters before the cursor. */
     static native void nativeDeleteBefore(int count);
+
+    /** A regular decoder that can accept the requested stream mode. */
+    public static String findVideoDecoder(String mime, int width, int height, int fps) {
+        for (MediaCodecInfo codec : new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos()) {
+            if (codec.isEncoder()) {
+                continue;
+            }
+            String name = codec.getName();
+            if (Build.VERSION.SDK_INT >= 29) {
+                if (!codec.isHardwareAccelerated() || codec.isSoftwareOnly()) {
+                    continue;
+                }
+            } else if (name.startsWith("OMX.google.") || name.startsWith("c2.android.")) {
+                // Older Android releases do not identify hardware codecs.
+                continue;
+            }
+            for (String type : codec.getSupportedTypes()) {
+                if (!mime.equalsIgnoreCase(type)) {
+                    continue;
+                }
+                try {
+                    MediaCodecInfo.CodecCapabilities caps = codec.getCapabilitiesForType(type);
+                    MediaCodecInfo.VideoCapabilities video = caps.getVideoCapabilities();
+                    if (video != null
+                            && !caps.isFeatureRequired(MediaCodecInfo.CodecCapabilities.FEATURE_SecurePlayback)
+                            && !caps.isFeatureRequired(MediaCodecInfo.CodecCapabilities.FEATURE_TunneledPlayback)
+                            && video.areSizeAndRateSupported(width, height, fps)) {
+                        return name;
+                    }
+                } catch (IllegalArgumentException ignored) {
+                    // A broken vendor entry should not hide other decoders.
+                }
+            }
+        }
+        return null;
+    }
 
     private static KeyboardView sKeyboardView;
 

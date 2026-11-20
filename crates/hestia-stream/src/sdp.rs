@@ -117,40 +117,29 @@ impl HostSdp {
         (normal, high)
     }
 
-    /// Picks the best format both sides support, like common-c does.
-    pub fn negotiate_video(&self, wanted: &[VideoFormat], server_codec_modes: u32) -> VideoFormat {
+    /// Picks the first offered format supported by the host.
+    pub fn negotiate_video(&self, wanted: &[VideoFormat], server_codec_modes: u32) -> Option<VideoFormat> {
         use hestia_codec_flags::*;
-        let want = |codec: VideoCodec, ten_bit: bool, yuv444: bool| {
-            wanted
-                .iter()
-                .any(|f| f.codec == codec && f.ten_bit == ten_bit && f.yuv444 == yuv444)
-        };
-        let host = |flag: u32| server_codec_modes & flag != 0;
-        let pick = |codec: VideoCodec| -> VideoFormat {
-            let (m10_444, m10, m8_444) = match codec {
-                VideoCodec::Av1 => (SCM_AV1_HIGH10_444, SCM_AV1_MAIN10, SCM_AV1_HIGH8_444),
-                VideoCodec::Hevc => (SCM_HEVC_REXT10_444, SCM_HEVC_MAIN10, SCM_HEVC_REXT8_444),
-                VideoCodec::H264 => (0, 0, SCM_H264_HIGH8_444),
+
+        wanted.iter().copied().find(|format| {
+            let advertised = match format.codec {
+                VideoCodec::H264 => true, // Legacy GameStream hosts always support baseline H.264.
+                VideoCodec::Hevc => self.supports_hevc(),
+                VideoCodec::Av1 => self.supports_av1(),
             };
-            let fmt = |ten_bit, yuv444| VideoFormat { codec, ten_bit, yuv444 };
-            if host(m10_444) && want(codec, true, true) {
-                fmt(true, true)
-            } else if host(m10) && want(codec, true, false) {
-                fmt(true, false)
-            } else if host(m8_444) && want(codec, false, true) {
-                fmt(false, true)
-            } else {
-                fmt(false, false)
-            }
-        };
-        let wants_codec = |codec: VideoCodec| wanted.iter().any(|f| f.codec == codec);
-        if wants_codec(VideoCodec::Av1) && self.supports_av1() {
-            pick(VideoCodec::Av1)
-        } else if wants_codec(VideoCodec::Hevc) && self.supports_hevc() {
-            pick(VideoCodec::Hevc)
-        } else {
-            pick(VideoCodec::H264)
-        }
+            let required_flag = match (format.codec, format.ten_bit, format.yuv444) {
+                (_, false, false) => return advertised,
+                (VideoCodec::H264, false, true) => SCM_H264_HIGH8_444,
+                (VideoCodec::H264, true, _) => return false,
+                (VideoCodec::Hevc, true, true) => SCM_HEVC_REXT10_444,
+                (VideoCodec::Hevc, true, false) => SCM_HEVC_MAIN10,
+                (VideoCodec::Hevc, false, true) => SCM_HEVC_REXT8_444,
+                (VideoCodec::Av1, true, true) => SCM_AV1_HIGH10_444,
+                (VideoCodec::Av1, true, false) => SCM_AV1_MAIN10,
+                (VideoCodec::Av1, false, true) => SCM_AV1_HIGH8_444,
+            };
+            advertised && server_codec_modes & required_flag != 0
+        })
     }
 }
 
@@ -334,7 +323,7 @@ a=fmtp:97 surround-params=88001234567\n";
 
     #[test]
     fn negotiates_codecs() {
-        let sdp = HostSdp::new(HERMES_DESCRIBE);
+        let sdp = HostSdp::new(format!("{HERMES_DESCRIBE}\na=rtpmap:98 AV1/90000\n"));
         let h264 = VideoFormat {
             codec: VideoCodec::H264,
             ten_bit: false,
@@ -345,13 +334,19 @@ a=fmtp:97 surround-params=88001234567\n";
             ten_bit: false,
             yuv444: false,
         };
-        assert_eq!(sdp.negotiate_video(&[h264], 0xffff_ffff), h264);
-        assert_eq!(sdp.negotiate_video(&[hevc, h264], 0xffff_ffff), hevc);
+        let av1 = VideoFormat {
+            codec: VideoCodec::Av1,
+            ..h264
+        };
+        let hevc_main10 = VideoFormat { ten_bit: true, ..hevc };
+        assert_eq!(sdp.negotiate_video(&[h264, hevc, av1], u32::MAX), Some(h264));
+        assert_eq!(sdp.negotiate_video(&[hevc, h264, av1], u32::MAX), Some(hevc));
+        assert_eq!(sdp.negotiate_video(&[av1, h264], u32::MAX), Some(av1));
+        assert_eq!(sdp.negotiate_video(&[hevc_main10, hevc], 0), Some(hevc));
+        assert_eq!(sdp.negotiate_video(&[hevc_main10, hevc], u32::MAX), Some(hevc_main10));
         let plain = HostSdp::new("a=x-ss-general.featureFlags:0\n");
-        assert_eq!(
-            plain.negotiate_video(&[hevc, h264], 0xffff_ffff).codec,
-            VideoCodec::H264
-        );
+        assert_eq!(plain.negotiate_video(&[hevc, h264], u32::MAX), Some(h264));
+        assert_eq!(plain.negotiate_video(&[hevc, av1], u32::MAX), None);
     }
 
     #[test]

@@ -39,7 +39,7 @@ pub mod software_h264;
 
 pub use color::Colorimetry;
 pub use decode::{DecodeStats, DecodingSink, FrameDecoder, FramePresenter, LatencyHistogram, RgbaFrame};
-pub use hestia_stream::sink::{AudioFormat, AudioSink, EncodedFrame, SubmitResult, VideoFormat, VideoSink};
+pub use hestia_stream::sink::{AudioFormat, AudioSink, EncodedFrame, SubmitResult, VideoCodec, VideoFormat, VideoSink};
 
 /// Description of a decoder backend, for settings screens and logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +91,19 @@ pub fn decoder_with(colorimetry: Colorimetry, hardware: bool) -> Result<DecoderC
     }
     #[cfg(not(target_os = "android"))]
     let _ = hardware;
+    software_decoder(colorimetry)
+}
+
+/// Chooses a component already matched by Android to the requested stream mode.
+#[cfg(target_os = "android")]
+pub fn decoder_with_android_capabilities(
+    colorimetry: Colorimetry,
+    candidates: Vec<(VideoCodec, String)>,
+) -> Result<DecoderChoice, String> {
+    if let Some(decoder) = mediacodec::MediaCodecDecoder::with_components(colorimetry, candidates) {
+        let formats = decoder.formats();
+        return Ok((Box::new(decoder), formats));
+    }
     software_decoder(colorimetry)
 }
 
