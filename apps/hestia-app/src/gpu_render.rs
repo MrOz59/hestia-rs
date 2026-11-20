@@ -16,12 +16,17 @@ use std::ffi::{CStr, c_char, c_void};
 use std::num::NonZeroU32;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::ptr;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Instant;
 
-use hestia_media::gpu_video::{GpuPicture, GpuVideo};
+use hestia_media::FrameBuffer;
+use hestia_media::gpu_video::GpuPicture;
 use log::{info, warn};
 use slint::{ComponentHandle, GraphicsAPI, RenderingState};
 
 use crate::AppWindow;
+use crate::presentation::GpuWindow;
 
 #[allow(non_snake_case, dead_code, clippy::upper_case_acronyms)]
 mod ffi {
@@ -631,6 +636,7 @@ impl SavedState {
 /// sampling only our RGBA target texture in the same GL context.
 struct Renderer {
     weak: slint::Weak<AppWindow>,
+    gpu: Arc<GpuWindow>,
     gl: Option<Gl>,
     /// The stream view shows our texture (for this stream, at this size).
     image_set: Option<(u64, (u32, u32))>,
@@ -638,38 +644,45 @@ struct Renderer {
 
 impl Renderer {
     fn setup(&mut self, api: &GraphicsAPI<'_>) {
-        let gpu = GpuVideo::global();
         if !matches!(api, GraphicsAPI::NativeOpenGL { .. }) {
-            gpu.fail("the renderer does not use OpenGL".into());
+            self.gpu.status.fail("the renderer does not use OpenGL".into());
             return;
         }
         match Gl::new() {
             Ok(gl) => {
                 self.gl = Some(gl);
-                gpu.renderer_ready();
+                self.gpu.status.ready();
             }
             Err(e) => {
-                gpu.fail(e);
+                self.gpu.status.fail(e);
             }
         }
     }
 
     fn before_rendering(&mut self) {
-        let gpu = GpuVideo::global();
         let Some(gl) = self.gl.as_mut() else { return };
-        let Some(picture) = gpu.take() else { return };
-        if picture.generation() != gpu.generation() {
+        let Some(presentation) = self.gpu.active() else { return };
+        let Some(frame) = presentation.take_gpu() else { return };
+        let FrameBuffer::Android(picture) = frame.buffer else {
             return;
-        }
+        };
         let result = gl.draw(&picture).and_then(|draw| {
             let fence = gl.release_fence()?;
             Ok((draw, fence))
         });
         match result {
             Ok(((texture, resized), fence)) => {
-                let key = (picture.generation(), (picture.width, picture.height));
-                picture.record_draw();
+                let key = (presentation.generation, (picture.width, picture.height));
+                let now = Instant::now();
+                let stats = &presentation.gpu;
+                stats.ready_to_draw.record(now.duration_since(frame.decoded_at));
+                stats.receive_to_draw.record(now.duration_since(frame.received_at));
+                stats.recovery.record(frame.idr_requested_at, now);
+                stats.drawn.fetch_add(1, Ordering::Relaxed);
                 picture.release(fence);
+                if !presentation.gpu_available() || !self.gpu.is_active(presentation.generation) {
+                    return;
+                }
                 if resized || self.image_set != Some(key) {
                     let Some(id) = NonZeroU32::new(texture) else { return };
                     // SAFETY: a live RGBA texture of this context, of that size.
@@ -689,7 +702,8 @@ impl Renderer {
                 // image. Finish them once before returning it without a fence.
                 // SAFETY: the rendering notifier owns the current GL context.
                 unsafe { glFinish() };
-                gpu.fail(e);
+                self.gpu.status.fail(e);
+                presentation.discard_gpu();
                 self.clear_image();
                 if let Some(mut gl) = self.gl.take() {
                     gl.delete();
@@ -707,7 +721,10 @@ impl Renderer {
     }
 
     fn teardown(&mut self) {
-        GpuVideo::global().renderer_paused();
+        self.gpu.status.pause();
+        if let Some(presentation) = self.gpu.active() {
+            presentation.discard_gpu();
+        }
         self.clear_image();
         if let Some(mut gl) = self.gl.take() {
             gl.delete();
@@ -716,9 +733,10 @@ impl Renderer {
 }
 
 /// Hooks the renderer into the window's rendering (Android).
-pub fn install(ui: &AppWindow) {
+pub(crate) fn install(ui: &AppWindow, gpu: Arc<GpuWindow>) {
     let mut renderer = Renderer {
         weak: ui.as_weak(),
+        gpu,
         gl: None,
         image_set: None,
     };

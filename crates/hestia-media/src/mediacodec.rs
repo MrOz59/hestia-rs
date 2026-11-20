@@ -23,8 +23,8 @@ use std::sync::atomic::Ordering;
 use ndk::hardware_buffer::HardwareBufferUsage;
 
 use crate::color::{Colorimetry, Yuv420, yuv420_to_rgba};
-use crate::decode::{DecodeStats, FrameDecoder, FrameTiming, RgbaFrame};
-use crate::gpu_video::{GpuPicture, GpuSession, GpuVideo, SharedReader};
+use crate::decode::{DecodeStats, DecodedFrame, FrameBuffer, FrameDecoder, FrameTiming};
+use crate::gpu_video::{GpuOutput, GpuPicture, SharedReader};
 use crate::{EncodedFrame, VideoFormat};
 
 /// Bound time spent feeding one frame when the codec is under pressure.
@@ -77,7 +77,6 @@ struct Running {
     /// renders to it); none with buffer output. Shared with the GPU
     /// pictures still out, which must not outlive it.
     images: Option<(Arc<SharedReader>, NativeWindow)>,
-    gpu_session: Option<GpuSession>,
     /// Buffer output's picture layout, from the codec's output format.
     layout: Option<BufferLayout>,
     width: i32,
@@ -110,7 +109,7 @@ pub struct MediaCodecDecoder {
     /// Nothing left to try: every decode reports this.
     fatal: Option<String>,
     stats: Option<Arc<DecodeStats>>,
-    gpu_picture: Option<GpuPicture>,
+    gpu_output: Option<Arc<GpuOutput>>,
     /// Software decoder used when the hardware one can't be set up or its
     /// pictures can't be read (H.264).
     #[cfg(feature = "openh264")]
@@ -125,18 +124,26 @@ impl MediaCodecDecoder {
             .filter(|&codec| MediaCodec::from_decoder_type(mime(codec)).is_some())
             .map(|codec| (codec, None))
             .collect();
-        Self::new(colorimetry, components)
+        Self::new(colorimetry, components, None)
     }
 
-    pub fn with_components(colorimetry: Colorimetry, components: Vec<(VideoCodec, String)>) -> Option<Self> {
+    pub fn with_components(
+        colorimetry: Colorimetry,
+        components: Vec<(VideoCodec, String)>,
+        gpu_output: Option<Arc<GpuOutput>>,
+    ) -> Option<Self> {
         let components = components
             .into_iter()
             .map(|(codec, name)| (codec, Some(name)))
             .collect();
-        Self::new(colorimetry, components)
+        Self::new(colorimetry, components, gpu_output)
     }
 
-    fn new(colorimetry: Colorimetry, components: Vec<(VideoCodec, Option<String>)>) -> Option<Self> {
+    fn new(
+        colorimetry: Colorimetry,
+        components: Vec<(VideoCodec, Option<String>)>,
+        gpu_output: Option<Arc<GpuOutput>>,
+    ) -> Option<Self> {
         (!components.is_empty()).then_some(Self {
             colorimetry,
             components,
@@ -147,7 +154,7 @@ impl MediaCodecDecoder {
             failures: 0,
             fatal: None,
             stats: None,
-            gpu_picture: None,
+            gpu_output,
             #[cfg(feature = "openh264")]
             fallback: None,
         })
@@ -185,11 +192,6 @@ impl MediaCodecDecoder {
             .ok_or_else(|| format!("no decoder for {}", component.unwrap_or(mime)))
         };
         let mut codec = create_codec()?;
-        let gpu_session = if output == Output::Gpu {
-            Some(GpuVideo::global().active_session().ok_or("GPU renderer unavailable")?)
-        } else {
-            None
-        };
         let (w, h) = (width as i32, height as i32);
         let reader = match output {
             // A few buffers: one being drawn, one waiting, the codec's own.
@@ -248,7 +250,6 @@ impl MediaCodecDecoder {
             codec,
             output,
             images,
-            gpu_session,
             layout: None,
             width: w,
             height: h,
@@ -284,7 +285,6 @@ impl MediaCodecDecoder {
 
     fn start_output(&mut self, outputs: &[Output], reason: &str) -> Result<(), String> {
         let (format, width, height, fps) = self.config.ok_or("decoder not configured")?;
-        self.gpu_picture = None;
         self.running = None; // Some devices allow only one decoder at a time.
         self.last_output = None;
         self.last_input = None;
@@ -326,8 +326,13 @@ impl MediaCodecDecoder {
     }
 
     fn fall_back(&mut self, why: &str) -> Result<(), String> {
-        if let Some(session) = self.running.as_ref().and_then(|running| running.gpu_session.as_ref()) {
-            GpuVideo::global().retire_output(session);
+        if self
+            .running
+            .as_ref()
+            .is_some_and(|running| running.output == Output::Gpu)
+            && let Some(output) = &self.gpu_output
+        {
+            output.retire();
         }
         let outputs: &[_] = match self.running.as_ref().map(|r| r.output) {
             Some(Output::Gpu) => &[Output::Images, Output::Buffers],
@@ -376,7 +381,7 @@ impl Running {
     fn drain_buffers(
         &mut self,
         colorimetry: Colorimetry,
-        out: &mut RgbaFrame,
+        out: &mut DecodedFrame,
         stats: Option<&DecodeStats>,
     ) -> Result<Option<FrameTiming>, String> {
         let mut newest = None;
@@ -509,10 +514,9 @@ impl Running {
 
     fn poll_picture(
         &mut self,
-        out: &mut RgbaFrame,
+        out: &mut DecodedFrame,
         colorimetry: Colorimetry,
         stats: Option<&DecodeStats>,
-        gpu_picture: &mut Option<GpuPicture>,
     ) -> Result<Option<FrameTiming>, String> {
         if self.images.is_none() {
             return self.drain_buffers(colorimetry, out, stats);
@@ -543,12 +547,11 @@ impl Running {
             .next_back()
             .expect("matched rendered image");
         record_superseded(stats, index as u64);
-        if let Some(session) = &self.gpu_session {
-            let picture = GpuPicture::new(image, reader.clone(), session, timing)?;
+        if self.output == Output::Gpu {
+            let picture = GpuPicture::new(image, reader.clone())?;
             out.width = picture.width;
             out.height = picture.height;
-            out.on_gpu = true;
-            *gpu_picture = Some(picture);
+            out.buffer = FrameBuffer::Android(picture);
         } else {
             convert(&image, colorimetry, (self.width, self.height), out)?;
         }
@@ -564,7 +567,12 @@ fn record_superseded(stats: Option<&DecodeStats>, count: u64) {
     }
 }
 
-fn convert(image: &Image, colorimetry: Colorimetry, fallback: (i32, i32), out: &mut RgbaFrame) -> Result<(), String> {
+fn convert(
+    image: &Image,
+    colorimetry: Colorimetry,
+    fallback: (i32, i32),
+    out: &mut DecodedFrame,
+) -> Result<(), String> {
     let err = |what: &str, e: ndk::media_error::MediaError| format!("{what}: {e:?}");
     let (width, height) = match image.crop_rect() {
         Ok(r) if r.right > r.left && r.bottom > r.top => (r.right - r.left, r.bottom - r.top),
@@ -594,8 +602,8 @@ fn convert(image: &Image, colorimetry: Colorimetry, fallback: (i32, i32), out: &
     if src.y.len() < src.y_stride * (src.height - 1) + src.width {
         return Err("luma plane smaller than the picture".into());
     }
-    out.reshape(width as u32, height as u32);
-    yuv420_to_rgba(&src, colorimetry, &mut out.data);
+    let pixels = out.reshape(width as u32, height as u32);
+    yuv420_to_rgba(&src, colorimetry, pixels);
     Ok(())
 }
 
@@ -622,8 +630,7 @@ impl FrameDecoder for MediaCodecDecoder {
     fn configure(&mut self, format: VideoFormat, width: u32, height: u32, fps: u32) -> Result<(), String> {
         self.config = Some((format, width, height, fps));
         self.fatal = None;
-        let gpu = GpuVideo::global();
-        let outputs: &[_] = if gpu.active_session().is_some() {
+        let outputs: &[_] = if self.gpu_output.as_ref().is_some_and(|output| output.available()) {
             &[Output::Gpu, Output::Images, Output::Buffers]
         } else {
             &[Output::Images, Output::Buffers]
@@ -635,11 +642,10 @@ impl FrameDecoder for MediaCodecDecoder {
         self.fatal.as_deref()
     }
 
-    fn decode(&mut self, frame: &EncodedFrame, out: &mut RgbaFrame) -> Result<bool, String> {
+    fn decode(&mut self, frame: &EncodedFrame, out: &mut DecodedFrame) -> Result<bool, String> {
         let now = Instant::now();
-        let result = self.decode_timed(frame, out, FrameTiming::new(frame, now, now));
-        self.finish_output(matches!(&result, Ok(Some(_))));
-        result.map(|t| t.is_some())
+        self.decode_timed(frame, out, FrameTiming::new(frame, now, now))
+            .map(|t| t.is_some())
     }
 
     fn attach_stats(&mut self, stats: Arc<DecodeStats>) {
@@ -662,25 +668,16 @@ impl FrameDecoder for MediaCodecDecoder {
         })
     }
 
-    fn drain_output(&mut self, out: &mut RgbaFrame) -> Result<Option<FrameTiming>, String> {
+    fn drain_output(&mut self, out: &mut DecodedFrame) -> Result<Option<FrameTiming>, String> {
         self.check_renderer()?;
         let Some(running) = self.running.as_mut() else {
             return Ok(None);
         };
-        let result = running.poll_picture(out, self.colorimetry, self.stats.as_deref(), &mut self.gpu_picture);
+        let result = running.poll_picture(out, self.colorimetry, self.stats.as_deref());
         self.observe_output(result, false)
     }
 
-    fn finish_output(&mut self, publish: bool) {
-        if let Some(picture) = self.gpu_picture.take()
-            && publish
-        {
-            GpuVideo::global().put(picture);
-        }
-    }
-
     fn reset(&mut self) -> Result<(), String> {
-        self.gpu_picture = None;
         #[cfg(feature = "openh264")]
         if let Some(software) = &mut self.fallback {
             return software.reset();
@@ -701,7 +698,7 @@ impl FrameDecoder for MediaCodecDecoder {
     fn decode_timed(
         &mut self,
         frame: &EncodedFrame,
-        out: &mut RgbaFrame,
+        out: &mut DecodedFrame,
         timing: FrameTiming,
     ) -> Result<Option<FrameTiming>, String> {
         #[cfg(feature = "openh264")]
@@ -728,7 +725,7 @@ impl FrameDecoder for MediaCodecDecoder {
 impl MediaCodecDecoder {
     fn check_renderer(&mut self) -> Result<(), String> {
         if self.running.as_ref().is_some_and(|r| r.output == Output::Gpu)
-            && let Some(why) = GpuVideo::global().failure()
+            && let Some(why) = self.gpu_output.as_ref().and_then(|output| output.failure())
         {
             self.fall_back(&format!("GPU renderer: {why}"))?;
             return Err("switched video output; waiting for a keyframe".into());
@@ -764,7 +761,7 @@ impl MediaCodecDecoder {
     fn running_decode(
         &mut self,
         frame: &EncodedFrame,
-        out: &mut RgbaFrame,
+        out: &mut DecodedFrame,
         timing: FrameTiming,
     ) -> Result<Option<FrameTiming>, String> {
         let running = self.running.as_mut().ok_or("decoder not configured")?;
@@ -778,9 +775,7 @@ impl MediaCodecDecoder {
             loop {
                 // Release output while waiting for input capacity. Some codecs
                 // cannot make progress until the client returns a buffer.
-                picture = running
-                    .poll_picture(out, self.colorimetry, stats, &mut self.gpu_picture)?
-                    .or(picture);
+                picture = running.poll_picture(out, self.colorimetry, stats)?.or(picture);
                 let wait = deadline.saturating_duration_since(Instant::now()).min(INPUT_RETRY);
                 if running.feed(&frame.data, timing, wait)? {
                     break;
@@ -793,9 +788,7 @@ impl MediaCodecDecoder {
                 }
             }
         }
-        Ok(running
-            .poll_picture(out, self.colorimetry, stats, &mut self.gpu_picture)?
-            .or(picture))
+        Ok(running.poll_picture(out, self.colorimetry, stats)?.or(picture))
     }
 }
 
@@ -916,10 +909,10 @@ impl BufferLayout {
         })
     }
 
-    fn convert(&self, data: &[u8], colorimetry: Colorimetry, out: &mut RgbaFrame) -> Result<(), String> {
+    fn convert(&self, data: &[u8], colorimetry: Colorimetry, out: &mut DecodedFrame) -> Result<(), String> {
         let planes = self.planes(data)?;
-        out.reshape(self.width as u32, self.height as u32);
-        yuv420_to_rgba(&planes, colorimetry, &mut out.data);
+        let pixels = out.reshape(self.width as u32, self.height as u32);
+        yuv420_to_rgba(&planes, colorimetry, pixels);
         Ok(())
     }
 }

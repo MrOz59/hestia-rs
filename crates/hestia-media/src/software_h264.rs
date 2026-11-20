@@ -10,7 +10,7 @@ use openh264::decoder::Decoder;
 use openh264::formats::YUVSource;
 
 use crate::color::{Colorimetry, I420, i420_to_rgba};
-use crate::decode::{FrameDecoder, FrameTiming, RgbaFrame};
+use crate::decode::{DecodedFrame, FrameDecoder, FrameTiming};
 
 pub struct OpenH264Decoder {
     decoder: Decoder,
@@ -44,7 +44,7 @@ impl FrameDecoder for OpenH264Decoder {
         format.codec == VideoCodec::H264 && !format.ten_bit && !format.yuv444
     }
 
-    fn decode(&mut self, frame: &EncodedFrame, out: &mut RgbaFrame) -> Result<bool, String> {
+    fn decode(&mut self, frame: &EncodedFrame, out: &mut DecodedFrame) -> Result<bool, String> {
         let now = Instant::now();
         self.decode_timed(frame, out, FrameTiming::new(frame, now, now))
             .map(|t| t.is_some())
@@ -58,7 +58,7 @@ impl FrameDecoder for OpenH264Decoder {
     fn decode_timed(
         &mut self,
         frame: &EncodedFrame,
-        out: &mut RgbaFrame,
+        out: &mut DecodedFrame,
         mut timing: FrameTiming,
     ) -> Result<Option<FrameTiming>, String> {
         // One access unit (SPS/PPS + slice for IDRs) per call; the host sends
@@ -71,7 +71,7 @@ impl FrameDecoder for OpenH264Decoder {
         timing.codec_output_at = Instant::now();
         let (width, height) = yuv.dimensions();
         let (y_stride, uv_stride, _) = yuv.strides();
-        out.reshape(width as u32, height as u32);
+        let pixels = out.reshape(width as u32, height as u32);
         i420_to_rgba(
             &I420 {
                 y: yuv.y(),
@@ -83,7 +83,7 @@ impl FrameDecoder for OpenH264Decoder {
                 height,
             },
             self.colorimetry,
-            &mut out.data,
+            pixels,
         );
         Ok(Some(timing))
     }

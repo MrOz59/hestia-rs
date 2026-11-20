@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use hestia_media::software_h264::OpenH264Decoder;
-use hestia_media::{Colorimetry, DecodingSink, FrameDecoder, RgbaFrame};
+use hestia_media::{Colorimetry, DecodedFrame, DecodingSink, FrameDecoder};
 use hestia_stream::{EncodedFrame, VideoSink};
 
 const CLIP: &[u8] = include_bytes!("data/red-blue-64x36-high.h264");
@@ -60,9 +60,9 @@ fn frame(n: u32, data: Vec<u8>, keyframe: bool) -> EncodedFrame {
     }
 }
 
-fn pixel(f: &RgbaFrame, x: usize, y: usize) -> [u8; 4] {
+fn pixel(f: &DecodedFrame, x: usize, y: usize) -> [u8; 4] {
     let o = (y * f.width as usize + x) * 4;
-    f.data[o..o + 4].try_into().unwrap()
+    f.rgba().unwrap()[o..o + 4].try_into().unwrap()
 }
 
 fn near(a: [u8; 4], b: [u8; 3]) -> bool {
@@ -80,7 +80,7 @@ fn splits_the_fixture() {
 #[test]
 fn decodes_high_profile_to_rgba() {
     let mut decoder = OpenH264Decoder::new(Colorimetry::Bt601Limited).expect("decoder");
-    let mut out = RgbaFrame::default();
+    let mut out = DecodedFrame::default();
     for (n, (data, key)) in access_units(CLIP).into_iter().enumerate() {
         let got = decoder.decode(&frame(n as u32, data, key), &mut out).expect("decode");
         assert!(got, "frame {n} produced no picture (no-delay decoding)");
@@ -107,7 +107,7 @@ fn decoding_sink_presents_every_frame() {
     let s = shown.clone();
     let mut sink = DecodingSink::new(
         Box::new(decoder),
-        Box::new(move |f: &RgbaFrame| {
+        Box::new(move |f: &DecodedFrame| {
             s.lock()
                 .unwrap()
                 .push((f.frame_number, f.width, f.height, pixel(f, 8, 18)))

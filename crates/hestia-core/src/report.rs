@@ -21,6 +21,45 @@ const MAX_STAT_ROWS: usize = 600;
 /// would otherwise push everything else out of a shared report.
 const MAX_SIMILAR_LOG_LINES: usize = 4;
 
+/// Final video and recovery counters, captured after the session stops.
+#[derive(Debug, Clone, Copy)]
+pub struct VideoTransportStats {
+    packets: u64,
+    frames: u64,
+    lost_frames: u64,
+    dropped_waiting_idr: u64,
+    recovered: u64,
+    loss_requests: u64,
+    decoder_requests: u64,
+    silence_requests: u64,
+    retries: u64,
+    send_errors: u64,
+    keyframes_received: u64,
+    request_to_keyframe_us: u64,
+    max_request_to_keyframe_us: u64,
+}
+
+impl From<&VideoCounters> for VideoTransportStats {
+    fn from(video: &VideoCounters) -> Self {
+        let recovery = &video.recovery;
+        Self {
+            packets: video.packets.load(Ordering::Relaxed),
+            frames: video.frames.load(Ordering::Relaxed),
+            lost_frames: video.lost_frames.load(Ordering::Relaxed),
+            dropped_waiting_idr: video.dropped_waiting_idr.load(Ordering::Relaxed),
+            recovered: video.recovered.load(Ordering::Relaxed),
+            loss_requests: recovery.loss_requests.load(Ordering::Relaxed),
+            decoder_requests: recovery.decoder_requests.load(Ordering::Relaxed),
+            silence_requests: recovery.silence_requests.load(Ordering::Relaxed),
+            retries: recovery.retries.load(Ordering::Relaxed),
+            send_errors: recovery.send_errors.load(Ordering::Relaxed),
+            keyframes_received: recovery.keyframes_received.load(Ordering::Relaxed),
+            request_to_keyframe_us: recovery.request_to_keyframe_us.load(Ordering::Relaxed),
+            max_request_to_keyframe_us: recovery.max_request_to_keyframe_us.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// One second of stream statistics.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct StatsSample {
@@ -167,28 +206,27 @@ impl StreamReport {
         self.decoder_totals = Some((decoded, time_us, dropped));
     }
 
-    pub fn video_transport(&mut self, video: &VideoCounters) {
-        let recovery = &video.recovery;
+    pub fn video_transport(&mut self, video: &VideoTransportStats) {
         let values = [
-            ("UDP packets received", &video.packets),
-            ("frames assembled and submitted", &video.frames),
-            ("frames lost during assembly", &video.lost_frames),
-            ("complete frames skipped waiting for IDR", &video.dropped_waiting_idr),
-            ("packets recovered by FEC", &video.recovered),
-            ("IDR requests from assembly loss", &recovery.loss_requests),
-            ("IDR requests from decoder", &recovery.decoder_requests),
-            ("IDR probes after video silence", &recovery.silence_requests),
-            ("IDR retries", &recovery.retries),
-            ("automatic IDR control send errors", &recovery.send_errors),
-            ("automatic recoveries with a keyframe", &recovery.keyframes_received),
+            ("UDP packets received", video.packets),
+            ("frames assembled and submitted", video.frames),
+            ("frames lost during assembly", video.lost_frames),
+            ("complete frames skipped waiting for IDR", video.dropped_waiting_idr),
+            ("packets recovered by FEC", video.recovered),
+            ("IDR requests from assembly loss", video.loss_requests),
+            ("IDR requests from decoder", video.decoder_requests),
+            ("IDR probes after video silence", video.silence_requests),
+            ("IDR retries", video.retries),
+            ("automatic IDR control send errors", video.send_errors),
+            ("automatic recoveries with a keyframe", video.keyframes_received),
         ];
         for (label, value) in values {
-            self.field("Video transport and recovery", label, value.load(Ordering::Relaxed));
+            self.field("Video transport and recovery", label, value);
         }
-        let recovered = recovery.keyframes_received.load(Ordering::Relaxed);
+        let recovered = video.keyframes_received;
         if recovered > 0 {
-            let mean = recovery.request_to_keyframe_us.load(Ordering::Relaxed) as f64 / recovered as f64 / 1000.0;
-            let max = recovery.max_request_to_keyframe_us.load(Ordering::Relaxed) as f64 / 1000.0;
+            let mean = video.request_to_keyframe_us as f64 / recovered as f64 / 1000.0;
+            let max = video.max_request_to_keyframe_us as f64 / 1000.0;
             self.field(
                 "Video transport and recovery",
                 "IDR request to assembled keyframe",
