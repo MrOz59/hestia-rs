@@ -1,0 +1,722 @@
+// Building blocks shared by the pages: the top bar, settings-style groups
+// and rows, and the option list. Rows take the whole line as their target:
+// up / down (D-pad) move between rows, left / right change the value, and
+// Return / the D-pad centre opens or toggles it.
+
+import { Theme, Icon, Focusable, ActionButton, IconButton, Toggle, TextField, Modal, DialogTitle } from "theme.slint";
+
+// Title and an optional note, left of a row's control.
+export component RowText inherits VerticalLayout {
+    in property <string> label;
+    in property <string> hint;
+    in property <color> tone: Theme.text;
+    alignment: center;
+    spacing: 3px;
+    Text {
+        text: root.label;
+        color: root.tone;
+        font-size: Theme.heading-size;
+        font-weight: 600;
+        wrap: word-wrap;
+    }
+    if root.hint != "": Text {
+        text: root.hint;
+        color: Theme.muted;
+        font-size: Theme.caption-size;
+        wrap: word-wrap;
+    }
+}
+
+// The look shared by every row: quiet until hovered, an ember outline and
+// glow when focused.
+export component RowBase inherits Focusable {
+    border-radius: Theme.radius - 5px;
+    background: root.pressed ? Theme.border : (root.focused || root.hovered ? Theme.card-hover : Theme.card.transparentize(1));
+    border-width: root.focused ? 2px : 0px;
+    border-color: Theme.accent;
+    drop-shadow-blur: root.focused ? 18px : 0px;
+    drop-shadow-color: Theme.glow;
+    animate background { duration: 120ms; }
+    animate drop-shadow-blur { duration: 160ms; }
+}
+
+// A titled block of rows.
+export component Group inherits VerticalLayout {
+    in property <string> title;
+    spacing: 8px;
+    if root.title != "": Text {
+        text: root.title;
+        color: Theme.muted;
+        font-size: Theme.body-size;
+        font-weight: 600;
+    }
+    Rectangle {
+        height: rows.preferred-height;
+        border-radius: Theme.radius;
+        background: Theme.card;
+        border-width: 1px;
+        border-color: Theme.border.transparentize(0.5);
+        rows := VerticalLayout {
+            padding: 4px;
+            spacing: 2px;
+            @children
+        }
+    }
+}
+
+export component SwitchRow inherits RowBase {
+    in property <string> label;
+    in property <string> hint;
+    in-out property <bool> checked;
+    callback toggled(bool);
+
+    accessible-role: checkbox;
+    accessible-label: root.label;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    height: body.preferred-height;
+    clicked => {
+        root.checked = !root.checked;
+        root.toggled(root.checked);
+    }
+    key(k) => {
+        if (k == Key.RightArrow || k == Key.LeftArrow) {
+            if ((k == Key.RightArrow) != root.checked) {
+                root.checked = k == Key.RightArrow;
+                root.toggled(root.checked);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    body := HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 14px;
+        padding-top: 12px;
+        padding-bottom: 12px;
+        spacing: 16px;
+        RowText {
+            horizontal-stretch: 1;
+            label: root.label;
+            hint: root.hint;
+        }
+        VerticalLayout {
+            alignment: center;
+            Toggle {
+                on: root.checked;
+            }
+        }
+    }
+}
+
+// One value out of a list: left / right step through it, Return or a tap
+// opens the whole list (`open`).
+export component ChoiceRow inherits RowBase {
+    in property <string> label;
+    in property <string> hint;
+    in property <[string]> options;
+    in-out property <int> index;
+    // The user stepped to another value with left / right.
+    callback picked(int);
+    callback open();
+
+    accessible-role: combobox;
+    accessible-label: root.label;
+    accessible-value: root.options[root.index];
+    height: body.preferred-height;
+    clicked => {
+        root.open();
+    }
+    key(k) => {
+        if (k == Key.LeftArrow && root.index > 0) {
+            root.index -= 1;
+            root.picked(root.index);
+            return true;
+        }
+        if (k == Key.RightArrow && root.index < root.options.length - 1) {
+            root.index += 1;
+            root.picked(root.index);
+            return true;
+        }
+        return k == Key.LeftArrow || k == Key.RightArrow;
+    }
+
+    body := HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 10px;
+        padding-top: 12px;
+        padding-bottom: 12px;
+        spacing: 12px;
+        RowText {
+            horizontal-stretch: 1;
+            label: root.label;
+            hint: root.hint;
+        }
+        HorizontalLayout {
+            horizontal-stretch: 0;
+            spacing: 2px;
+            if root.focused: VerticalLayout {
+                alignment: center;
+                Icon {
+                    name: "chevron-left";
+                    tint: root.index > 0 ? Theme.accent : Theme.faint;
+                }
+            }
+            Text {
+                max-width: root.width * 0.42;
+                text: root.options[root.index];
+                color: Theme.text;
+                font-size: Theme.body-size;
+                font-weight: 600;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+                overflow: elide;
+            }
+            VerticalLayout {
+                alignment: center;
+                Icon {
+                    name: root.focused ? "chevron-right" : "expand";
+                    tint: root.focused ? (root.index < root.options.length - 1 ? Theme.accent : Theme.faint) : Theme.muted;
+                }
+            }
+        }
+    }
+}
+
+// A number on a track: drag it, or left / right in steps.
+export component SliderRow inherits RowBase {
+    in property <string> label;
+    in property <string> hint;
+    in property <string> value-text;
+    in property <float> minimum: 0;
+    in property <float> maximum: 100;
+    // Dragging snaps to `step`; the arrow keys move by `key-step`.
+    in property <float> step: 1;
+    in property <float> key-step: 1;
+    in-out property <float> value;
+    callback moved(float);
+
+    property <float> ratio: Math.max(0, Math.min(1, (root.value - root.minimum) / (root.maximum - root.minimum)));
+
+    pure function snap(v: float) -> float {
+        return Math.max(root.minimum, Math.min(root.maximum, Math.round(v / root.step) * root.step));
+    }
+    function apply-value(v: float) {
+        if (root.snap(v) != root.value) {
+            root.value = root.snap(v);
+            root.moved(root.value);
+        }
+    }
+    function apply-at(x: length, w: length) {
+        root.apply-value(root.minimum + Math.max(0, Math.min(1, (x - 12px) / (w - 24px))) * (root.maximum - root.minimum));
+    }
+
+    accessible-role: slider;
+    accessible-label: root.label;
+    accessible-value: root.value-text;
+    height: body.preferred-height;
+    key(k) => {
+        if (k == Key.LeftArrow) {
+            root.apply-value(root.value - root.key-step);
+            return true;
+        }
+        if (k == Key.RightArrow) {
+            root.apply-value(root.value + root.key-step);
+            return true;
+        }
+        return false;
+    }
+
+    body := VerticalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 12px;
+        padding-bottom: 10px;
+        spacing: 6px;
+        HorizontalLayout {
+            spacing: 16px;
+            RowText {
+                horizontal-stretch: 1;
+                label: root.label;
+                hint: root.hint;
+            }
+            Text {
+                text: root.value-text;
+                color: Theme.accent;
+                font-size: Theme.heading-size;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
+        Rectangle {
+            height: 32px;
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                height: 6px;
+                border-radius: 3px;
+                background: Theme.bg;
+            }
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                width: knob.x + knob.width / 2;
+                height: 6px;
+                border-radius: 3px;
+                background: Theme.accent;
+            }
+            knob := Rectangle {
+                width: 24px;
+                height: 24px;
+                y: (parent.height - self.height) / 2;
+                x: root.ratio * (parent.width - self.width);
+                border-radius: 12px;
+                background: Theme.text;
+                border-width: root.focused || track.pressed ? 4px : 0px;
+                border-color: Theme.accent;
+                animate border-width { duration: 120ms; }
+            }
+            track := TouchArea {
+                mouse-cursor: pointer;
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down) {
+                        root.apply-at(self.mouse-x, self.width);
+                    }
+                }
+                moved => {
+                    if (self.pressed) {
+                        root.apply-at(self.mouse-x, self.width);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A row that does something when pressed (opens a page, runs a command).
+export component ActionRow inherits RowBase {
+    in property <string> label;
+    in property <string> hint;
+    in property <string> icon;
+    // Short text at the end ("Run", "Open").
+    in property <string> value;
+    in property <bool> danger: false;
+    in property <bool> highlight: false;
+
+    accessible-role: button;
+    accessible-label: root.label;
+    height: body.preferred-height;
+    opacity: root.enabled ? 1.0 : 0.45;
+
+    body := HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 12px;
+        padding-top: 12px;
+        padding-bottom: 12px;
+        spacing: 14px;
+        if root.icon != "": VerticalLayout {
+            alignment: center;
+            Icon {
+                name: root.icon;
+                tint: root.danger ? Theme.danger : Theme.muted;
+            }
+        }
+        RowText {
+            horizontal-stretch: 1;
+            label: root.label;
+            hint: root.hint;
+            tone: root.danger ? Theme.danger : Theme.text;
+        }
+        if root.value != "": VerticalLayout {
+            alignment: center;
+            Rectangle {
+                height: 30px;
+                width: value-text.preferred-width + 26px;
+                border-radius: 15px;
+                background: root.highlight ? Theme.accent : (root.danger ? Theme.danger.transparentize(0.85) : Theme.bg);
+                value-text := Text {
+                    text: root.value;
+                    color: root.highlight ? Theme.on-accent : (root.danger ? Theme.danger : Theme.text);
+                    font-size: Theme.caption-size;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        if root.value == "": VerticalLayout {
+            alignment: center;
+            Icon {
+                name: "chevron-right";
+                tint: root.focused ? Theme.accent : Theme.faint;
+            }
+        }
+    }
+}
+
+// Read-only content the remote can still scroll to (About, diagnostics).
+export component InfoRow inherits RowBase {
+    height: info.preferred-height;
+    info := VerticalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 12px;
+        padding-bottom: 12px;
+        spacing: 4px;
+        @children
+    }
+}
+
+// A label, a text box and a button that sends what was typed (Return in
+// the box does the same). The box empties afterwards.
+export component FieldRow inherits Rectangle {
+    in property <string> label;
+    in property <string> hint;
+    in property <string> placeholder;
+    in property <string> action: "Save";
+    in property <InputType> input-type: InputType.text;
+    in-out property <string> text;
+    in property <bool> want-focus;
+    callback submit(string);
+    callback nav(string) -> bool;
+    callback entered();
+
+    function send() {
+        if (root.text != "") {
+            root.submit(root.text);
+            root.text = "";
+        }
+    }
+
+    height: body.preferred-height;
+    body := VerticalLayout {
+        padding-left: 16px;
+        padding-right: 12px;
+        padding-top: 12px;
+        padding-bottom: 12px;
+        spacing: 10px;
+        RowText {
+            label: root.label;
+            hint: root.hint;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            TextField {
+                horizontal-stretch: 1;
+                placeholder: root.placeholder;
+                input-type: root.input-type;
+                text <=> root.text;
+                want-focus: root.want-focus;
+                nav(k) => {
+                    return root.nav(k);
+                }
+                entered => {
+                    root.entered();
+                }
+                accepted(t) => {
+                    root.send();
+                }
+            }
+            ActionButton {
+                text: root.action;
+                enabled: root.text != "";
+                clicked => {
+                    root.send();
+                }
+            }
+        }
+    }
+}
+
+// A saved profile: Return loads it; right moves to Delete, which wants a
+// second press.
+export component ProfileRow inherits RowBase {
+    in property <string> name;
+    callback load();
+    callback remove();
+
+    property <bool> on-delete;
+    property <bool> armed;
+
+    function press-delete() {
+        if (root.armed) {
+            root.armed = false;
+            root.remove();
+        } else {
+            root.armed = true;
+        }
+    }
+
+    accessible-role: button;
+    accessible-label: root.name;
+    height: body.preferred-height;
+    changed focused => {
+        if (!root.focused) {
+            root.on-delete = false;
+        }
+    }
+    clicked => {
+        if (root.on-delete) {
+            root.press-delete();
+        } else {
+            root.load();
+        }
+    }
+    key(k) => {
+        if (k == Key.RightArrow && !root.on-delete) {
+            root.on-delete = true;
+            return true;
+        }
+        if (k == Key.LeftArrow && root.on-delete) {
+            root.on-delete = false;
+            root.armed = false;
+            return true;
+        }
+        return k == Key.LeftArrow || k == Key.RightArrow;
+    }
+    Timer {
+        interval: 4s;
+        running: root.armed;
+        triggered => {
+            root.armed = false;
+        }
+    }
+
+    body := HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 8px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 10px;
+        RowText {
+            horizontal-stretch: 1;
+            label: root.name;
+            hint: root.armed ? "Press Delete again to remove it" : "Load it into this page";
+        }
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                height: 34px;
+                width: del-text.preferred-width + 28px;
+                border-radius: 17px;
+                background: root.armed ? Theme.danger : (root.on-delete || del-touch.has-hover ? Theme.danger.transparentize(0.75) : Theme.bg);
+                border-width: root.on-delete ? 2px : 0px;
+                border-color: Theme.danger;
+                animate background { duration: 120ms; }
+                del-text := Text {
+                    text: root.armed ? "Delete?" : "Delete";
+                    color: root.armed ? Theme.on-accent : Theme.danger;
+                    font-size: Theme.caption-size;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                del-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.press-delete();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// One entry of an option list.
+component OptionItem inherits Focusable {
+    in property <string> text;
+    in property <bool> selected;
+
+    accessible-role: button;
+    accessible-label: root.text;
+    height: Theme.control-height + 4px;
+    border-radius: Theme.radius-sm;
+    background: root.pressed ? Theme.border : (root.focused || root.hovered ? Theme.card-hover : Theme.card.transparentize(1));
+    border-width: root.focused ? 2px : 0px;
+    border-color: Theme.accent;
+    drop-shadow-blur: root.focused ? 14px : 0px;
+    drop-shadow-color: Theme.glow;
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 12px;
+        spacing: 12px;
+        Text {
+            horizontal-stretch: 1;
+            text: root.text;
+            color: root.selected ? Theme.accent : Theme.text;
+            font-size: Theme.body-size + 1px;
+            font-weight: root.selected ? 700 : 500;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if root.selected: VerticalLayout {
+            alignment: center;
+            Icon {
+                name: "check";
+                tint: Theme.accent;
+            }
+        }
+    }
+}
+
+// Pick one value out of a list, in a dialog (a sheet on phones). Opens on
+// the current value; up / down and Return, or a tap.
+export component OptionSheet inherits Rectangle {
+    in property <string> title;
+    in property <[string]> options;
+    in property <int> current;
+    callback picked(int);
+    callback dismissed();
+
+    property <int> hi: root.current;
+
+    Modal {
+        width: 100%;
+        height: 100%;
+        card-width: 420px;
+        dismissed => {
+            root.dismissed();
+        }
+        DialogTitle {
+            text: root.title;
+        }
+        list := Flickable {
+            height: Math.min(opts.preferred-height, Theme.window-height - 180px);
+            content-height: opts.preferred-height;
+            opts := VerticalLayout {
+                width: list.width;
+                spacing: 2px;
+                for option[i] in root.options: OptionItem {
+                    text: option;
+                    selected: i == root.current;
+                    want-focus: i == root.hi;
+                    nav(k) => {
+                        if (k == Key.UpArrow && i > 0) {
+                            root.hi = i - 1;
+                            return true;
+                        }
+                        if (k == Key.DownArrow && i < root.options.length - 1) {
+                            root.hi = i + 1;
+                            return true;
+                        }
+                        if (k == Key.Back || k == Key.Escape) {
+                            root.dismissed();
+                            return true;
+                        }
+                        return k == Key.UpArrow || k == Key.DownArrow || k == Key.LeftArrow || k == Key.RightArrow;
+                    }
+                    entered => {
+                        root.hi = i;
+                    }
+                    clicked => {
+                        root.picked(i);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Page title with a back button and the page's actions (children) on the
+// right.
+export component TopBar inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> show-back: true;
+    in property <bool> back-focus;
+    callback back();
+    callback back-nav(string) -> bool;
+    callback back-entered();
+
+    height: bar.preferred-height;
+    bar := HorizontalLayout {
+        padding-left: root.show-back ? Math.max(8px, Theme.page-padding - 10px) : Theme.page-padding;
+        padding-right: Theme.page-padding;
+        padding-top: Theme.compact ? 8px : (Theme.short ? 12px : 22px);
+        padding-bottom: Theme.compact ? 8px : (Theme.short ? 8px : 14px);
+        spacing: Theme.compact ? 4px : 10px;
+        if root.show-back: VerticalLayout {
+            alignment: center;
+            IconButton {
+                icon: "back";
+                label: "Back";
+                want-focus: root.back-focus;
+                nav(k) => {
+                    return root.back-nav(k);
+                }
+                entered => {
+                    root.back-entered();
+                }
+                clicked => {
+                    root.back();
+                }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            padding-left: root.show-back ? 4px : 0px;
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: Theme.compact ? 23px : (Theme.short ? 25px : 30px);
+                font-weight: 700;
+                overflow: elide;
+            }
+            if root.subtitle != "": Text {
+                text: root.subtitle;
+                color: Theme.muted;
+                font-size: Theme.body-size;
+                overflow: elide;
+            }
+        }
+        @children
+    }
+}
+
+// Placeholder for an empty list or a page without content yet.
+export component EmptyState inherits VerticalLayout {
+    in property <string> icon;
+    in property <string> title;
+    in property <string> text;
+    alignment: center;
+    spacing: 10px;
+    padding: 32px;
+    HorizontalLayout {
+        alignment: center;
+        Rectangle {
+            width: 72px;
+            height: 72px;
+            border-radius: 36px;
+            background: Theme.accent.transparentize(0.88);
+            Icon {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 34px;
+                height: 34px;
+                name: root.icon;
+                tint: Theme.accent;
+            }
+        }
+    }
+    Text {
+        text: root.title;
+        color: Theme.text;
+        font-size: Theme.title-size;
+        font-weight: 700;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+    HorizontalLayout {
+        alignment: center;
+        Text {
+            max-width: 440px;
+            text: root.text;
+            color: Theme.muted;
+            font-size: Theme.body-size;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+    @children
+}

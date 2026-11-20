@@ -1,28 +1,64 @@
-// Visual language: dark, warm "hearth" accent (Hestia), soft cards.
+// Hestia's visual language, "hearth": warm soot surfaces, a single ember
+// accent and focus that glows like an ember, so a TV remote, a keyboard or
+// a game controller always shows where it is. Every control here works with
+// touch, the mouse and the arrow keys / D-pad alike.
+
+import "../fonts/Outfit-Regular.ttf";
+import "../fonts/Outfit-Medium.ttf";
+import "../fonts/Outfit-SemiBold.ttf";
+import "../fonts/Outfit-Bold.ttf";
+
+// Back pressed and handled somewhere: the window keeps its release too
+// (Android would otherwise act on the release and close the app).
+export global Nav {
+    in-out property <bool> back-taken;
+}
 
 export global Theme {
-    out property <color> bg: #0d0f13;
-    out property <color> surface: #14171d;
-    out property <color> card: #1a1e26;
-    out property <color> card-hover: #222733;
-    out property <color> border: #282e3b;
-    out property <color> text: #eceef3;
-    out property <color> muted: #8e95a3;
-    out property <color> accent: #ff7a3d;
-    out property <color> accent-hover: #ff9160;
-    out property <color> on-accent: #1d0f07;
-    out property <color> ok: #3ecf8e;
-    out property <color> warn: #f2b33d;
-    out property <color> danger: #f06262;
-    out property <color> info: #8ab4ff;
-    out property <length> radius: 16px;
+    // Palette
+    out property <color> bg: #110e0c;           // soot
+    out property <color> surface: #1a1613;      // ash: bars, sheets, menus
+    out property <color> card: #231e1a;         // coal: groups, tiles
+    out property <color> card-hover: #2e2823;
+    out property <color> border: #3b332c;       // seams
+    out property <color> text: #f5eee8;         // bone
+    out property <color> muted: #ab9f95;        // smoke
+    out property <color> faint: #71675f;        // cinder
+    out property <color> accent: #ff7a2e;       // ember
+    out property <color> accent-hover: #ff9a57;
+    out property <color> accent-pressed: #e3631d;
+    out property <color> on-accent: #1f0c02;
+    out property <color> glow: #ff7a2e80;
+    out property <color> ok: #67d491;
+    out property <color> warn: #f5b43f;
+    out property <color> danger: #ff6868;
+    out property <color> info: #9ec5ea;
+    out property <color> scrim: #0a0807c8;
+    out property <string> font: "Outfit";
 
-    // Phones and narrow windows: set by the window from its width.
-    in-out property <bool> compact: false;
-    out property <length> page-padding: compact ? 16px : 20px;
-    // Touch targets: 48px (Material minimum) on phones.
-    out property <length> control-height: compact ? 48px : 40px;
-    out property <length> body-size: compact ? 15px : 14px;
+    // The window's size (set by the window). Phones in portrait are
+    // compact; desktops are wide; landscape phones and TVs (960 × 540 dp)
+    // are short.
+    in-out property <length> window-width: 1180px;
+    in-out property <length> window-height: 760px;
+    out property <bool> compact: root.window-width < 600px;
+    out property <bool> wide: root.window-width >= 1024px;
+    out property <bool> short: root.window-height < 600px;
+
+    // Spacing
+    out property <length> page-padding: root.compact ? 16px : (root.wide ? 40px : 28px);
+    out property <length> gap: root.compact ? 12px : 18px;
+    // Touch targets: 48px on phones.
+    out property <length> control-height: root.compact ? 48px : 44px;
+    out property <length> radius: 18px;
+    out property <length> radius-sm: 12px;
+
+    // Type scale (Outfit)
+    out property <length> display-size: root.compact || root.short ? 26px : 32px;
+    out property <length> title-size: root.compact ? 19px : 21px;
+    out property <length> heading-size: root.compact ? 16px : 15px;
+    out property <length> body-size: root.compact ? 15px : 14px;
+    out property <length> caption-size: root.compact ? 13px : 12px;
 }
 
 // Material Icons (Apache License 2.0), 24x24 view box.
@@ -43,6 +79,7 @@ export component Icon inherits Path {
         : root.name == "stop" ? "M6 6h12v12H6z"
         : root.name == "logout" ? "M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"
         : root.name == "fullscreen" ? "M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"
+        : root.name == "fullscreen-exit" ? "M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"
         : root.name == "stats" ? "M5 9.2h3V19H5zM10.6 5h2.8v14h-2.8zm5.6 8H19v6h-2.8z"
         : root.name == "delete" ? "M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"
         : root.name == "keyboard" ? "M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z"
@@ -51,21 +88,50 @@ export component Icon inherits Path {
         : root.name == "play" ? "M8 5v14l11-7z"
         : root.name == "clipboard" ? "M19 2h-4.18C14.4.84 13.3 0 12 0c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm7 18H5V4h2v3h10V4h2v16z"
         : root.name == "monitor" ? "M21 2H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h7v2H8v2h8v-2h-2v-2h7c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H3V4h18v12z"
+        : root.name == "flame" ? "M13.5.67s.74 2.65.74 4.8c0 2.06-1.35 3.73-3.41 3.73-2.07 0-3.63-1.67-3.63-3.73l.03-.36C5.21 7.51 4 10.62 4 14c0 4.42 3.58 8 8 8s8-3.58 8-8C20 8.61 17.41 3.8 13.5.67zM11.71 19c-1.78 0-3.22-1.4-3.22-3.14 0-1.62 1.05-2.76 2.81-3.12 1.77-.36 3.6-1.21 4.62-2.58.39 1.29.59 2.65.59 4.04 0 2.65-2.15 4.8-4.8 4.8z"
+        : root.name == "check" ? "M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"
+        : root.name == "chevron-left" ? "M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"
+        : root.name == "chevron-right" ? "M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"
+        : root.name == "expand" ? "M16.59 8.59L12 13.17 7.41 8.59 6 10l6 6 6-6z"
+        : root.name == "open" ? "M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"
+        : root.name == "share" ? "M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"
+        : root.name == "gamepad" ? "M21.58 16.09l-1.09-7.66C20.21 6.46 18.52 5 16.53 5H7.47C5.48 5 3.79 6.46 3.51 8.43l-1.09 7.66C2.2 17.63 3.39 19 4.94 19c.68 0 1.32-.27 1.8-.75L9 16h6l2.25 2.25c.48.48 1.13.75 1.8.75 1.56 0 2.75-1.37 2.53-2.91zM11 11H9v2H8v-2H6v-1h2V8h1v2h2v1zm4-1c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm2 3c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1z"
+        : root.name == "zoom" ? "M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14zm2.5-4h-2v2H9v-2H7V9h2V7h1v2h2v1z"
+        : root.name == "aspect" ? "M19 12h-2v3h-3v2h5v-5zM7 9h3V7H5v5h2V9zm14-6H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16.01H3V4.99h18v14.02z"
+        : root.name == "info" ? "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"
+        : root.name == "warning" ? "M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"
+        : root.name == "error" ? "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"
+        : root.name == "ok" ? "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"
+        : root.name == "lock" ? "M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"
+        : root.name == "report" ? "M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"
+        : root.name == "power" ? "M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.19 1.01-4.14 2.58-5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"
+        : root.name == "link" ? "M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"
+        : root.name == "upload" ? "M5 20h14v-2H5v2zm0-10h4v6h6v-6h4l-7-7-7 7z"
+        : root.name == "download" ? "M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"
         : "M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"; // menu
 }
 
-// Round icon-only button; 48px on phones.
-export component IconButton inherits Rectangle {
-    in property <string> icon;
-    in property <bool> primary: false;
+// Base of everything the remote can land on. The page owns the focus order:
+// it sets `want-focus` on one control at a time, and gets the arrow keys
+// (and Back) the control doesn't use through `nav` (true: the page moved
+// the focus). Return or Space (the D-pad centre) press it; `key` sees the
+// keys first, for value controls (left / right). `entered` runs whenever it
+// gains the focus, Tab included, so the page can keep its index in step.
+// Taps and clicks don't take the focus: the glow only shows for the remote
+// and the keyboard.
+export component Focusable inherits Rectangle {
     in property <bool> enabled: true;
-    callback clicked;
-
-    // Keyboard / TV remote: focusable (Tab, or `want-focus`), Return or
-    // Space presses it; arrows and Back go to `nav` (true: handled).
     in property <bool> want-focus;
-    callback nav(string) -> bool;
     out property <bool> focused: fs.has-focus;
+    out property <bool> pressed: touch.pressed;
+    out property <bool> hovered: touch.has-hover;
+    // Room kept around the control when it scrolls into view.
+    in property <length> reveal: 20px;
+    callback clicked();
+    callback nav(string) -> bool;
+    callback key(string) -> bool;
+    callback entered();
+
     init => {
         if (self.want-focus) {
             fs.focus();
@@ -76,357 +142,371 @@ export component IconButton inherits Rectangle {
             fs.focus();
         }
     }
+
+    reveal-area := Rectangle {
+        x: -root.reveal;
+        y: -root.reveal;
+        width: root.width + 2 * root.reveal;
+        height: root.height + 2 * root.reveal;
+    }
+
     fs := FocusScope {
-        width: 0;
-        height: 0;
+        width: 0px;
+        height: 0px;
+        focus-gained => {
+            reveal-area.ensure-visible(ScrollBehavior.smooth);
+            root.entered();
+        }
         key-pressed(event) => {
-            if (root.enabled && (event.text == Key.Return || event.text == " ")) {
-                root.clicked();
+            if (event.text == Key.Return || event.text == " ") {
+                if (root.enabled) {
+                    root.clicked();
+                }
+                return accept;
+            }
+            if (root.key(event.text)) {
                 return accept;
             }
             if (root.nav(event.text)) {
-                root.nav-took-back = event.text == Key.Back;
-                return accept;
-            }
-            return reject;
-        }
-        key-released(event) => {
-            // Android sends Back's release separately; keep it here when
-            // the press was handled.
-            if (event.text == Key.Back && root.nav-took-back) {
-                root.nav-took-back = false;
+                if (event.text == Key.Back) {
+                    Nav.back-taken = true;
+                }
                 return accept;
             }
             return reject;
         }
     }
-    property <bool> nav-took-back;
 
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// kind: 0 tonal, 1 primary (ember), 2 danger, 3 quiet (no fill until
+// hovered or focused).
+export component ActionButton inherits Focusable {
+    in property <string> text;
+    in property <string> icon;
+    in property <int> kind: 0;
+    property <color> fg: root.kind == 1 ? Theme.on-accent : (root.kind == 2 ? Theme.danger : Theme.text);
+    property <bool> lit: root.hovered || root.focused;
+
+    accessible-role: button;
+    accessible-label: root.text;
+    height: Theme.control-height;
+    min-width: content.preferred-width;
+    preferred-width: content.preferred-width;
+    horizontal-stretch: 0;
+    border-radius: Theme.radius-sm;
+    opacity: root.enabled ? 1.0 : 0.4;
+    background: root.kind == 1
+        ? (root.pressed ? Theme.accent-pressed : (root.lit ? Theme.accent-hover : Theme.accent))
+        : root.kind == 2
+            ? (root.pressed || root.lit ? Theme.danger.transparentize(0.74) : Theme.danger.transparentize(0.88))
+            : root.kind == 3
+                ? (root.pressed ? Theme.card-hover : (root.lit ? Theme.card : Theme.card.transparentize(1)))
+                : (root.pressed ? Theme.border : (root.lit ? Theme.card-hover : Theme.card));
+    border-width: root.focused ? 2px : (root.kind == 0 || root.kind == 2 ? 1px : 0px);
+    border-color: root.focused
+        ? (root.kind == 1 ? Theme.text : Theme.accent)
+        : (root.kind == 2 ? Theme.danger.transparentize(0.6) : Theme.border);
+    drop-shadow-blur: root.focused ? 18px : 0px;
+    drop-shadow-color: Theme.glow;
+    animate background, border-color { duration: 120ms; }
+    animate drop-shadow-blur { duration: 160ms; }
+
+    content := HorizontalLayout {
+        padding-left: root.icon != "" && root.text != "" ? 14px : 16px;
+        padding-right: 16px;
+        spacing: 8px;
+        alignment: center;
+        if root.icon != "": VerticalLayout {
+            alignment: center;
+            Icon {
+                width: 20px;
+                height: 20px;
+                name: root.icon;
+                tint: root.fg;
+            }
+        }
+        if root.text != "": Text {
+            text: root.text;
+            color: root.fg;
+            font-size: Theme.body-size;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Round icon-only button.
+export component IconButton inherits Focusable {
+    in property <string> icon;
+    in property <string> label;
+    // 1: ember fill; 3: quiet.
+    in property <int> kind: 3;
+    in property <color> tint: root.kind == 1 ? Theme.on-accent : Theme.text;
+    property <bool> lit: root.hovered || root.focused;
+
+    accessible-role: button;
+    accessible-label: root.label;
     width: Theme.control-height;
     height: Theme.control-height;
     horizontal-stretch: 0;
     border-radius: self.height / 2;
-    border-width: fs.has-focus ? 2px : 0px;
-    border-color: root.primary ? Theme.text : Theme.accent;
-    opacity: root.enabled ? 1.0 : 0.45;
-    background: root.primary
-        ? (touch.pressed || touch.has-hover ? Theme.accent-hover : Theme.accent)
-        : (touch.pressed || fs.has-focus ? Theme.card-hover : (touch.has-hover ? Theme.card : transparent));
+    opacity: root.enabled ? 1.0 : 0.4;
+    background: root.kind == 1
+        ? (root.pressed ? Theme.accent-pressed : (root.lit ? Theme.accent-hover : Theme.accent))
+        : (root.pressed ? Theme.border : (root.lit ? Theme.card-hover : Theme.card.transparentize(1)));
+    border-width: root.focused ? 2px : 0px;
+    border-color: root.kind == 1 ? Theme.text : Theme.accent;
+    drop-shadow-blur: root.focused ? 18px : 0px;
+    drop-shadow-color: Theme.glow;
     animate background { duration: 120ms; }
+    animate drop-shadow-blur { duration: 160ms; }
 
     Icon {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         name: root.icon;
-        tint: root.primary ? Theme.on-accent : Theme.text;
-    }
-
-    touch := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: pointer;
-        clicked => {
-            root.clicked();
-        }
+        tint: root.tint;
     }
 }
 
-// Floating action button: icon + label, for the main action on phones.
-export component Fab inherits Rectangle {
-    in property <string> icon;
+// Small status pill; `dot` puts a coloured dot in front of the text.
+export component Chip inherits Rectangle {
     in property <string> text;
-    callback clicked;
+    in property <color> tone: Theme.muted;
+    in property <bool> dot: false;
+    height: Theme.compact ? 26px : 24px;
+    min-width: chip-row.preferred-width;
+    preferred-width: chip-row.preferred-width;
+    horizontal-stretch: 0;
+    border-radius: self.height / 2;
+    background: root.tone.transparentize(0.86);
 
-    // Keyboard / TV remote: focusable (Tab, or `want-focus`), Return or
-    // Space presses it; arrows and Back go to `nav` (true: handled).
-    in property <bool> want-focus;
-    callback nav(string) -> bool;
-    out property <bool> focused: fs.has-focus;
-    init => {
-        if (self.want-focus) {
-            fs.focus();
-        }
-    }
-    changed want-focus => {
-        if (self.want-focus) {
-            fs.focus();
-        }
-    }
-    fs := FocusScope {
-        width: 0;
-        height: 0;
-        key-pressed(event) => {
-            if (true && (event.text == Key.Return || event.text == " ")) {
-                root.clicked();
-                return accept;
-            }
-            if (root.nav(event.text)) {
-                root.nav-took-back = event.text == Key.Back;
-                return accept;
-            }
-            return reject;
-        }
-        key-released(event) => {
-            // Android sends Back's release separately; keep it here when
-            // the press was handled.
-            if (event.text == Key.Back && root.nav-took-back) {
-                root.nav-took-back = false;
-                return accept;
-            }
-            return reject;
-        }
-    }
-    property <bool> nav-took-back;
-
-    width: label.preferred-width + 72px;
-    height: 56px;
-    border-radius: 18px;
-    border-width: fs.has-focus ? 3px : 0px;
-    border-color: Theme.text;
-    background: touch.pressed ? Theme.accent-hover : Theme.accent;
-    drop-shadow-blur: 16px;
-    drop-shadow-offset-y: 4px;
-    drop-shadow-color: #00000080;
-
-    HorizontalLayout {
-        padding-left: 18px;
-        padding-right: 22px;
-        spacing: 10px;
-        alignment: center;
-        VerticalLayout {
+    chip-row := HorizontalLayout {
+        padding-left: root.dot ? 8px : 10px;
+        padding-right: 10px;
+        spacing: 6px;
+        if root.dot: VerticalLayout {
             alignment: center;
-            Icon {
-                name: root.icon;
-                tint: Theme.on-accent;
-            }
-        }
-        label := Text {
-            text: root.text;
-            color: Theme.on-accent;
-            font-size: 15px;
-            font-weight: 700;
-            vertical-alignment: center;
-        }
-    }
-
-    touch := TouchArea {
-        clicked => {
-            root.clicked();
-        }
-    }
-}
-
-// Full-width row in an action menu (icon + label).
-export component MenuItem inherits Rectangle {
-    in property <string> icon;
-    in property <string> text;
-    in property <bool> danger: false;
-    callback clicked;
-
-    // Keyboard / TV remote: focusable (Tab, or `want-focus`), Return or
-    // Space presses it; arrows and Back go to `nav` (true: handled).
-    in property <bool> want-focus;
-    callback nav(string) -> bool;
-    out property <bool> focused: fs.has-focus;
-    init => {
-        if (self.want-focus) {
-            fs.focus();
-        }
-    }
-    changed want-focus => {
-        if (self.want-focus) {
-            fs.focus();
-        }
-    }
-    fs := FocusScope {
-        width: 0;
-        height: 0;
-        key-pressed(event) => {
-            if ((event.text == Key.Return || event.text == " ")) {
-                root.clicked();
-                return accept;
-            }
-            if (root.nav(event.text)) {
-                root.nav-took-back = event.text == Key.Back;
-                return accept;
-            }
-            return reject;
-        }
-        key-released(event) => {
-            // Android sends Back's release separately; keep it here when
-            // the press was handled.
-            if (event.text == Key.Back && root.nav-took-back) {
-                root.nav-took-back = false;
-                return accept;
-            }
-            return reject;
-        }
-    }
-    property <bool> nav-took-back;
-
-    height: Theme.control-height;
-    border-radius: 10px;
-    border-width: fs.has-focus ? 2px : 0px;
-    border-color: Theme.accent;
-    background: touch.pressed || touch.has-hover || fs.has-focus ? Theme.card-hover : transparent;
-
-    HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
-        spacing: 14px;
-        VerticalLayout {
-            alignment: center;
-            Icon {
-                name: root.icon;
-                tint: root.danger ? Theme.danger : Theme.text;
+            Rectangle {
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background: root.tone;
             }
         }
         Text {
             text: root.text;
-            color: root.danger ? Theme.danger : Theme.text;
-            font-size: Theme.body-size;
+            color: root.tone;
+            font-size: Theme.caption-size;
             font-weight: 600;
             vertical-alignment: center;
-            overflow: elide;
-        }
-    }
-
-    touch := TouchArea {
-        mouse-cursor: pointer;
-        clicked => {
-            root.clicked();
         }
     }
 }
 
-export component PillButton inherits Rectangle {
-    in property <string> text;
-    in property <bool> primary: false;
-    in property <bool> danger: false;
+// Three embers pulsing: work in progress.
+export component Loader inherits Rectangle {
+    in property <length> dot: 8px;
+    in property <color> tint: Theme.accent;
+    property <length> step: root.dot * 1.8;
+    property <float> phase: Math.mod(animation-tick() / 1ms, 1100) / 1100;
+    width: root.dot + 2 * root.step;
+    height: root.dot;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+
+    for ember[i] in 3: Rectangle {
+        x: i * root.step;
+        width: root.dot;
+        height: root.dot;
+        border-radius: root.dot / 2;
+        background: root.tint;
+        opacity: 0.25 + 0.75 * Math.max(0, Math.sin((root.phase - i * 0.18) * 360deg));
+    }
+}
+
+// On/off pill (drawn inside a row, which takes the input).
+export component Toggle inherits Rectangle {
+    in property <bool> on;
+    width: 48px;
+    height: 28px;
+    horizontal-stretch: 0;
+    border-radius: 14px;
+    background: root.on ? Theme.accent : Theme.bg;
+    border-width: root.on ? 0px : 1.5px;
+    border-color: Theme.faint;
+    animate background { duration: 140ms; }
+
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        x: root.on ? parent.width - self.width - 4px : 5px;
+        width: root.on ? 20px : 16px;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: root.on ? Theme.on-accent : Theme.muted;
+        animate x, width { duration: 180ms; easing: ease-out; }
+    }
+}
+
+// One line of text to type. It takes the focus like any control; Return
+// (or a tap) starts typing. While typing, up / down leave the box, so a TV
+// remote never gets stuck in it. `auto-edit` starts typing as soon as the
+// page focuses it (dialogs).
+export component TextField inherits Rectangle {
+    in property <string> placeholder;
+    in-out property <string> text;
     in property <bool> enabled: true;
-    callback clicked;
-    // Keyboard / TV remote: focusable (Tab, or `want-focus`), Return or
-    // Space presses it; arrows and Back go to `nav` (true: handled).
+    in property <InputType> input-type: InputType.text;
+    in property <bool> multiline: false;
     in property <bool> want-focus;
+    in property <bool> auto-edit: false;
+    out property <bool> editing: input.has-focus;
+    out property <bool> focused: fs.has-focus || input.has-focus;
+    callback accepted(string);
     callback nav(string) -> bool;
-    out property <bool> focused: fs.has-focus;
+    callback entered();
+
+    function grab() {
+        if (root.auto-edit && root.enabled) {
+            input.focus();
+        } else {
+            fs.focus();
+        }
+    }
+    public function edit() {
+        if (root.enabled) {
+            input.focus();
+        }
+    }
+
     init => {
         if (self.want-focus) {
-            fs.focus();
+            root.grab();
         }
     }
     changed want-focus => {
         if (self.want-focus) {
-            fs.focus();
+            root.grab();
         }
     }
+
+    accessible-role: text-input;
+    min-height: root.multiline ? 104px : Theme.control-height;
+    preferred-height: root.multiline ? 104px : Theme.control-height;
+    border-radius: Theme.radius-sm;
+    background: Theme.bg;
+    opacity: root.enabled ? 1.0 : 0.5;
+    border-width: root.focused ? 2px : 1px;
+    border-color: input.has-focus ? Theme.accent : (fs.has-focus ? Theme.accent : (area.has-hover ? Theme.faint : Theme.border));
+    drop-shadow-blur: fs.has-focus ? 18px : 0px;
+    drop-shadow-color: Theme.glow;
+    animate border-color { duration: 120ms; }
+
     fs := FocusScope {
-        width: 0;
-        height: 0;
+        width: 0px;
+        height: 0px;
+        focus-gained => {
+            root.ensure-visible(ScrollBehavior.smooth);
+            root.entered();
+        }
         key-pressed(event) => {
-            if (root.enabled && (event.text == Key.Return || event.text == " ")) {
-                root.clicked();
+            if (event.text == Key.Return || event.text == " ") {
+                root.edit();
                 return accept;
             }
             if (root.nav(event.text)) {
-                root.nav-took-back = event.text == Key.Back;
-                return accept;
-            }
-            return reject;
-        }
-        key-released(event) => {
-            // Android sends Back's release separately; keep it here when
-            // the press was handled.
-            if (event.text == Key.Back && root.nav-took-back) {
-                root.nav-took-back = false;
+                if (event.text == Key.Back) {
+                    Nav.back-taken = true;
+                }
                 return accept;
             }
             return reject;
         }
     }
-    property <bool> nav-took-back;
 
-    min-width: label.preferred-width + 32px;
-    preferred-width: label.preferred-width + 32px;
-    horizontal-stretch: 0;
-    height: Theme.control-height;
-    border-radius: self.height / 2;
-    border-width: fs.has-focus ? 2px : (root.primary ? 0px : 1px);
-    border-color: fs.has-focus ? (root.primary ? Theme.text : Theme.accent) : (root.danger ? Theme.danger : Theme.border);
-    opacity: root.enabled ? 1.0 : 0.45;
-    background: root.primary
-        ? (touch.has-hover || touch.pressed ? Theme.accent-hover : Theme.accent)
-        : (touch.has-hover || touch.pressed ? Theme.card-hover : Theme.card);
-    animate background { duration: 120ms; }
-
-    label := Text {
-        text: root.text;
-        color: root.primary ? Theme.on-accent : (root.danger ? Theme.danger : Theme.text);
-        font-size: Theme.body-size;
-        font-weight: 600;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    area := TouchArea {
+        mouse-cursor: text;
+        clicked => {
+            root.edit();
+        }
     }
 
-    touch := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: pointer;
-        clicked => {
-            root.clicked();
+    // While typing: up / down move on to the next control.
+    cap := FocusScope {
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        x: 14px;
+        y: root.multiline ? 10px : 0px;
+        width: parent.width - 28px;
+        height: parent.height - (root.multiline ? 20px : 0px);
+        capture-key-pressed(event) => {
+            if (input.has-focus && (event.text == Key.UpArrow || event.text == Key.DownArrow)) {
+                if (root.nav(event.text)) {
+                    return accept;
+                }
+            }
+            return reject;
+        }
+        if root.text == "": Text {
+            width: parent.width;
+            height: parent.height;
+            text: root.placeholder;
+            color: Theme.faint;
+            font-size: Theme.body-size;
+            vertical-alignment: root.multiline ? TextVerticalAlignment.top : TextVerticalAlignment.center;
+            overflow: elide;
+        }
+        input := TextInput {
+            width: parent.width;
+            height: parent.height;
+            text <=> root.text;
+            enabled: root.enabled;
+            input-type: root.input-type;
+            single-line: !root.multiline;
+            wrap: root.multiline ? TextWrap.word-wrap : TextWrap.no-wrap;
+            color: Theme.text;
+            font-size: Theme.body-size;
+            vertical-alignment: root.multiline ? TextVerticalAlignment.top : TextVerticalAlignment.center;
+            selection-background-color: Theme.accent.transparentize(0.55);
+            selection-foreground-color: Theme.text;
+            accepted => {
+                root.accepted(self.text);
+            }
+        }
+    }
+
+    changed editing => {
+        if (root.editing) {
+            root.entered();
         }
     }
 }
 
-// Text link; wraps instead of overflowing narrow dialogs.
-export component LinkButton inherits Rectangle {
-    in property <string> text;
-    callback clicked;
-    min-height: Theme.compact ? 40px : 28px;
-    preferred-height: label.preferred-height + 12px;
-
-    label := Text {
-        width: parent.width;
-        text: root.text;
-        color: touch.has-hover ? Theme.accent-hover : Theme.accent;
-        font-size: 13px;
-        font-weight: 600;
-        wrap: word-wrap;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-
-    touch := TouchArea {
-        mouse-cursor: pointer;
-        clicked => {
-            root.clicked();
-        }
-    }
-}
-
-export component Chip inherits Rectangle {
-    in property <string> text;
-    in property <color> tone: Theme.muted;
-    height: 24px;
-    min-width: label.preferred-width + 18px;
-    preferred-width: label.preferred-width + 18px;
-    horizontal-stretch: 0;
-    border-radius: 12px;
-    background: root.tone.transparentize(0.84);
-
-    label := Text {
-        text: root.text;
-        color: root.tone;
-        font-size: 12px;
-        font-weight: 600;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-}
-
-// Translucent backdrop + centered card for dialogs.
-export component Dialog inherits Rectangle {
-    in property <length> card-width: 420px;
+// Modal card over a scrim: centred on wide screens, a sheet on phones.
+// It fades and rises in; tapping the scrim calls `dismissed`.
+export component Modal inherits Rectangle {
+    in property <length> card-width: 440px;
     callback dismissed;
-    background: #000000b0;
+    property <bool> shown;
+    property <bool> sheet: Theme.compact;
+
+    background: root.shown ? Theme.scrim : Theme.scrim.transparentize(1);
+    animate background { duration: 180ms; }
+    Timer {
+        interval: 16ms;
+        running: !root.shown;
+        triggered => {
+            root.shown = true;
+        }
+    }
 
     TouchArea {
         clicked => {
@@ -434,23 +514,48 @@ export component Dialog inherits Rectangle {
         }
     }
 
-    Rectangle {
-        width: Math.min(root.card-width, root.width - (Theme.compact ? 24px : 32px));
-        height: content.preferred-height;
-        border-radius: Theme.radius;
+    card := Rectangle {
+        width: root.sheet ? root.width : Math.min(root.card-width, root.width - 48px);
+        height: Math.min(content.preferred-height, root.height - (root.sheet ? 24px : 48px));
+        x: (root.width - self.width) / 2;
+        y: root.sheet
+            ? root.height - self.height + (root.shown ? 0px : 40px)
+            : (root.height - self.height) / 2 + (root.shown ? 0px : 24px);
+        opacity: root.shown ? 1 : 0;
+        animate y { duration: 220ms; easing: cubic-bezier(0.2, 0.9, 0.3, 1); }
+        animate opacity { duration: 160ms; }
+        border-radius: Theme.radius + 4px;
         background: Theme.surface;
         border-width: 1px;
         border-color: Theme.border;
-        drop-shadow-blur: 30px;
-        drop-shadow-color: #00000088;
+        drop-shadow-blur: 40px;
+        drop-shadow-offset-y: 12px;
+        drop-shadow-color: #000000a0;
+        clip: true;
 
-        // Swallow clicks so they don't reach the backdrop.
+        // Swallow taps so they don't reach the scrim.
         TouchArea { }
 
         content := VerticalLayout {
-            padding: Theme.compact ? 20px : 24px;
+            padding: Theme.compact ? 20px : 26px;
+            padding-bottom: Theme.compact ? 28px : 26px;
             spacing: 14px;
             @children
         }
     }
+}
+
+// The title line of a dialog.
+export component DialogTitle inherits Text {
+    color: Theme.text;
+    font-size: Theme.title-size;
+    font-weight: 700;
+    wrap: word-wrap;
+}
+
+// Body copy of a dialog.
+export component DialogText inherits Text {
+    color: Theme.muted;
+    font-size: Theme.body-size;
+    wrap: word-wrap;
 }

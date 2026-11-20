@@ -1,5 +1,11 @@
-import { ComboBox, LineEdit, Slider, Switch, Spinner, TextEdit } from "std-widgets.slint";
-import { Theme, PillButton, LinkButton, Chip, IconButton, Fab, MenuItem } from "theme.slint";
+// The app's pages. Each one owns its focus order for TV remotes, keyboards
+// and game controllers: `nav` is the focused control's index (-1 until the
+// first arrow key; then the hidden `start` scope hands over), and every
+// control reports back through `entered` so Tab and the mouse keep it in
+// step. `refocus` (bumped by the window when a dialog closes) resets it.
+
+import { Theme, Icon, Focusable, ActionButton, IconButton, Chip, Loader, TextField, Modal, DialogTitle, DialogText } from "theme.slint";
+import { Group, SwitchRow, ChoiceRow, SliderRow, ActionRow, InfoRow, FieldRow, ProfileRow, OptionSheet, TopBar, EmptyState } from "controls.slint";
 
 export struct HostCard {
     id: string,
@@ -24,270 +30,130 @@ export struct AppCard {
     hdr: bool,
 }
 
-component StatusDot inherits Rectangle {
-    in property <color> tone;
-    width: 10px;
-    height: 10px;
-    border-radius: 5px;
-    background: root.tone;
+export struct PreflightRow {
+    // 1 ok, 2 warning, 3 failure
+    level: int,
+    title: string,
+    message: string,
 }
 
-component HostTile inherits Rectangle {
+export struct CommandRow {
+    id: int,
+    name: string,
+    // Hermes wants a confirmation before running it.
+    confirm: bool,
+    // First tap done; the next one runs it.
+    armed: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Hosts
+// ---------------------------------------------------------------------------
+
+component HostTile inherits Focusable {
     in property <HostCard> host;
-    callback clicked;
+    property <color> state-tone: root.host.checking ? Theme.warn : (root.host.online ? Theme.ok : Theme.faint);
+    property <bool> ready: root.host.online && root.host.paired;
 
-    // TV remote / keyboard: the grid moves the focus (`want-focus`);
-    // Return presses, arrows and Back go to `nav`.
-    in property <bool> want-focus;
-    callback nav(string) -> bool;
-    init => {
-        if (self.want-focus) {
-            fs.focus();
-        }
-    }
-    changed want-focus => {
-        if (self.want-focus) {
-            fs.focus();
-        }
-    }
-    fs := FocusScope {
-        width: 0;
-        height: 0;
-        key-pressed(event) => {
-            if (event.text == Key.Return || event.text == " ") {
-                root.clicked();
-                return accept;
-            }
-            if (root.nav(event.text)) {
-                return accept;
-            }
-            return reject;
-        }
-    }
-
+    accessible-role: button;
+    accessible-label: root.host.name;
     border-radius: Theme.radius;
-    background: touch.has-hover || fs.has-focus ? Theme.card-hover : Theme.card;
-    border-width: fs.has-focus ? 3px : 1px;
-    border-color: fs.has-focus ? Theme.accent : (root.host.paired ? Theme.accent.transparentize(0.6) : Theme.border);
-    drop-shadow-blur: 18px;
-    drop-shadow-color: #00000050;
-    animate background { duration: 120ms; }
+    background: root.pressed ? Theme.border : (root.focused || root.hovered ? Theme.card-hover : Theme.card);
+    border-width: root.focused ? 2px : 1px;
+    border-color: root.focused ? Theme.accent : (root.ready ? Theme.accent.transparentize(0.72) : Theme.border.transparentize(0.3));
+    drop-shadow-blur: root.focused ? 26px : 0px;
+    drop-shadow-color: Theme.glow;
+    animate background, border-color { duration: 120ms; }
+    animate drop-shadow-blur { duration: 160ms; }
 
     VerticalLayout {
         padding: Theme.compact ? 16px : 18px;
-        spacing: 8px;
+        spacing: 12px;
 
         HorizontalLayout {
-            spacing: 10px;
-            VerticalLayout {
-                alignment: center;
-                StatusDot {
-                    tone: root.host.checking ? Theme.warn : (root.host.online ? Theme.ok : Theme.muted);
+            spacing: 14px;
+            Rectangle {
+                width: 52px;
+                height: 52px;
+                border-radius: 16px;
+                background: root.ready ? Theme.accent.transparentize(0.84) : Theme.bg;
+                Icon {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 28px;
+                    height: 28px;
+                    name: root.host.paired ? "monitor" : "lock";
+                    tint: root.ready ? Theme.accent : Theme.muted;
+                }
+                Rectangle {
+                    x: parent.width - 12px;
+                    y: -3px;
+                    width: 15px;
+                    height: 15px;
+                    border-radius: 7.5px;
+                    background: root.state-tone;
+                    border-width: 3px;
+                    border-color: root.focused || root.hovered ? Theme.card-hover : Theme.card;
                 }
             }
-            Text {
-                text: root.host.name;
-                color: Theme.text;
-                font-size: 18px;
-                font-weight: 700;
-                overflow: elide;
-                vertical-alignment: center;
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                spacing: 2px;
+                Text {
+                    text: root.host.name;
+                    color: Theme.text;
+                    font-size: Theme.title-size;
+                    font-weight: 700;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.host.address;
+                    color: Theme.muted;
+                    font-size: Theme.caption-size;
+                    overflow: elide;
+                }
             }
-        }
-
-        Text {
-            text: root.host.address;
-            color: Theme.muted;
-            font-size: 13px;
-            overflow: elide;
+            VerticalLayout {
+                alignment: center;
+                Icon {
+                    name: "chevron-right";
+                    tint: root.focused ? Theme.accent : Theme.faint;
+                }
+            }
         }
 
         HorizontalLayout {
             spacing: 6px;
             alignment: start;
             Chip {
+                dot: true;
                 text: root.host.checking ? "Checking" : (root.host.online ? "Online" : "Offline");
-                tone: root.host.checking ? Theme.warn : (root.host.online ? Theme.ok : Theme.muted);
+                tone: root.state-tone;
             }
-            Chip {
-                text: root.host.paired ? "Paired" : "Not paired";
-                tone: root.host.paired ? Theme.accent : Theme.warn;
+            if !root.host.paired: Chip {
+                text: "Not paired";
+                tone: Theme.warn;
             }
             if root.host.hermes: Chip {
                 text: root.host.version == "" ? "Hermes" : "Hermes " + root.host.version;
-                tone: Theme.info;
+                tone: Theme.accent;
             }
             if root.host.health > 0: Chip {
-                text: root.host.health == 1 ? "Ready" : root.host.health == 2 ? "Check" : "Not ready";
-                tone: root.host.health == 1 ? Theme.ok : root.host.health == 2 ? Theme.warn : Theme.danger;
+                text: root.host.health == 1 ? "Ready" : (root.host.health == 2 ? "Check" : "Not ready");
+                tone: root.host.health == 1 ? Theme.ok : (root.host.health == 2 ? Theme.warn : Theme.danger);
             }
-        }
-
-        Rectangle {
-            vertical-stretch: 1;
         }
 
         Text {
+            vertical-stretch: 1;
             text: root.host.status;
             color: Theme.muted;
-            font-size: 12px;
+            font-size: Theme.caption-size;
             wrap: word-wrap;
             overflow: elide;
         }
     }
-
-    touch := TouchArea {
-        mouse-cursor: pointer;
-        clicked => {
-            root.clicked();
-        }
-    }
-}
-
-component AppTile inherits Rectangle {
-    in property <AppCard> app;
-    callback clicked;
-
-    // TV remote / keyboard: the grid moves the focus (`want-focus`);
-    // Return presses, arrows and Back go to `nav`.
-    in property <bool> want-focus;
-    callback nav(string) -> bool;
-    init => {
-        if (self.want-focus) {
-            fs.focus();
-        }
-    }
-    changed want-focus => {
-        if (self.want-focus) {
-            fs.focus();
-        }
-    }
-    fs := FocusScope {
-        width: 0;
-        height: 0;
-        key-pressed(event) => {
-            if (event.text == Key.Return || event.text == " ") {
-                root.clicked();
-                return accept;
-            }
-            if (root.nav(event.text)) {
-                return accept;
-            }
-            return reject;
-        }
-    }
-
-    border-radius: Theme.radius;
-    background: Theme.card;
-    clip: true;
-    border-width: fs.has-focus ? 3px : (root.app.running ? 2px : 1px);
-    border-color: fs.has-focus ? Theme.text : (root.app.running ? Theme.accent : (touch.has-hover ? Theme.accent.transparentize(0.5) : Theme.border));
-    animate border-color { duration: 120ms; }
-
-    VerticalLayout {
-        Rectangle {
-            vertical-stretch: 1;
-            background: Theme.surface;
-            clip: true;
-
-            if root.app.has-art: Image {
-                width: parent.width;
-                height: parent.height;
-                source: root.app.art;
-                image-fit: cover;
-            }
-
-            if !root.app.has-art: Text {
-                width: parent.width - 24px;
-                x: 12px;
-                height: parent.height;
-                text: root.app.title;
-                color: Theme.muted;
-                font-size: 17px;
-                font-weight: 700;
-                wrap: word-wrap;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-
-            Rectangle {
-                background: touch.has-hover ? #ffffff10 : transparent;
-                animate background { duration: 120ms; }
-            }
-        }
-
-        HorizontalLayout {
-            height: 44px;
-            padding-left: 12px;
-            padding-right: 10px;
-            spacing: 6px;
-            Text {
-                text: root.app.title;
-                color: Theme.text;
-                font-size: 14px;
-                font-weight: 600;
-                overflow: elide;
-                vertical-alignment: center;
-            }
-            if root.app.running: VerticalLayout {
-                alignment: center;
-                Chip {
-                    text: "Running";
-                    tone: Theme.accent;
-                }
-            }
-        }
-    }
-
-    touch := TouchArea {
-        mouse-cursor: pointer;
-        clicked => {
-            root.clicked();
-        }
-    }
-}
-
-component PageHeader inherits HorizontalLayout {
-    in property <string> title;
-    in property <string> subtitle;
-    in property <bool> show-back: false;
-    callback back;
-    padding-left: Theme.compact && root.show-back ? 6px : Theme.page-padding;
-    padding-right: Theme.compact ? 8px : Theme.page-padding;
-    padding-top: Theme.compact ? 10px : Theme.page-padding;
-    padding-bottom: 8px;
-    spacing: Theme.compact ? 2px : 10px;
-
-    if root.show-back: VerticalLayout {
-        alignment: center;
-        IconButton {
-            icon: "back";
-            clicked => {
-                root.back();
-            }
-        }
-    }
-
-    VerticalLayout {
-        alignment: center;
-        horizontal-stretch: 1;
-        padding-left: Theme.compact && root.show-back ? 4px : 0px;
-        Text {
-            text: root.title;
-            color: Theme.text;
-            font-size: Theme.compact ? 22px : 26px;
-            font-weight: 800;
-            overflow: elide;
-        }
-        if root.subtitle != "": Text {
-            text: root.subtitle;
-            color: Theme.muted;
-            font-size: 13px;
-            overflow: elide;
-        }
-    }
-
-    @children
 }
 
 export component HostsPage inherits Rectangle {
@@ -298,25 +164,61 @@ export component HostsPage inherits Rectangle {
     callback refresh;
     callback settings;
 
-    // TV remote / arrow keys: the focused card (0…), or a header action
-    // (-2 Refresh, -3 Settings, -4 Add host); -1 before the first key.
+    // Focus: a host card (0…), the header's Refresh (-2), Settings (-3) and
+    // Add host (-4, the floating button on phones), or the empty page's
+    // buttons (10, 11).
     property <int> nav: -1;
-    // Bumped by the window when a dialog closes: take the focus back.
     in property <int> refocus;
     changed refocus => {
         start.focus();
         root.nav = -1;
     }
+
+    property <bool> shown;
+    Timer {
+        interval: 16ms;
+        running: !root.shown;
+        triggered => {
+            root.shown = true;
+        }
+    }
+    opacity: root.shown ? 1 : 0;
+    animate opacity { duration: 200ms; easing: ease-out; }
+
+    property <length> pad: Theme.page-padding;
+    property <length> gap: Theme.gap;
+    property <length> min-tile: Theme.wide ? 320px : 290px;
+    property <int> cols: Math.max(1, Math.floor((root.width - 2 * root.pad + root.gap) / (root.min-tile + root.gap)));
+    property <length> tile-w: (root.width - 2 * root.pad - (root.cols - 1) * root.gap) / root.cols;
+    property <length> tile-h: Theme.compact ? 176px : 180px;
+    // Room under the last row for the floating button.
+    property <length> bottom-space: Theme.compact ? 104px : root.pad;
+
     function move(from: int, key: string) -> bool {
+        let n = root.hosts.length;
+        if (from >= 10) {
+            if (key == Key.RightArrow && from == 10) {
+                root.nav = 11;
+            } else if (key == Key.LeftArrow && from == 11) {
+                root.nav = 10;
+            } else if (key == Key.UpArrow) {
+                root.nav = -2;
+            } else {
+                return false;
+            }
+            return true;
+        }
         if (from >= 0) {
-            if (key == Key.RightArrow && from + 1 < root.hosts.length) {
+            if (key == Key.RightArrow && from + 1 < n) {
                 root.nav = from + 1;
             } else if (key == Key.LeftArrow && from > 0) {
                 root.nav = from - 1;
-            } else if (key == Key.DownArrow && from + root.cols < root.hosts.length) {
+            } else if (key == Key.DownArrow && from + root.cols < n) {
                 root.nav = from + root.cols;
-            } else if (key == Key.DownArrow && Math.floor(from / root.cols) < Math.floor((root.hosts.length - 1) / root.cols)) {
-                root.nav = root.hosts.length - 1;
+            } else if (key == Key.DownArrow && Math.floor(from / root.cols) < Math.floor((n - 1) / root.cols)) {
+                root.nav = n - 1;
+            } else if (key == Key.DownArrow && Theme.compact) {
+                root.nav = -4;
             } else if (key == Key.UpArrow && from >= root.cols) {
                 root.nav = from - root.cols;
             } else if (key == Key.UpArrow) {
@@ -326,73 +228,128 @@ export component HostsPage inherits Rectangle {
             }
             return true;
         }
+        if (from == -4 && Theme.compact) {
+            if (key == Key.UpArrow) {
+                root.nav = n > 0 ? n - 1 : -2;
+                return true;
+            }
+            if (key == Key.LeftArrow) {
+                root.nav = -3;
+                return true;
+            }
+            return false;
+        }
         if (key == Key.RightArrow && from > -4) {
             root.nav = from - 1;
         } else if (key == Key.LeftArrow && from < -2) {
             root.nav = from + 1;
-        } else if (key == Key.DownArrow && root.hosts.length > 0) {
-            root.nav = 0;
+        } else if (key == Key.DownArrow) {
+            root.nav = n > 0 ? 0 : 10;
         } else {
             return false;
         }
         return true;
     }
+
     start := FocusScope {
-        width: 0;
-        height: 0;
+        width: 0px;
+        height: 0px;
         init => {
             self.focus();
         }
         key-pressed(event) => {
             if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
-                root.nav = root.hosts.length > 0 ? 0 : -4;
+                root.nav = root.hosts.length > 0 ? 0 : 10;
                 return accept;
             }
             return reject;
         }
     }
 
-    property <length> pad: Theme.page-padding;
-    property <length> gap: Theme.compact ? 12px : 16px;
-    property <length> min-tile: 260px;
-    property <int> cols: Math.max(1, Math.floor((root.width - 2 * root.pad + root.gap) / (root.min-tile + root.gap)));
-    property <length> tile-w: (root.width - 2 * root.pad - (root.cols - 1) * root.gap) / root.cols;
-    property <length> tile-h: Theme.compact ? 150px : 168px;
-    // Room under the last row for the floating button.
-    property <length> bottom-space: Theme.compact ? 96px : root.pad;
+    // The hearth: a warm glow behind the name.
+    Rectangle {
+        x: -280px;
+        y: -340px;
+        width: 820px;
+        height: 820px;
+        background: @radial-gradient(circle, Theme.accent.transparentize(0.86) 0%, Theme.accent.transparentize(0.95) 35%, Theme.accent.transparentize(1) 70%);
+    }
 
     VerticalLayout {
-        PageHeader {
-            title: "Hestia";
-            subtitle: root.scanning ? "Looking for hosts on your network…" : "Your hosts";
-            if root.scanning: VerticalLayout {
-                alignment: center;
-                Spinner {
-                    width: 22px;
-                    height: 22px;
-                    indeterminate: true;
+        HorizontalLayout {
+            padding-left: root.pad;
+            padding-right: Theme.compact ? 8px : root.pad;
+            padding-top: Theme.compact ? 14px : (Theme.short ? 16px : 28px);
+            padding-bottom: Theme.compact ? 10px : 18px;
+            spacing: Theme.compact ? 2px : 10px;
+
+            HorizontalLayout {
+                horizontal-stretch: 1;
+                spacing: 12px;
+                VerticalLayout {
+                    alignment: center;
+                    Icon {
+                        width: Theme.compact ? 30px : 36px;
+                        height: self.width;
+                        name: "flame";
+                        tint: Theme.accent;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    Text {
+                        text: "Hestia";
+                        color: Theme.text;
+                        font-size: Theme.display-size;
+                        font-weight: 700;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        if root.scanning: VerticalLayout {
+                            alignment: center;
+                            Loader {
+                                dot: 6px;
+                            }
+                        }
+                        Text {
+                            text: root.scanning ? "Looking for hosts on your network" : (root.hosts.length == 1 ? "1 host" : root.hosts.length + " hosts");
+                            color: Theme.muted;
+                            font-size: Theme.body-size;
+                            overflow: elide;
+                        }
+                    }
                 }
             }
-            if Theme.compact: VerticalLayout {
+            VerticalLayout {
                 alignment: center;
                 IconButton {
                     icon: "refresh";
+                    label: "Search again";
                     want-focus: root.nav == -2;
                     nav(key) => {
                         return root.move(-2, key);
+                    }
+                    entered => {
+                        root.nav = -2;
                     }
                     clicked => {
                         root.refresh();
                     }
                 }
             }
-            if Theme.compact: VerticalLayout {
+            VerticalLayout {
                 alignment: center;
                 IconButton {
                     icon: "settings";
+                    label: "Settings";
                     want-focus: root.nav == -3;
                     nav(key) => {
                         return root.move(-3, key);
+                    }
+                    entered => {
+                        root.nav = -3;
                     }
                     clicked => {
                         root.settings();
@@ -401,38 +358,16 @@ export component HostsPage inherits Rectangle {
             }
             if !Theme.compact: VerticalLayout {
                 alignment: center;
-                PillButton {
-                    text: "Refresh";
-                    want-focus: root.nav == -2;
-                    nav(key) => {
-                        return root.move(-2, key);
-                    }
-                    clicked => {
-                        root.refresh();
-                    }
-                }
-            }
-            if !Theme.compact: VerticalLayout {
-                alignment: center;
-                PillButton {
-                    text: "Settings";
-                    want-focus: root.nav == -3;
-                    nav(key) => {
-                        return root.move(-3, key);
-                    }
-                    clicked => {
-                        root.settings();
-                    }
-                }
-            }
-            if !Theme.compact: VerticalLayout {
-                alignment: center;
-                PillButton {
+                ActionButton {
                     text: "Add host";
-                    primary: true;
+                    icon: "add";
+                    kind: 1;
                     want-focus: root.nav == -4;
                     nav(key) => {
                         return root.move(-4, key);
+                    }
+                    entered => {
+                        root.nav = -4;
                     }
                     clicked => {
                         root.add-host();
@@ -441,24 +376,44 @@ export component HostsPage inherits Rectangle {
             }
         }
 
-        if root.hosts.length == 0: VerticalLayout {
+        if root.hosts.length == 0: EmptyState {
             vertical-stretch: 1;
-            alignment: center;
-            padding: 32px;
-            spacing: 10px;
-            Text {
-                text: "No hosts yet";
-                color: Theme.text;
-                font-size: 20px;
-                font-weight: 700;
-                horizontal-alignment: center;
-            }
-            Text {
-                text: "Hosts running Hermes (or Sunshine/Apollo) on this network show up here automatically. You can also add one by its IP address.";
-                color: Theme.muted;
-                font-size: Theme.body-size;
-                wrap: word-wrap;
-                horizontal-alignment: center;
+            icon: "monitor";
+            title: root.scanning ? "Looking for hosts" : "No hosts yet";
+            text: "PCs running Hermes, Sunshine or Apollo on this network show up here by themselves. You can also add one by its address.";
+            HorizontalLayout {
+                alignment: center;
+                spacing: 10px;
+                padding-top: 10px;
+                ActionButton {
+                    text: "Add host";
+                    icon: "add";
+                    kind: 1;
+                    want-focus: root.nav == 10;
+                    nav(key) => {
+                        return root.move(10, key);
+                    }
+                    entered => {
+                        root.nav = 10;
+                    }
+                    clicked => {
+                        root.add-host();
+                    }
+                }
+                ActionButton {
+                    text: "Search again";
+                    icon: "refresh";
+                    want-focus: root.nav == 11;
+                    nav(key) => {
+                        return root.move(11, key);
+                    }
+                    entered => {
+                        root.nav = 11;
+                    }
+                    clicked => {
+                        root.refresh();
+                    }
+                }
             }
         }
 
@@ -466,26 +421,19 @@ export component HostsPage inherits Rectangle {
             vertical-stretch: 1;
             content-width: self.width;
             content-height: Math.ceil(root.hosts.length / root.cols) * (root.tile-h + root.gap) + root.bottom-space;
-            // Keep the focused card in view.
-            property <int> focused-row: root.nav >= 0 ? Math.floor(root.nav / root.cols) : -1;
-            property <length> row-top: 8px + self.focused-row * (root.tile-h + root.gap);
-            changed focused-row => {
-                if (self.focused-row >= 0 && self.row-top + self.content-y < 0) {
-                    self.content-y = 8px - self.row-top;
-                } else if (self.focused-row >= 0 && self.row-top + root.tile-h + self.content-y > self.height) {
-                    self.content-y = self.height - self.row-top - root.tile-h - root.gap;
-                }
-            }
 
             for host[i] in root.hosts: HostTile {
                 x: root.pad + Math.mod(i, root.cols) * (root.tile-w + root.gap);
-                y: 8px + Math.floor(i / root.cols) * (root.tile-h + root.gap);
+                y: 6px + Math.floor(i / root.cols) * (root.tile-h + root.gap);
                 width: root.tile-w;
                 height: root.tile-h;
                 host: host;
                 want-focus: root.nav == i;
                 nav(key) => {
                     return root.move(i, key);
+                }
+                entered => {
+                    root.nav = i;
                 }
                 clicked => {
                     root.open-host(host.id);
@@ -494,17 +442,281 @@ export component HostsPage inherits Rectangle {
         }
     }
 
-    if Theme.compact: Fab {
+    if Theme.compact: ActionButton {
+        width: self.preferred-width;
         x: root.width - self.width - 16px;
-        y: root.height - self.height - 20px;
-        icon: "add";
+        y: root.height - self.height - 24px;
+        height: 56px;
         text: "Add host";
+        icon: "add";
+        kind: 1;
+        drop-shadow-blur: 24px;
+        drop-shadow-offset-y: 6px;
+        drop-shadow-color: self.focused ? Theme.glow : #00000090;
         want-focus: root.nav == -4;
         nav(key) => {
             return root.move(-4, key);
         }
+        entered => {
+            root.nav = -4;
+        }
         clicked => {
             root.add-host();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A host: what's running, its apps
+// ---------------------------------------------------------------------------
+
+component AppTile inherits Focusable {
+    in property <AppCard> app;
+    property <bool> lit: root.focused || root.hovered;
+
+    accessible-role: button;
+    accessible-label: root.app.title;
+    border-radius: 14px;
+    background: Theme.card;
+    drop-shadow-blur: root.focused ? 30px : 0px;
+    drop-shadow-color: Theme.glow;
+    animate drop-shadow-blur { duration: 160ms; }
+
+    Rectangle {
+        border-radius: 14px;
+        clip: true;
+
+        if root.app.has-art: Image {
+            // A slow push-in on the focused poster.
+            property <length> grow: root.lit ? 8px : 0px;
+            x: -self.grow;
+            y: -self.grow;
+            width: parent.width + 2 * self.grow;
+            height: parent.height + 2 * self.grow;
+            source: root.app.art;
+            image-fit: cover;
+            animate x, y, width, height { duration: 280ms; easing: ease-out; }
+        }
+
+        if !root.app.has-art: Rectangle {
+            background: @linear-gradient(160deg, Theme.card-hover 0%, Theme.bg 100%);
+            Icon {
+                x: parent.width - self.width - 12px;
+                y: parent.height - self.height - 12px;
+                width: parent.width * 0.4;
+                height: self.width;
+                name: "gamepad";
+                tint: Theme.text.transparentize(0.94);
+            }
+            Text {
+                x: 14px;
+                y: 14px;
+                width: parent.width - 28px;
+                height: parent.height - 28px;
+                text: root.app.title;
+                color: root.lit ? Theme.text : Theme.muted;
+                font-size: Theme.title-size;
+                font-weight: 700;
+                wrap: word-wrap;
+                overflow: elide;
+                horizontal-alignment: left;
+                vertical-alignment: bottom;
+            }
+        }
+
+        if root.app.has-art: Rectangle {
+            y: parent.height - self.height;
+            height: Math.max(64px, parent.height * 0.38);
+            background: @linear-gradient(180deg, #00000000 0%, #000000d8 100%);
+            Text {
+                x: 12px;
+                y: parent.height - self.height - 10px;
+                width: parent.width - 24px;
+                height: self.preferred-height;
+                text: root.app.title;
+                color: #ffffff;
+                font-size: Theme.heading-size;
+                font-weight: 700;
+                wrap: word-wrap;
+                overflow: elide;
+            }
+        }
+
+        HorizontalLayout {
+            x: 8px;
+            y: 8px;
+            width: parent.width - 16px;
+            height: 24px;
+            spacing: 6px;
+            alignment: start;
+            if root.app.running: Rectangle {
+                width: running-text.preferred-width + 20px;
+                border-radius: 12px;
+                background: Theme.accent;
+                running-text := Text {
+                    text: "Running";
+                    color: Theme.on-accent;
+                    font-size: Theme.caption-size;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            if root.app.hdr: Rectangle {
+                width: hdr-text.preferred-width + 16px;
+                border-radius: 12px;
+                background: #000000a0;
+                hdr-text := Text {
+                    text: "HDR";
+                    color: #ffffff;
+                    font-size: Theme.caption-size;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    // The frame, drawn over the picture.
+    Rectangle {
+        border-radius: 14px;
+        border-width: root.focused ? 3px : (root.app.running ? 2px : 1px);
+        border-color: root.focused ? Theme.accent : (root.app.running ? Theme.accent.transparentize(0.25) : (root.hovered ? Theme.faint : #ffffff14));
+        animate border-color { duration: 120ms; }
+    }
+}
+
+// The app running on the host, with Resume and Quit.
+component NowPlaying inherits Rectangle {
+    in property <AppCard> app;
+    in property <bool> resume-focus;
+    in property <bool> quit-focus;
+    callback resume;
+    callback quit;
+    callback resume-nav(string) -> bool;
+    callback quit-nav(string) -> bool;
+    callback resume-entered;
+    callback quit-entered;
+
+    height: body.preferred-height;
+    border-radius: Theme.radius;
+    background: @linear-gradient(90deg, Theme.accent.transparentize(0.74) 0%, Theme.card 72%);
+    border-width: 1px;
+    border-color: Theme.accent.transparentize(0.55);
+
+    body := HorizontalLayout {
+        padding: 12px;
+        padding-right: 14px;
+        spacing: 14px;
+        Rectangle {
+            width: Theme.compact ? 54px : 66px;
+            height: self.width * 4 / 3;
+            border-radius: 10px;
+            background: Theme.bg;
+            clip: true;
+            if root.app.has-art: Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.app.art;
+                image-fit: cover;
+            }
+            if !root.app.has-art: Icon {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 28px;
+                height: 28px;
+                name: "gamepad";
+                tint: Theme.accent;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: Theme.compact ? 8px : 2px;
+            Text {
+                text: "Running now";
+                color: Theme.accent;
+                font-size: Theme.caption-size;
+                font-weight: 600;
+            }
+            Text {
+                text: root.app.title;
+                color: Theme.text;
+                font-size: Theme.title-size;
+                font-weight: 700;
+                overflow: elide;
+            }
+            if Theme.compact: HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                ActionButton {
+                    text: "Resume";
+                    icon: "play";
+                    kind: 1;
+                    want-focus: root.resume-focus;
+                    nav(k) => {
+                        return root.resume-nav(k);
+                    }
+                    entered => {
+                        root.resume-entered();
+                    }
+                    clicked => {
+                        root.resume();
+                    }
+                }
+                ActionButton {
+                    text: "Quit";
+                    icon: "power";
+                    kind: 2;
+                    want-focus: root.quit-focus;
+                    nav(k) => {
+                        return root.quit-nav(k);
+                    }
+                    entered => {
+                        root.quit-entered();
+                    }
+                    clicked => {
+                        root.quit();
+                    }
+                }
+            }
+        }
+        if !Theme.compact: VerticalLayout {
+            alignment: center;
+            ActionButton {
+                text: "Resume";
+                icon: "play";
+                kind: 1;
+                want-focus: root.resume-focus;
+                nav(k) => {
+                    return root.resume-nav(k);
+                }
+                entered => {
+                    root.resume-entered();
+                }
+                clicked => {
+                    root.resume();
+                }
+            }
+        }
+        if !Theme.compact: VerticalLayout {
+            alignment: center;
+            ActionButton {
+                text: "Quit app";
+                icon: "power";
+                kind: 2;
+                want-focus: root.quit-focus;
+                nav(k) => {
+                    return root.quit-nav(k);
+                }
+                entered => {
+                    root.quit-entered();
+                }
+                clicked => {
+                    root.quit();
+                }
+            }
         }
     }
 }
@@ -527,346 +739,427 @@ export component AppsPage inherits Rectangle {
     callback forget;
     callback tools;
 
-    property <bool> menu-open: false;
-    property <length> pad: Theme.page-padding;
-    property <length> gap: Theme.compact ? 12px : 16px;
-    property <length> min-tile: Theme.compact ? 140px : 150px;
-
-    // TV remote / arrow keys: the focused app (0…), or a header action
-    // (-2 Back / "more", -3 Tools, -4 Quit app, -5 Forget); -1 before the
-    // first key.
+    // Focus: an app (0…); the header's Back (-2), Host tools (-3) and
+    // Forget (-5); the stream profile (-7); Resume (-6) and Quit (-4) on
+    // the running app.
     property <int> nav: -1;
     in property <int> refocus;
     changed refocus => {
         start.focus();
         root.nav = -1;
     }
-    function header-ok(code: int) -> bool {
-        return Theme.compact
-            ? code == -2
-            : (code == -2 || code == -5 || (code == -3 && root.hermes) || (code == -4 && root.app-running));
+    // Overlays: 1 confirm quitting the app, 2 confirm forgetting the host;
+    // the profile list.
+    property <int> confirm: 0;
+    property <int> confirm-choice: 0;
+    property <bool> sheet-open;
+    property <bool> overlay: root.confirm != 0 || root.sheet-open;
+    changed overlay => {
+        if (!root.overlay && root.nav == -1) {
+            start.focus();
+        }
     }
-    function header-step(from: int, dir: int) -> int {
-        if (root.header-ok(from + dir)) {
-            return from + dir;
+    pure function at(i: int) -> bool {
+        return !root.overlay && root.nav == i;
+    }
+
+    property <bool> shown;
+    Timer {
+        interval: 16ms;
+        running: !root.shown;
+        triggered => {
+            root.shown = true;
         }
-        if (root.header-ok(from + 2 * dir)) {
-            return from + 2 * dir;
-        }
-        if (root.header-ok(from + 3 * dir)) {
-            return from + 3 * dir;
-        }
-        return from;
+    }
+    opacity: root.shown ? 1 : 0;
+    animate opacity { duration: 200ms; easing: ease-out; }
+
+    property <length> pad: Theme.page-padding;
+    property <length> gap: Theme.compact ? 12px : 16px;
+    property <length> min-tile: Theme.compact ? 140px : (Theme.wide ? 168px : 150px);
+    property <int> cols: Math.max(2, Math.floor((root.width - 2 * root.pad + root.gap) / (root.min-tile + root.gap)));
+    property <length> tile-w: (root.width - 2 * root.pad - (root.cols - 1) * root.gap) / root.cols;
+    property <length> tile-h: root.tile-w * 4 / 3;
+    property <bool> has-profiles: root.profile-options.length > 1;
+
+    pure function first-content() -> int {
+        return root.has-profiles ? -7 : (root.app-running ? -6 : (root.apps.length > 0 ? 0 : -2));
+    }
+    pure function above-grid() -> int {
+        return root.app-running ? -6 : (root.has-profiles ? -7 : -2);
     }
     function move(from: int, key: string) -> bool {
+        let n = root.apps.length;
         if (from >= 0) {
-            if (key == Key.RightArrow && from + 1 < root.apps.length) {
+            if (key == Key.RightArrow && from + 1 < n) {
                 root.nav = from + 1;
             } else if (key == Key.LeftArrow && from > 0) {
                 root.nav = from - 1;
-            } else if (key == Key.DownArrow && from + root.cols < root.apps.length) {
+            } else if (key == Key.DownArrow && from + root.cols < n) {
                 root.nav = from + root.cols;
-            } else if (key == Key.DownArrow && Math.floor(from / root.cols) < Math.floor((root.apps.length - 1) / root.cols)) {
-                root.nav = root.apps.length - 1;
+            } else if (key == Key.DownArrow && Math.floor(from / root.cols) < Math.floor((n - 1) / root.cols)) {
+                root.nav = n - 1;
             } else if (key == Key.UpArrow && from >= root.cols) {
                 root.nav = from - root.cols;
             } else if (key == Key.UpArrow) {
-                root.nav = -2;
+                root.nav = root.above-grid();
             } else {
                 return false;
             }
             return true;
         }
-        if (key == Key.RightArrow && root.header-step(from, -1) != from) {
-            root.nav = root.header-step(from, -1);
-        } else if (key == Key.LeftArrow && root.header-step(from, 1) != from) {
-            root.nav = root.header-step(from, 1);
-        } else if (key == Key.DownArrow && root.apps.length > 0) {
-            root.nav = 0;
+        if (from == -7) {
+            if (key == Key.UpArrow) {
+                root.nav = -2;
+            } else if (key == Key.DownArrow && (root.app-running || n > 0)) {
+                root.nav = root.app-running ? -6 : 0;
+            } else {
+                return false;
+            }
+            return true;
+        }
+        if (from == -6 || from == -4) {
+            if (key == Key.RightArrow && from == -6) {
+                root.nav = -4;
+            } else if (key == Key.LeftArrow && from == -4) {
+                root.nav = -6;
+            } else if (key == Key.UpArrow) {
+                root.nav = root.has-profiles ? -7 : -2;
+            } else if (key == Key.DownArrow && n > 0) {
+                root.nav = 0;
+            } else {
+                return false;
+            }
+            return true;
+        }
+        // Header: Back (-2), Host tools (-3), Forget (-5).
+        if (key == Key.RightArrow && from == -2) {
+            root.nav = root.hermes ? -3 : -5;
+        } else if (key == Key.RightArrow && from == -3) {
+            root.nav = -5;
+        } else if (key == Key.LeftArrow && from == -5) {
+            root.nav = root.hermes ? -3 : -2;
+        } else if (key == Key.LeftArrow && from == -3) {
+            root.nav = -2;
+        } else if (key == Key.DownArrow && root.first-content() != -2) {
+            root.nav = root.first-content();
         } else {
             return false;
         }
         return true;
     }
+
     start := FocusScope {
-        width: 0;
-        height: 0;
+        width: 0px;
+        height: 0px;
         init => {
             self.focus();
         }
         key-pressed(event) => {
             if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
-                root.nav = root.apps.length > 0 ? 0 : -2;
+                root.nav = root.app-running ? -6 : (root.apps.length > 0 ? 0 : -2);
                 return accept;
             }
             return reject;
         }
     }
-    property <int> cols: Math.max(2, Math.floor((root.width - 2 * root.pad + root.gap) / (root.min-tile + root.gap)));
-    property <length> tile-w: (root.width - 2 * root.pad - (root.cols - 1) * root.gap) / root.cols;
-    property <length> tile-h: root.tile-w * 4 / 3 + 44px;
 
     VerticalLayout {
-        PageHeader {
+        TopBar {
             title: root.host-name;
             subtitle: root.host-detail;
-            show-back: Theme.compact;
+            back-focus: root.at(-2);
             back => {
                 root.back();
             }
-            if Theme.compact: VerticalLayout {
+            back-nav(k) => {
+                return root.move(-2, k);
+            }
+            back-entered => {
+                root.nav = -2;
+            }
+            if root.hermes && Theme.compact: VerticalLayout {
                 alignment: center;
                 IconButton {
-                    icon: "more";
-                    want-focus: root.nav == -2;
-                    nav(key) => {
-                        return root.move(-2, key);
+                    icon: "tools";
+                    label: "Host tools";
+                    want-focus: root.at(-3);
+                    nav(k) => {
+                        return root.move(-3, k);
                     }
-                    clicked => {
-                        root.menu-open = !root.menu-open;
-                    }
-                }
-            }
-            if !Theme.compact: VerticalLayout {
-                alignment: center;
-                PillButton {
-                    text: "Back";
-                    want-focus: root.nav == -2;
-                    nav(key) => {
-                        return root.move(-2, key);
-                    }
-                    clicked => {
-                        root.back();
-                    }
-                }
-            }
-            if !Theme.compact && root.hermes: VerticalLayout {
-                alignment: center;
-                PillButton {
-                    text: "Tools";
-                    want-focus: root.nav == -3;
-                    nav(key) => {
-                        return root.move(-3, key);
+                    entered => {
+                        root.nav = -3;
                     }
                     clicked => {
                         root.tools();
                     }
                 }
             }
-            if !Theme.compact && root.app-running: VerticalLayout {
+            if root.hermes && !Theme.compact: VerticalLayout {
                 alignment: center;
-                PillButton {
-                    text: "Quit app";
-                    danger: true;
-                    want-focus: root.nav == -4;
-                    nav(key) => {
-                        return root.move(-4, key);
+                ActionButton {
+                    text: "Host tools";
+                    icon: "tools";
+                    want-focus: root.at(-3);
+                    nav(k) => {
+                        return root.move(-3, k);
+                    }
+                    entered => {
+                        root.nav = -3;
                     }
                     clicked => {
-                        root.quit-app();
+                        root.tools();
+                    }
+                }
+            }
+            if Theme.compact: VerticalLayout {
+                alignment: center;
+                IconButton {
+                    icon: "delete";
+                    label: "Forget this host";
+                    want-focus: root.at(-5);
+                    nav(k) => {
+                        return root.move(-5, k);
+                    }
+                    entered => {
+                        root.nav = -5;
+                    }
+                    clicked => {
+                        root.confirm-choice = 0;
+                        root.confirm = 2;
                     }
                 }
             }
             if !Theme.compact: VerticalLayout {
                 alignment: center;
-                PillButton {
+                ActionButton {
                     text: "Forget";
-                    want-focus: root.nav == -5;
-                    nav(key) => {
-                        return root.move(-5, key);
+                    icon: "delete";
+                    kind: 3;
+                    want-focus: root.at(-5);
+                    nav(k) => {
+                        return root.move(-5, k);
+                    }
+                    entered => {
+                        root.nav = -5;
                     }
                     clicked => {
-                        root.forget();
+                        root.confirm-choice = 0;
+                        root.confirm = 2;
                     }
                 }
             }
         }
 
-        // Host facts; scrolls sideways on narrow screens instead of clipping.
-        if root.chips.length > 0: Flickable {
-            height: 32px;
-            content-height: 32px;
-            content-width: chip-row.preferred-width + 2 * root.pad;
-            chip-row := HorizontalLayout {
-                x: root.pad;
-                y: 2px;
-                width: self.preferred-width;
-                height: 24px;
-                spacing: 6px;
-                for chip in root.chips: Chip {
-                    text: chip;
-                    tone: Theme.info;
-                }
-            }
-        }
+        Flickable {
+            vertical-stretch: 1;
+            content-width: self.width;
+            content-height: column.preferred-height;
 
-        // Which stream profile this host launches with.
-        if root.profile-options.length > 1: HorizontalLayout {
-            padding-left: root.pad;
-            padding-right: root.pad;
-            padding-bottom: 8px;
-            spacing: 10px;
-            Text {
-                text: "Stream profile";
-                color: Theme.muted;
-                font-size: 13px;
-                vertical-alignment: center;
-            }
-            ComboBox {
-                width: Math.min(240px, root.width - 2 * root.pad - 120px);
-                model: root.profile-options;
-                current-index <=> root.profile-index;
-                selected(value) => {
-                    root.profile-chosen(self.current-index);
-                }
-            }
-            Rectangle {
-                horizontal-stretch: 1;
-            }
-        }
+            column := VerticalLayout {
+                width: root.width;
+                padding-left: root.pad;
+                padding-right: root.pad;
+                padding-top: 4px;
+                padding-bottom: root.pad;
+                spacing: Theme.compact ? 12px : 16px;
 
-        // Phones: what's running and a big Quit, instead of a header button.
-        if Theme.compact && root.app-running: HorizontalLayout {
-            padding-left: root.pad;
-            padding-right: root.pad;
-            padding-bottom: 8px;
-            Rectangle {
-                height: 56px;
-                border-radius: 14px;
-                background: Theme.accent.transparentize(0.86);
-                border-width: 1px;
-                border-color: Theme.accent.transparentize(0.6);
-                HorizontalLayout {
-                    padding-left: 14px;
-                    padding-right: 6px;
-                    spacing: 8px;
-                    Text {
-                        text: "An app is running on this host";
-                        color: Theme.text;
-                        font-size: 14px;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                        overflow: elide;
-                        horizontal-stretch: 1;
+                // Host facts; scrolls sideways on narrow screens.
+                if root.chips.length > 0: Flickable {
+                    height: 28px;
+                    content-height: 28px;
+                    content-width: chip-row.preferred-width;
+                    chip-row := HorizontalLayout {
+                        width: self.preferred-width;
+                        height: 26px;
+                        spacing: 6px;
+                        for chip in root.chips: Chip {
+                            text: chip;
+                            tone: Theme.muted;
+                        }
                     }
-                    VerticalLayout {
-                        alignment: center;
-                        PillButton {
-                            text: "Quit";
-                            danger: true;
-                            clicked => {
-                                root.quit-app();
+                }
+
+                // Which stream profile this host launches with.
+                if root.has-profiles: Rectangle {
+                    height: profile-row.height + 8px;
+                    border-radius: Theme.radius;
+                    background: Theme.card;
+                    profile-row := ChoiceRow {
+                        x: 4px;
+                        y: 4px;
+                        width: parent.width - 8px;
+                        label: "Stream profile";
+                        hint: "Settings used for apps started on this host";
+                        options: root.profile-options;
+                        index <=> root.profile-index;
+                        want-focus: root.at(-7);
+                        nav(k) => {
+                            return root.move(-7, k);
+                        }
+                        entered => {
+                            root.nav = -7;
+                        }
+                        picked(i) => {
+                            root.profile-chosen(i);
+                        }
+                        open => {
+                            root.sheet-open = true;
+                        }
+                    }
+                }
+
+                // What's running, from the app list.
+                if root.app-running: VerticalLayout {
+                    for app in root.apps: VerticalLayout {
+                        if app.running: NowPlaying {
+                            app: app;
+                            resume-focus: root.at(-6);
+                            quit-focus: root.at(-4);
+                            resume => {
+                                root.launch(app.id);
                             }
+                            quit => {
+                                root.confirm-choice = 0;
+                                root.confirm = 1;
+                            }
+                            resume-nav(k) => {
+                                return root.move(-6, k);
+                            }
+                            quit-nav(k) => {
+                                return root.move(-4, k);
+                            }
+                            resume-entered => {
+                                root.nav = -6;
+                            }
+                            quit-entered => {
+                                root.nav = -4;
+                            }
+                        }
+                    }
+                }
+
+                if root.loading: HorizontalLayout {
+                    alignment: center;
+                    padding: 48px;
+                    Loader {
+                        dot: 10px;
+                    }
+                }
+
+                if !root.loading && root.apps.length == 0: EmptyState {
+                    icon: "gamepad";
+                    title: "No apps to show";
+                    text: "This host has no apps you are allowed to see. Apps are set up in the host's web UI.";
+                }
+
+                if !root.loading && root.apps.length > 0: Rectangle {
+                    height: Math.ceil(root.apps.length / root.cols) * (root.tile-h + root.gap) - root.gap;
+                    for app[i] in root.apps: AppTile {
+                        x: Math.mod(i, root.cols) * (root.tile-w + root.gap);
+                        y: Math.floor(i / root.cols) * (root.tile-h + root.gap);
+                        width: root.tile-w;
+                        height: root.tile-h;
+                        app: app;
+                        want-focus: root.at(i);
+                        nav(key) => {
+                            return root.move(i, key);
+                        }
+                        entered => {
+                            root.nav = i;
+                        }
+                        clicked => {
+                            root.launch(app.id);
                         }
                     }
                 }
             }
         }
+    }
 
-        if root.loading: VerticalLayout {
-            vertical-stretch: 1;
-            alignment: center;
-            HorizontalLayout {
-                alignment: center;
-                Spinner {
-                    width: 36px;
-                    height: 36px;
-                    indeterminate: true;
-                }
-            }
+    if root.sheet-open: OptionSheet {
+        width: 100%;
+        height: 100%;
+        title: "Stream profile";
+        options: root.profile-options;
+        current: root.profile-index;
+        picked(i) => {
+            root.profile-index = i;
+            root.profile-chosen(i);
+            root.sheet-open = false;
         }
-
-        if !root.loading && root.apps.length == 0: VerticalLayout {
-            vertical-stretch: 1;
-            alignment: center;
-            padding: 24px;
-            Text {
-                text: "This host has no apps you are allowed to see.";
-                color: Theme.muted;
-                wrap: word-wrap;
-                horizontal-alignment: center;
-            }
-        }
-
-        if !root.loading && root.apps.length > 0: Flickable {
-            vertical-stretch: 1;
-            content-width: self.width;
-            content-height: Math.ceil(root.apps.length / root.cols) * (root.tile-h + root.gap) + root.pad;
-            // Keep the focused app in view.
-            property <int> focused-row: root.nav >= 0 ? Math.floor(root.nav / root.cols) : -1;
-            property <length> row-top: 8px + self.focused-row * (root.tile-h + root.gap);
-            changed focused-row => {
-                if (self.focused-row >= 0 && self.row-top + self.content-y < 0) {
-                    self.content-y = 8px - self.row-top;
-                } else if (self.focused-row >= 0 && self.row-top + root.tile-h + self.content-y > self.height) {
-                    self.content-y = self.height - self.row-top - root.tile-h - root.gap;
-                }
-            }
-
-            for app[i] in root.apps: AppTile {
-                x: root.pad + Math.mod(i, root.cols) * (root.tile-w + root.gap);
-                y: 8px + Math.floor(i / root.cols) * (root.tile-h + root.gap);
-                width: root.tile-w;
-                height: root.tile-h;
-                app: app;
-                want-focus: root.nav == i;
-                nav(key) => {
-                    return root.move(i, key);
-                }
-                clicked => {
-                    root.launch(app.id);
-                }
-            }
+        dismissed => {
+            root.sheet-open = false;
         }
     }
 
-    // Overflow menu (phones).
-    if root.menu-open: TouchArea {
-        clicked => {
-            root.menu-open = false;
+    if root.confirm != 0: Modal {
+        width: 100%;
+        height: 100%;
+        dismissed => {
+            root.confirm = 0;
         }
-    }
-    if root.menu-open: Rectangle {
-        x: root.width - self.width - 8px;
-        y: 60px;
-        width: 240px;
-        height: menu.preferred-height;
-        border-radius: 14px;
-        background: Theme.surface;
-        border-width: 1px;
-        border-color: Theme.border;
-        drop-shadow-blur: 24px;
-        drop-shadow-color: #00000090;
-        menu := VerticalLayout {
-            padding: 6px;
-            if root.app-running: MenuItem {
-                icon: "stop";
-                text: "Quit running app";
-                danger: true;
+        DialogTitle {
+            text: root.confirm == 1 ? "Quit the running app?" : "Forget " + root.host-name + "?";
+        }
+        DialogText {
+            text: root.confirm == 1
+                ? "The app closes on the host. Anything you haven't saved in it is lost."
+                : "You'll need to pair again to stream from it. Remove this device in the host's web UI too.";
+        }
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: end;
+            ActionButton {
+                text: "Cancel";
+                want-focus: root.confirm-choice == 0;
+                nav(k) => {
+                    if (k == Key.RightArrow) {
+                        root.confirm-choice = 1;
+                        return true;
+                    }
+                    if (k == Key.Back || k == Key.Escape) {
+                        root.confirm = 0;
+                        return true;
+                    }
+                    return false;
+                }
                 clicked => {
-                    root.menu-open = false;
-                    root.quit-app();
+                    root.confirm = 0;
                 }
             }
-            if root.hermes: MenuItem {
-                icon: "tools";
-                text: "Host tools";
-                clicked => {
-                    root.menu-open = false;
-                    root.tools();
+            ActionButton {
+                text: root.confirm == 1 ? "Quit app" : "Forget";
+                kind: 2;
+                want-focus: root.confirm-choice == 1;
+                nav(k) => {
+                    if (k == Key.LeftArrow) {
+                        root.confirm-choice = 0;
+                        return true;
+                    }
+                    if (k == Key.Back || k == Key.Escape) {
+                        root.confirm = 0;
+                        return true;
+                    }
+                    return false;
                 }
-            }
-            MenuItem {
-                icon: "delete";
-                text: "Forget this host";
                 clicked => {
-                    root.menu-open = false;
-                    root.forget();
+                    if (root.confirm == 1) {
+                        root.confirm = 0;
+                        root.quit-app();
+                    } else {
+                        root.confirm = 0;
+                        root.forget();
+                    }
                 }
             }
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Launching / errors
+// ---------------------------------------------------------------------------
 
 export component SessionPage inherits Rectangle {
     in property <string> title;
@@ -876,116 +1169,153 @@ export component SessionPage inherits Rectangle {
     callback back;
     callback quit-app;
 
-    VerticalLayout {
-        PageHeader {
-            title: root.title;
-            subtitle: root.subtitle;
+    // Focus: 0 Back / Cancel, 1 Quit app.
+    property <int> nav: -1;
+    in property <int> refocus;
+    changed refocus => {
+        start.focus();
+        root.nav = -1;
+    }
+    function move(from: int, key: string) -> bool {
+        if (key == Key.RightArrow && from == 0 && !root.busy) {
+            root.nav = 1;
+            return true;
         }
+        if (key == Key.LeftArrow && from == 1) {
+            root.nav = 0;
+            return true;
+        }
+        return false;
+    }
 
-        VerticalLayout {
-            vertical-stretch: 1;
+    property <bool> shown;
+    Timer {
+        interval: 16ms;
+        running: !root.shown;
+        triggered => {
+            root.shown = true;
+        }
+    }
+    opacity: root.shown ? 1 : 0;
+    animate opacity { duration: 200ms; easing: ease-out; }
+
+    start := FocusScope {
+        width: 0px;
+        height: 0px;
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
+                root.nav = 0;
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    Rectangle {
+        x: (root.width - self.width) / 2;
+        y: -root.height * 0.35;
+        width: root.width * 1.2;
+        height: root.height;
+        background: @radial-gradient(circle, Theme.accent.transparentize(root.busy ? 0.88 : 0.94) 0%, Theme.accent.transparentize(1) 65%);
+    }
+
+    VerticalLayout {
+        alignment: center;
+        padding: Theme.page-padding;
+        spacing: 14px;
+
+        HorizontalLayout {
             alignment: center;
-            padding: Theme.page-padding;
-
-            HorizontalLayout {
-                alignment: center;
-                Rectangle {
-                    width: Math.min(560px, root.width - 2 * Theme.page-padding);
-                    border-radius: Theme.radius;
-                    background: Theme.card;
-                    border-width: 1px;
-                    border-color: Theme.border;
-
-                    VerticalLayout {
-                        padding: 24px;
-                        spacing: 10px;
-
-                        if root.busy: HorizontalLayout {
-                            alignment: center;
-                            Spinner {
-                                width: 32px;
-                                height: 32px;
-                                indeterminate: true;
-                            }
-                        }
-
-                        for line in root.lines: Text {
-                            text: line;
-                            color: Theme.text;
-                            font-size: 14px;
-                            wrap: word-wrap;
-                        }
-
-                        HorizontalLayout {
-                            spacing: 10px;
-                            alignment: end;
-                            PillButton {
-                                text: root.busy ? "Cancel" : "Back to apps";
-                                clicked => {
-                                    root.back();
-                                }
-                            }
-                            PillButton {
-                                text: "Quit app";
-                                danger: true;
-                                enabled: !root.busy;
-                                clicked => {
-                                    root.quit-app();
-                                }
-                            }
-                        }
-                    }
+            if root.busy: Loader {
+                dot: 12px;
+            }
+            if !root.busy: Rectangle {
+                width: 64px;
+                height: 64px;
+                border-radius: 32px;
+                background: Theme.warn.transparentize(0.86);
+                Icon {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 32px;
+                    height: 32px;
+                    name: "warning";
+                    tint: Theme.warn;
+                }
+            }
+        }
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: Theme.display-size;
+            font-weight: 700;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+        if root.subtitle != "": Text {
+            text: root.subtitle;
+            color: Theme.muted;
+            font-size: Theme.body-size;
+            horizontal-alignment: center;
+        }
+        HorizontalLayout {
+            alignment: center;
+            VerticalLayout {
+                width: Math.min(560px, root.width - 2 * Theme.page-padding);
+                spacing: 6px;
+                padding-top: 6px;
+                for line in root.lines: Text {
+                    text: line;
+                    color: Theme.text;
+                    font-size: Theme.body-size;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+        }
+        HorizontalLayout {
+            alignment: center;
+            spacing: 10px;
+            padding-top: 10px;
+            ActionButton {
+                text: root.busy ? "Cancel" : "Back to apps";
+                icon: root.busy ? "close" : "back";
+                want-focus: root.nav == 0;
+                nav(k) => {
+                    return root.move(0, k);
+                }
+                entered => {
+                    root.nav = 0;
+                }
+                clicked => {
+                    root.back();
+                }
+            }
+            if !root.busy: ActionButton {
+                text: "Quit app";
+                icon: "power";
+                kind: 2;
+                want-focus: root.nav == 1;
+                nav(k) => {
+                    return root.move(1, k);
+                }
+                entered => {
+                    root.nav = 1;
+                }
+                clicked => {
+                    root.quit-app();
                 }
             }
         }
     }
 }
 
-component SettingRow inherits HorizontalLayout {
-    in property <string> label;
-    in property <string> hint;
-    spacing: Theme.compact ? 12px : 16px;
-    min-height: Theme.compact ? 60px : 48px;
-    padding-top: Theme.compact ? 4px : 0px;
-    padding-bottom: Theme.compact ? 4px : 0px;
-
-    VerticalLayout {
-        alignment: center;
-        horizontal-stretch: 1;
-        spacing: 2px;
-        Text {
-            text: root.label;
-            color: Theme.text;
-            font-size: Theme.body-size;
-            font-weight: 600;
-            wrap: word-wrap;
-        }
-        if root.hint != "": Text {
-            text: root.hint;
-            color: Theme.muted;
-            font-size: 12px;
-            wrap: word-wrap;
-        }
-    }
-
-    VerticalLayout {
-        alignment: center;
-        horizontal-stretch: 0;
-        @children
-    }
-}
-
-component SectionTitle inherits VerticalLayout {
-    in property <string> text;
-    padding-top: 18px;
-    padding-bottom: 4px;
-    Text {
-        text: root.text;
-        color: Theme.accent;
-        font-size: 13px;
-        font-weight: 700;
-    }
-}
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
 
 export component SettingsPage inherits Rectangle {
     in property <[string]> resolution-options;
@@ -1027,32 +1357,159 @@ export component SettingsPage inherits Rectangle {
     callback open-last-report;
     callback open-app-log;
 
-    // Pickers get at most ~45% of the row so labels keep their room.
-    property <length> picker-w: Math.min(Theme.compact ? 160px : 170px, (root.width - 2 * Theme.page-padding) * 0.45);
-    property <length> slider-w: Math.min(200px, (root.width - 2 * Theme.page-padding) * 0.45);
+    property <[string]> preset-names: ["Custom", "Fast", "Balanced", "Quality", "Battery saver"];
+    property <[string]> codec-names: ["Auto", "H.264", "HEVC", "AV1"];
+    property <[string]> scale-names: ["Fit", "Fill", "Stretch"];
+    property <[string]> orientation-names: ["Landscape", "Portrait", "Follow the device"];
+    property <[string]> speaker-names: ["Stereo", "5.1 surround", "7.1 surround"];
+    property <string> custom-text;
+    property <string> profile-text;
+
+    // Focus: the header's Back (-2) and Save (-3), then the rows in page
+    // order: 0…18, the saved profiles (100…), 20…23. 8 and 10 only exist
+    // on Android.
+    property <int> nav: -1;
+    in property <int> refocus;
+    changed refocus => {
+        start.focus();
+        root.nav = -1;
+    }
+    // The open option list: the index of the row it belongs to.
+    property <int> sheet: -1;
+    changed sheet => {
+        if (root.sheet < 0 && root.nav == -1) {
+            start.focus();
+        }
+    }
+    property <int> profile-count: root.profile-names.length;
+    changed profile-count => {
+        if (root.nav >= 100 + root.profile-count) {
+            root.nav = root.profile-count > 0 ? 100 + root.profile-count - 1 : 18;
+        }
+    }
+    pure function at(i: int) -> bool {
+        return root.sheet < 0 && root.nav == i;
+    }
+    pure function pos(i: int) -> int {
+        return i < 19 ? i : (i >= 100 ? 19 + (i - 100) : 19 + root.profile-count + (i - 20));
+    }
+    pure function index-at(p: int) -> int {
+        return p < 19 ? p : (p < 19 + root.profile-count ? 100 + (p - 19) : 20 + (p - 19 - root.profile-count));
+    }
+    pure function valid(i: int) -> bool {
+        return (i != 8 || (root.android && root.hardware-decoding)) && (i != 10 || root.android);
+    }
+    pure function step(from: int, dir: int) -> int {
+        let p = root.pos(from) + dir;
+        let last = 22 + root.profile-count;
+        if (p < 0 || p > last) {
+            return from;
+        }
+        if (root.valid(root.index-at(p))) {
+            return root.index-at(p);
+        }
+        if (p + dir < 0 || p + dir > last) {
+            return from;
+        }
+        return root.index-at(p + dir);
+    }
+    function move(from: int, key: string) -> bool {
+        if (from == -2 || from == -3) {
+            if (key == Key.RightArrow && from == -2) {
+                root.nav = -3;
+            } else if (key == Key.LeftArrow && from == -3) {
+                root.nav = -2;
+            } else if (key == Key.DownArrow) {
+                root.nav = 0;
+            } else {
+                return false;
+            }
+            return true;
+        }
+        if (key == Key.DownArrow) {
+            root.nav = root.step(from, 1);
+            return true;
+        }
+        if (key == Key.UpArrow) {
+            root.nav = root.step(from, -1) == from ? -3 : root.step(from, -1);
+            return true;
+        }
+        return false;
+    }
+    function choose(id: int, i: int) {
+        if (id == 0) {
+            root.preset = i;
+            root.preset-changed(i);
+        } else if (id == 1) {
+            root.resolution = i;
+            root.preset = 0;
+        } else if (id == 3) {
+            root.fps = i;
+            root.preset = 0;
+        } else if (id == 5) {
+            root.codec = i;
+        } else if (id == 9) {
+            root.video-scale = i;
+        } else if (id == 10) {
+            root.orientation = i;
+        } else if (id == 15) {
+            root.audio = i;
+        }
+    }
+
+    property <bool> shown;
+    Timer {
+        interval: 16ms;
+        running: !root.shown;
+        triggered => {
+            root.shown = true;
+        }
+    }
+    opacity: root.shown ? 1 : 0;
+    animate opacity { duration: 200ms; easing: ease-out; }
+
+    start := FocusScope {
+        width: 0px;
+        height: 0px;
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
+                root.nav = 0;
+                return accept;
+            }
+            return reject;
+        }
+    }
 
     VerticalLayout {
-        PageHeader {
+        TopBar {
             title: "Settings";
-            subtitle: "Applied to the next session";
-            show-back: Theme.compact;
+            subtitle: "Used from the next stream on";
+            back-focus: root.at(-2);
             back => {
                 root.back();
             }
-            if !Theme.compact: VerticalLayout {
-                alignment: center;
-                PillButton {
-                    text: "Back";
-                    clicked => {
-                        root.back();
-                    }
-                }
+            back-nav(k) => {
+                return root.move(-2, k);
+            }
+            back-entered => {
+                root.nav = -2;
             }
             VerticalLayout {
                 alignment: center;
-                PillButton {
+                ActionButton {
                     text: "Save";
-                    primary: true;
+                    icon: "check";
+                    kind: 1;
+                    want-focus: root.at(-3);
+                    nav(k) => {
+                        return root.move(-3, k);
+                    }
+                    entered => {
+                        root.nav = -3;
+                    }
                     clicked => {
                         root.save();
                     }
@@ -1068,342 +1525,450 @@ export component SettingsPage inherits Rectangle {
                 width: root.width;
                 alignment: center;
                 VerticalLayout {
-                    width: Math.min(640px, root.width - 2 * Theme.page-padding);
-                    padding-top: 8px;
-                    padding-bottom: 32px;
-                    spacing: Theme.compact ? 2px : 6px;
+                    width: Math.min(760px, root.width - 2 * Theme.page-padding);
+                    padding-top: 6px;
+                    padding-bottom: 40px;
+                    spacing: 24px;
 
-                    SectionTitle {
-                        text: "Profiles";
-                    }
-                    SettingRow {
-                        label: "Save as profile";
-                        hint: "Keeps this page's video, audio and host settings under a name; choose it per host on the host's page";
-                        HorizontalLayout {
-                            spacing: 6px;
-                            width: root.picker-w;
-                            profile-name := LineEdit {
-                                placeholder-text: "Couch TV";
-                                accepted(text) => {
-                                    root.save-profile(text);
-                                    self.text = "";
-                                }
+                    Group {
+                        title: "Stream quality";
+                        ChoiceRow {
+                            label: "Preset";
+                            hint: root.preset-hint;
+                            options: root.preset-names;
+                            index <=> root.preset;
+                            want-focus: root.at(0);
+                            nav(k) => {
+                                return root.move(0, k);
                             }
-                            PillButton {
-                                text: "Save";
-                                clicked => {
-                                    root.save-profile(profile-name.text);
-                                    profile-name.text = "";
-                                }
+                            entered => {
+                                root.nav = 0;
+                            }
+                            picked(i) => {
+                                root.preset-changed(i);
+                            }
+                            open => {
+                                root.sheet = 0;
                             }
                         }
-                    }
-                    if root.profile-names.length > 0: SettingRow {
-                        label: "Saved profiles";
-                        hint: "Load one into this page (then Save), or delete it";
-                        VerticalLayout {
-                            spacing: 6px;
-                            width: root.picker-w;
-                            ComboBox {
-                                model: root.profile-names;
-                                current-index <=> root.profile-pick;
+                        ChoiceRow {
+                            label: "Resolution";
+                            options: root.resolution-options;
+                            index <=> root.resolution;
+                            want-focus: root.at(1);
+                            nav(k) => {
+                                return root.move(1, k);
                             }
-                            HorizontalLayout {
-                                spacing: 6px;
-                                PillButton {
-                                    text: "Load";
-                                    clicked => {
-                                        root.load-profile(root.profile-pick);
-                                    }
-                                }
-                                PillButton {
-                                    text: "Delete";
-                                    danger: true;
-                                    clicked => {
-                                        root.delete-profile(root.profile-pick);
-                                    }
-                                }
+                            entered => {
+                                root.nav = 1;
                             }
-                        }
-                    }
-
-                    SectionTitle {
-                        text: "Video";
-                    }
-                    SettingRow {
-                        label: "Preset";
-                        hint: root.preset-hint;
-                        ComboBox {
-                            width: root.picker-w;
-                            model: ["Custom", "Fast", "Balanced", "Quality", "Battery saver"];
-                            current-index <=> root.preset;
-                            selected(value) => {
-                                root.preset-changed(self.current-index);
-                            }
-                        }
-                    }
-                    SettingRow {
-                        label: "Resolution";
-                        ComboBox {
-                            width: root.picker-w;
-                            model: root.resolution-options;
-                            current-index <=> root.resolution;
                             // Editing the mode by hand leaves the preset.
-                            selected(value) => {
+                            picked(i) => {
                                 root.preset = 0;
                             }
-                        }
-                    }
-                    SettingRow {
-                        label: "Custom resolution";
-                        hint: "Width × height, e.g. 2560x1080";
-                        HorizontalLayout {
-                            spacing: 6px;
-                            width: root.picker-w;
-                            custom-res := LineEdit {
-                                placeholder-text: "2560x1080";
-                                accepted(text) => {
-                                    root.custom-resolution(text);
-                                    self.text = "";
-                                }
-                            }
-                            PillButton {
-                                text: "Use";
-                                clicked => {
-                                    root.custom-resolution(custom-res.text);
-                                    custom-res.text = "";
-                                }
+                            open => {
+                                root.sheet = 1;
                             }
                         }
-                    }
-                    SettingRow {
-                        label: "Frame rate";
-                        ComboBox {
-                            width: root.picker-w;
-                            model: root.fps-options;
-                            current-index <=> root.fps;
-                            selected(value) => {
+                        FieldRow {
+                            label: "Custom resolution";
+                            hint: "Any size the host accepts, width × height";
+                            placeholder: "2560x1080";
+                            action: "Use";
+                            text <=> root.custom-text;
+                            want-focus: root.at(2);
+                            nav(k) => {
+                                return root.move(2, k);
+                            }
+                            entered => {
+                                root.nav = 2;
+                            }
+                            submit(t) => {
+                                root.custom-resolution(t);
+                            }
+                        }
+                        ChoiceRow {
+                            label: "Frame rate";
+                            options: root.fps-options;
+                            index <=> root.fps;
+                            want-focus: root.at(3);
+                            nav(k) => {
+                                return root.move(3, k);
+                            }
+                            entered => {
+                                root.nav = 3;
+                            }
+                            picked(i) => {
                                 root.preset = 0;
                             }
+                            open => {
+                                root.sheet = 3;
+                            }
                         }
-                    }
-                    SettingRow {
-                        label: "Bitrate";
-                        hint: (Math.round(root.bitrate-mbps * 4) / 4) + " Mbps";
-                        Slider {
-                            width: root.slider-w;
+                        SliderRow {
+                            label: "Bitrate";
+                            hint: "Higher looks sharper and needs a faster network";
+                            value-text: (Math.round(root.bitrate-mbps * 4) / 4) + " Mbps";
                             minimum: 1;
                             maximum: 200;
+                            step: 0.5;
+                            key-step: 1;
                             value <=> root.bitrate-mbps;
-                            changed(value) => {
+                            want-focus: root.at(4);
+                            nav(k) => {
+                                return root.move(4, k);
+                            }
+                            entered => {
+                                root.nav = 4;
+                            }
+                            moved(v) => {
                                 root.preset = 0;
                             }
                         }
-                    }
-                    SettingRow {
-                        label: "Picture";
-                        hint: root.video-scale == 0 ? "Whole picture, black bars if the shapes differ"
-                            : root.video-scale == 1 ? "Fills the screen, crops the edges"
-                            : "Fills the screen, distorts the picture";
-                        ComboBox {
-                            width: root.picker-w;
-                            model: ["Fit", "Fill", "Stretch"];
-                            current-index <=> root.video-scale;
+                        ChoiceRow {
+                            label: "Codec";
+                            hint: "Auto picks the best one both sides support";
+                            options: root.codec-names;
+                            index <=> root.codec;
+                            want-focus: root.at(5);
+                            nav(k) => {
+                                return root.move(5, k);
+                            }
+                            entered => {
+                                root.nav = 5;
+                            }
+                            open => {
+                                root.sheet = 5;
+                            }
                         }
-                    }
-                    SettingRow {
-                        label: "Codec";
-                        hint: "Auto picks the best one both sides support";
-                        ComboBox {
-                            width: root.picker-w;
-                            model: ["Auto", "H.264", "HEVC", "AV1"];
-                            current-index <=> root.codec;
-                        }
-                    }
-                    SettingRow {
-                        label: "Hardware decoding";
-                        hint: "Faster and lighter on the battery; turn off to compare with the software decoder (H.264 only)";
-                        Switch {
-                            checked <=> root.hardware-decoding;
-                        }
-                    }
-                    if root.android && root.hardware-decoding: SettingRow {
-                        label: "Zero-copy video";
-                        hint: "The decoder's pictures go straight to the GPU, like Moonlight; turn off to read them on the CPU";
-                        Switch {
-                            checked <=> root.gpu-video;
-                        }
-                    }
-                    SettingRow {
-                        label: "HDR";
-                        hint: "Needs HDR support on the host (Hermes-KMS) and this display";
-                        Switch {
+                        SwitchRow {
+                            label: "HDR";
+                            hint: "Needs HDR on the host (Hermes-KMS) and on this display";
                             checked <=> root.hdr;
+                            want-focus: root.at(6);
+                            nav(k) => {
+                                return root.move(6, k);
+                            }
+                            entered => {
+                                root.nav = 6;
+                            }
                         }
                     }
 
-                    SectionTitle {
-                        text: "Hermes";
-                    }
-                    SettingRow {
-                        label: "Virtual display";
-                        hint: "Stream from a virtual display sized to this device";
-                        Switch {
-                            checked <=> root.virtual-display;
+                    Group {
+                        title: "Decoding";
+                        SwitchRow {
+                            label: "Hardware decoding";
+                            hint: "Faster and lighter on the battery. Turn off to compare with the software decoder (H.264 only)";
+                            checked <=> root.hardware-decoding;
+                            want-focus: root.at(7);
+                            nav(k) => {
+                                return root.move(7, k);
+                            }
+                            entered => {
+                                root.nav = 7;
+                            }
                         }
-                    }
-                    SettingRow {
-                        label: "Gamescope session";
-                        hint: "Run games in an isolated Gamescope session when the host supports it";
-                        Switch {
-                            checked <=> root.gamescope;
-                        }
-                    }
-                    SettingRow {
-                        label: "Clipboard sync";
-                        hint: "Hermes hosts: what you copy on either side can be pasted on the other while streaming";
-                        Switch {
-                            checked <=> root.clipboard;
-                        }
-                    }
-
-                    SectionTitle {
-                        text: "Audio & host";
-                    }
-                    SettingRow {
-                        label: "Speakers";
-                        ComboBox {
-                            width: root.picker-w;
-                            model: ["Stereo", "5.1 surround", "7.1 surround"];
-                            current-index <=> root.audio;
-                        }
-                    }
-                    SettingRow {
-                        label: "Play audio on host";
-                        Switch {
-                            checked <=> root.host-audio;
-                        }
-                    }
-                    SettingRow {
-                        label: "Optimize game settings";
-                        hint: "Let the host adjust its display mode for the stream";
-                        Switch {
-                            checked <=> root.optimize;
+                        if root.android && root.hardware-decoding: SwitchRow {
+                            label: "Zero-copy video";
+                            hint: "Decoded pictures go straight to the GPU. Turn off to read them on the CPU";
+                            checked <=> root.gpu-video;
+                            want-focus: root.at(8);
+                            nav(k) => {
+                                return root.move(8, k);
+                            }
+                            entered => {
+                                root.nav = 8;
+                            }
                         }
                     }
 
-                    SectionTitle {
-                        text: "Stream screen";
-                    }
-                    SettingRow {
-                        label: "Orientation";
-                        hint: "While streaming on a phone or tablet";
-                        ComboBox {
-                            width: root.picker-w;
-                            model: ["Landscape", "Portrait", "Follow the device"];
-                            current-index <=> root.orientation;
+                    Group {
+                        title: "Picture and controls";
+                        ChoiceRow {
+                            label: "Picture";
+                            hint: root.video-scale == 0 ? "Whole picture, black bars if the shapes differ"
+                                : (root.video-scale == 1 ? "Fills the screen, crops the edges" : "Fills the screen, distorts the picture");
+                            options: root.scale-names;
+                            index <=> root.video-scale;
+                            want-focus: root.at(9);
+                            nav(k) => {
+                                return root.move(9, k);
+                            }
+                            entered => {
+                                root.nav = 9;
+                            }
+                            open => {
+                                root.sheet = 9;
+                            }
                         }
-                    }
-                    SettingRow {
-                        label: "Menu button";
-                        hint: "Always show it. Otherwise Back (Escape on a keyboard) opens the menu; a 3-finger tap opens the keyboard";
-                        Switch {
+                        if root.android: ChoiceRow {
+                            label: "Orientation";
+                            hint: "While streaming on a phone or tablet";
+                            options: root.orientation-names;
+                            index <=> root.orientation;
+                            want-focus: root.at(10);
+                            nav(k) => {
+                                return root.move(10, k);
+                            }
+                            entered => {
+                                root.nav = 10;
+                            }
+                            open => {
+                                root.sheet = 10;
+                            }
+                        }
+                        SwitchRow {
+                            label: "Menu button";
+                            hint: "Always show it. Otherwise Back (Escape on a keyboard) opens the menu, and a 3-finger tap the keyboard";
                             checked <=> root.show-menu-button;
+                            want-focus: root.at(11);
+                            nav(k) => {
+                                return root.move(11, k);
+                            }
+                            entered => {
+                                root.nav = 11;
+                            }
                         }
                     }
 
-                    SectionTitle {
-                        text: "Diagnostics";
-                    }
-                    SettingRow {
-                        label: "Report after each stream";
-                        hint: "Statistics and every log line, ready to share";
-                        Switch {
-                            checked <=> root.show-report;
+                    Group {
+                        title: "Hermes hosts";
+                        SwitchRow {
+                            label: "Virtual display";
+                            hint: "Stream from a display the host creates at this device's size";
+                            checked <=> root.virtual-display;
+                            want-focus: root.at(12);
+                            nav(k) => {
+                                return root.move(12, k);
+                            }
+                            entered => {
+                                root.nav = 12;
+                            }
+                        }
+                        SwitchRow {
+                            label: "Gamescope session";
+                            hint: "Run games in their own Gamescope session when the host supports it";
+                            checked <=> root.gamescope;
+                            want-focus: root.at(13);
+                            nav(k) => {
+                                return root.move(13, k);
+                            }
+                            entered => {
+                                root.nav = 13;
+                            }
+                        }
+                        SwitchRow {
+                            label: "Clipboard sync";
+                            hint: "What you copy on either side can be pasted on the other while streaming";
+                            checked <=> root.clipboard;
+                            want-focus: root.at(14);
+                            nav(k) => {
+                                return root.move(14, k);
+                            }
+                            entered => {
+                                root.nav = 14;
+                            }
                         }
                     }
-                    HorizontalLayout {
-                        alignment: start;
-                        padding-bottom: 4px;
-                        spacing: 8px;
-                        PillButton {
-                            text: "Last stream report";
+
+                    Group {
+                        title: "Audio and host";
+                        ChoiceRow {
+                            label: "Speakers";
+                            options: root.speaker-names;
+                            index <=> root.audio;
+                            want-focus: root.at(15);
+                            nav(k) => {
+                                return root.move(15, k);
+                            }
+                            entered => {
+                                root.nav = 15;
+                            }
+                            open => {
+                                root.sheet = 15;
+                            }
+                        }
+                        SwitchRow {
+                            label: "Play audio on the host";
+                            checked <=> root.host-audio;
+                            want-focus: root.at(16);
+                            nav(k) => {
+                                return root.move(16, k);
+                            }
+                            entered => {
+                                root.nav = 16;
+                            }
+                        }
+                        SwitchRow {
+                            label: "Optimize game settings";
+                            hint: "Let the host adjust its display mode for the stream";
+                            checked <=> root.optimize;
+                            want-focus: root.at(17);
+                            nav(k) => {
+                                return root.move(17, k);
+                            }
+                            entered => {
+                                root.nav = 17;
+                            }
+                        }
+                    }
+
+                    Group {
+                        title: "Profiles";
+                        FieldRow {
+                            label: "Save as a profile";
+                            hint: "Keeps this page's settings under a name, to pick per host on the host's page";
+                            placeholder: "Couch TV";
+                            action: "Save";
+                            text <=> root.profile-text;
+                            want-focus: root.at(18);
+                            nav(k) => {
+                                return root.move(18, k);
+                            }
+                            entered => {
+                                root.nav = 18;
+                            }
+                            submit(t) => {
+                                root.save-profile(t);
+                            }
+                        }
+                        for name[i] in root.profile-names: ProfileRow {
+                            name: name;
+                            want-focus: root.at(100 + i);
+                            nav(k) => {
+                                return root.move(100 + i, k);
+                            }
+                            entered => {
+                                root.nav = 100 + i;
+                            }
+                            load => {
+                                root.profile-pick = i;
+                                root.load-profile(i);
+                            }
+                            remove => {
+                                root.profile-pick = i;
+                                root.delete-profile(i);
+                            }
+                        }
+                    }
+
+                    Group {
+                        title: "Diagnostics";
+                        SwitchRow {
+                            label: "Report after each stream";
+                            hint: "Statistics and every log line, ready to share";
+                            checked <=> root.show-report;
+                            want-focus: root.at(20);
+                            nav(k) => {
+                                return root.move(20, k);
+                            }
+                            entered => {
+                                root.nav = 20;
+                            }
+                        }
+                        ActionRow {
+                            label: "Last stream report";
+                            icon: "report";
+                            want-focus: root.at(21);
+                            nav(k) => {
+                                return root.move(21, k);
+                            }
+                            entered => {
+                                root.nav = 21;
+                            }
                             clicked => {
                                 root.open-last-report();
                             }
                         }
-                        PillButton {
-                            text: "App log";
+                        ActionRow {
+                            label: "App log";
+                            icon: "stats";
+                            want-focus: root.at(22);
+                            nav(k) => {
+                                return root.move(22, k);
+                            }
+                            entered => {
+                                root.nav = 22;
+                            }
                             clicked => {
                                 root.open-app-log();
                             }
                         }
                     }
 
-                    SectionTitle {
-                        text: "About";
-                    }
-                    Text {
-                        text: root.version;
-                        color: Theme.text;
-                        font-size: 13px;
-                    }
-                    Text {
-                        text: "Client id: " + root.client-id;
-                        color: Theme.muted;
-                        font-size: 12px;
-                    }
-                    Text {
-                        text: "Data: " + root.data-dir;
-                        color: Theme.muted;
-                        font-size: 12px;
-                        wrap: word-wrap;
+                    Group {
+                        title: "About";
+                        InfoRow {
+                            want-focus: root.at(23);
+                            nav(k) => {
+                                return root.move(23, k);
+                            }
+                            entered => {
+                                root.nav = 23;
+                            }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Icon {
+                                        name: "flame";
+                                        tint: Theme.accent;
+                                    }
+                                }
+                                Text {
+                                    text: root.version;
+                                    color: Theme.text;
+                                    font-size: Theme.heading-size;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            Text {
+                                text: "Client ID: " + root.client-id;
+                                color: Theme.muted;
+                                font-size: Theme.caption-size;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: "Data: " + root.data-dir;
+                                color: Theme.muted;
+                                font-size: Theme.caption-size;
+                                wrap: word-wrap;
+                            }
+                        }
                     }
                 }
             }
         }
     }
-}
 
-export struct PreflightRow {
-    // 1 ok, 2 warning, 3 failure
-    level: int,
-    title: string,
-    message: string,
-}
-
-export struct CommandRow {
-    id: int,
-    name: string,
-    // Hermes wants a confirmation before running it.
-    confirm: bool,
-    // First tap done; the next one runs it.
-    armed: bool,
-}
-
-component ToolCard inherits Rectangle {
-    in property <string> title;
-    border-radius: Theme.radius;
-    background: Theme.card;
-    border-width: 1px;
-    border-color: Theme.border;
-    height: card-body.preferred-height;
-    card-body := VerticalLayout {
+    if root.sheet >= 0: OptionSheet {
         width: 100%;
-        padding: Theme.compact ? 14px : 16px;
-        spacing: 10px;
-        Text {
-            text: root.title;
-            color: Theme.text;
-            font-size: 16px;
-            font-weight: 700;
+        height: 100%;
+        title: root.sheet == 0 ? "Preset" : root.sheet == 1 ? "Resolution" : root.sheet == 3 ? "Frame rate"
+            : root.sheet == 5 ? "Codec" : root.sheet == 9 ? "Picture" : root.sheet == 10 ? "Orientation" : "Speakers";
+        options: root.sheet == 0 ? root.preset-names : root.sheet == 1 ? root.resolution-options : root.sheet == 3 ? root.fps-options
+            : root.sheet == 5 ? root.codec-names : root.sheet == 9 ? root.scale-names : root.sheet == 10 ? root.orientation-names : root.speaker-names;
+        current: root.sheet == 0 ? root.preset : root.sheet == 1 ? root.resolution : root.sheet == 3 ? root.fps
+            : root.sheet == 5 ? root.codec : root.sheet == 9 ? root.video-scale : root.sheet == 10 ? root.orientation : root.audio;
+        picked(i) => {
+            root.choose(root.sheet, i);
+            root.sheet = -1;
         }
-        @children
+        dismissed => {
+            root.sheet = -1;
+        }
     }
 }
 
-// Hermes host tools: display recovery, server commands, clipboard,
-// this client's permissions and a diagnostics summary.
+// ---------------------------------------------------------------------------
+// Host tools (Hermes)
+// ---------------------------------------------------------------------------
+
+// Hermes host tools: readiness, display recovery, server commands,
+// clipboard, this client's permissions and the diagnostics fields.
 export component ToolsPage inherits Rectangle {
     in property <string> host-name;
     in property <bool> loading;
@@ -1429,237 +1994,412 @@ export component ToolsPage inherits Rectangle {
     callback send-clipboard(string);
     callback fetch-clipboard;
 
+    // Focus: header Back (-2) and Refresh (-3); then the status (9), Open
+    // web UI (0), Diagnostic report (1), Recover display (2), the commands
+    // (100…, or the note 3), the clipboard box (4), Send (5) and Get (6),
+    // this device (7) and the diagnostics fields (8).
+    property <int> nav: -1;
+    in property <int> refocus;
+    changed refocus => {
+        start.focus();
+        root.nav = -1;
+    }
+    property <int> command-count: root.commands.length;
+    pure function next(i: int) -> int {
+        return i == 9 ? 0 : i == 0 ? 1 : i == 1 ? 2
+            : i == 2 ? (root.command-count > 0 ? 100 : 3)
+            : i >= 100 ? (i - 99 < root.command-count ? i + 1 : 4)
+            : i == 3 ? 4 : i == 4 ? 5 : (i == 5 || i == 6) ? 7
+            : i == 7 ? (root.diagnostics.length > 0 ? 8 : 7) : i;
+    }
+    pure function prev(i: int) -> int {
+        return i == 9 ? -3 : i == 0 ? 9 : i == 1 ? 0 : i == 2 ? 1
+            : i == 100 ? 2 : i > 100 ? i - 1 : i == 3 ? 2
+            : i == 4 ? (root.command-count > 0 ? 99 + root.command-count : 3)
+            : (i == 5 || i == 6) ? 4 : i == 7 ? 5 : i == 8 ? 7 : i;
+    }
+    function move(from: int, key: string) -> bool {
+        if (from == -2 || from == -3) {
+            if (key == Key.RightArrow && from == -2) {
+                root.nav = -3;
+            } else if (key == Key.LeftArrow && from == -3) {
+                root.nav = -2;
+            } else if (key == Key.DownArrow) {
+                root.nav = 9;
+            } else {
+                return false;
+            }
+            return true;
+        }
+        if (key == Key.RightArrow && from == 5) {
+            root.nav = 6;
+            return true;
+        }
+        if (key == Key.LeftArrow && from == 6) {
+            root.nav = 5;
+            return true;
+        }
+        if (key == Key.DownArrow) {
+            root.nav = root.next(from);
+            return true;
+        }
+        if (key == Key.UpArrow) {
+            root.nav = root.prev(from);
+            return true;
+        }
+        return false;
+    }
+
+    property <bool> shown;
+    Timer {
+        interval: 16ms;
+        running: !root.shown;
+        triggered => {
+            root.shown = true;
+        }
+    }
+    opacity: root.shown ? 1 : 0;
+    animate opacity { duration: 200ms; easing: ease-out; }
+
+    start := FocusScope {
+        width: 0px;
+        height: 0px;
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
+                root.nav = 9;
+                return accept;
+            }
+            return reject;
+        }
+    }
+
     VerticalLayout {
-        tools-header := PageHeader {
+        TopBar {
             title: "Host tools";
             subtitle: root.host-name;
-            show-back: Theme.compact;
+            back-focus: root.nav == -2;
             back => {
                 root.back();
             }
+            back-nav(k) => {
+                return root.move(-2, k);
+            }
+            back-entered => {
+                root.nav = -2;
+            }
             if root.busy || root.loading: VerticalLayout {
                 alignment: center;
-                Spinner {
-                    width: 22px;
-                    height: 22px;
-                    indeterminate: true;
+                Loader {
+                    dot: 7px;
                 }
             }
-            if Theme.compact: VerticalLayout {
+            VerticalLayout {
                 alignment: center;
                 IconButton {
                     icon: "refresh";
+                    label: "Refresh";
+                    want-focus: root.nav == -3;
+                    nav(k) => {
+                        return root.move(-3, k);
+                    }
+                    entered => {
+                        root.nav = -3;
+                    }
                     clicked => {
                         root.refresh();
-                    }
-                }
-            }
-            if !Theme.compact: VerticalLayout {
-                alignment: center;
-                PillButton {
-                    text: "Refresh";
-                    clicked => {
-                        root.refresh();
-                    }
-                }
-            }
-            if !Theme.compact: VerticalLayout {
-                alignment: center;
-                PillButton {
-                    text: "Back";
-                    clicked => {
-                        root.back();
                     }
                 }
             }
         }
 
         Flickable {
-            height: root.height - tools-header.preferred-height;
+            vertical-stretch: 1;
             content-width: self.width;
             content-height: tools-form.preferred-height;
             tools-form := HorizontalLayout {
                 width: root.width;
                 alignment: center;
                 VerticalLayout {
-                    width: Math.min(640px, root.width - 2 * Theme.page-padding);
-                    padding-top: 8px;
-                    padding-bottom: 32px;
-                    spacing: 12px;
+                    width: Math.min(760px, root.width - 2 * Theme.page-padding);
+                    padding-top: 6px;
+                    padding-bottom: 40px;
+                    spacing: 24px;
 
-                    if root.message != "": Text {
-                        text: root.message;
-                        color: Theme.warn;
-                        wrap: word-wrap;
-                    }
-
-                    ToolCard {
-                        title: "Host status";
-                        if root.loading: Text {
-                            text: "Checking…";
-                            color: Theme.muted;
-                            font-size: 13px;
-                        }
-                        for row in root.preflight: HorizontalLayout {
-                            spacing: 10px;
+                    if root.message != "": Rectangle {
+                        height: note.preferred-height;
+                        border-radius: Theme.radius;
+                        background: Theme.warn.transparentize(0.88);
+                        border-width: 1px;
+                        border-color: Theme.warn.transparentize(0.6);
+                        note := HorizontalLayout {
+                            padding: 14px;
+                            spacing: 12px;
                             VerticalLayout {
                                 alignment: start;
-                                padding-top: 4px;
-                                Rectangle {
-                                    width: 10px;
-                                    height: 10px;
-                                    border-radius: 5px;
-                                    background: row.level == 1 ? Theme.ok : row.level == 2 ? Theme.warn : Theme.danger;
+                                Icon {
+                                    name: "warning";
+                                    tint: Theme.warn;
                                 }
                             }
-                            VerticalLayout {
-                                horizontal-stretch: 1;
-                                Text {
-                                    text: row.title;
-                                    color: Theme.text;
-                                    font-size: 14px;
-                                    font-weight: 600;
-                                    wrap: word-wrap;
-                                }
-                                if row.message != "": Text {
-                                    text: row.message;
-                                    color: Theme.muted;
-                                    font-size: 12px;
-                                    wrap: word-wrap;
-                                }
-                            }
-                        }
-                        for line in root.status-lines: Text {
-                            text: line;
-                            color: Theme.muted;
-                            font-size: 13px;
-                            wrap: word-wrap;
-                        }
-                        HorizontalLayout {
-                            spacing: 8px;
-                            alignment: start;
-                            PillButton {
-                                text: "Open web UI";
-                                clicked => {
-                                    root.open-web-ui();
-                                }
-                            }
-                            PillButton {
-                                text: "Diagnostic report";
-                                enabled: !root.busy;
-                                clicked => {
-                                    root.host-report();
-                                }
-                            }
-                        }
-                    }
-
-                    ToolCard {
-                        title: "Display";
-                        Text {
-                            text: root.loading ? "Checking…" : root.display-status;
-                            color: Theme.muted;
-                            font-size: 13px;
-                            wrap: word-wrap;
-                        }
-                        HorizontalLayout {
-                            alignment: start;
-                            PillButton {
-                                text: "Recover display";
-                                enabled: root.display-allowed && !root.busy;
-                                clicked => {
-                                    root.recover-display();
-                                }
-                            }
-                        }
-                    }
-
-                    ToolCard {
-                        title: "Server commands";
-                        if !root.loading && root.commands.length == 0: Text {
-                            text: root.commands-allowed ? "No commands are configured on the host." : "This device may not run server commands.";
-                            color: Theme.muted;
-                            font-size: 13px;
-                            wrap: word-wrap;
-                        }
-                        for cmd in root.commands: HorizontalLayout {
-                            spacing: 10px;
-                            min-height: Theme.control-height;
                             Text {
-                                text: cmd.name;
+                                horizontal-stretch: 1;
+                                text: root.message;
                                 color: Theme.text;
                                 font-size: Theme.body-size;
-                                vertical-alignment: center;
                                 wrap: word-wrap;
-                                horizontal-stretch: 1;
                             }
-                            VerticalLayout {
-                                alignment: center;
-                                PillButton {
-                                    text: cmd.armed ? "Confirm" : "Run";
-                                    primary: cmd.armed;
-                                    danger: cmd.confirm && !cmd.armed;
-                                    enabled: root.commands-allowed && !root.busy;
+                        }
+                    }
+
+                    Group {
+                        title: "Host status";
+                        InfoRow {
+                            want-focus: root.nav == 9;
+                            nav(k) => {
+                                return root.move(9, k);
+                            }
+                            entered => {
+                                root.nav = 9;
+                            }
+                            if root.loading && root.preflight.length == 0: Text {
+                                text: "Checking the host…";
+                                color: Theme.muted;
+                                font-size: Theme.body-size;
+                            }
+                            for row in root.preflight: HorizontalLayout {
+                                spacing: 12px;
+                                padding-top: 4px;
+                                padding-bottom: 4px;
+                                VerticalLayout {
+                                    alignment: start;
+                                    Icon {
+                                        width: 20px;
+                                        height: 20px;
+                                        name: row.level == 1 ? "ok" : (row.level == 2 ? "warning" : "error");
+                                        tint: row.level == 1 ? Theme.ok : (row.level == 2 ? Theme.warn : Theme.danger);
+                                    }
+                                }
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text {
+                                        text: row.title;
+                                        color: Theme.text;
+                                        font-size: Theme.body-size;
+                                        font-weight: 600;
+                                        wrap: word-wrap;
+                                    }
+                                    if row.message != "": Text {
+                                        text: row.message;
+                                        color: Theme.muted;
+                                        font-size: Theme.caption-size;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+                            for line in root.status-lines: Text {
+                                text: line;
+                                color: Theme.muted;
+                                font-size: Theme.caption-size;
+                                wrap: word-wrap;
+                            }
+                            if !root.loading && root.preflight.length == 0 && root.status-lines.length == 0: Text {
+                                text: "No status from the host yet.";
+                                color: Theme.muted;
+                                font-size: Theme.body-size;
+                            }
+                        }
+                        ActionRow {
+                            label: "Open the web UI";
+                            hint: "Hermes' settings page in your browser";
+                            icon: "open";
+                            want-focus: root.nav == 0;
+                            nav(k) => {
+                                return root.move(0, k);
+                            }
+                            entered => {
+                                root.nav = 0;
+                            }
+                            clicked => {
+                                root.open-web-ui();
+                            }
+                        }
+                        ActionRow {
+                            label: "Diagnostic report";
+                            hint: "The host's full report, to share";
+                            icon: "report";
+                            enabled: !root.busy;
+                            want-focus: root.nav == 1;
+                            nav(k) => {
+                                return root.move(1, k);
+                            }
+                            entered => {
+                                root.nav = 1;
+                            }
+                            clicked => {
+                                root.host-report();
+                            }
+                        }
+                    }
+
+                    Group {
+                        title: "Display";
+                        ActionRow {
+                            label: "Recover display";
+                            hint: root.loading ? "Checking…" : (root.display-allowed ? root.display-status : "This device may not recover the display.");
+                            icon: "monitor";
+                            value: "Recover";
+                            enabled: root.display-allowed && !root.busy;
+                            want-focus: root.nav == 2;
+                            nav(k) => {
+                                return root.move(2, k);
+                            }
+                            entered => {
+                                root.nav = 2;
+                            }
+                            clicked => {
+                                root.recover-display();
+                            }
+                        }
+                    }
+
+                    Group {
+                        title: "Server commands";
+                        if root.command-count == 0: InfoRow {
+                            want-focus: root.nav == 3;
+                            nav(k) => {
+                                return root.move(3, k);
+                            }
+                            entered => {
+                                root.nav = 3;
+                            }
+                            Text {
+                                text: root.loading ? "Checking…" : (root.commands-allowed ? "No commands are set up on the host." : "This device may not run server commands.");
+                                color: Theme.muted;
+                                font-size: Theme.body-size;
+                                wrap: word-wrap;
+                            }
+                        }
+                        for cmd[i] in root.commands: ActionRow {
+                            label: cmd.name;
+                            hint: cmd.armed ? "Press again to run it" : (cmd.confirm ? "Asks before it runs" : "");
+                            value: cmd.armed ? "Confirm" : "Run";
+                            danger: cmd.confirm && !cmd.armed;
+                            highlight: cmd.armed;
+                            enabled: root.commands-allowed && !root.busy;
+                            want-focus: root.nav == 100 + i;
+                            nav(k) => {
+                                return root.move(100 + i, k);
+                            }
+                            entered => {
+                                root.nav = 100 + i;
+                            }
+                            clicked => {
+                                root.run-command(cmd.id);
+                            }
+                        }
+                    }
+
+                    Group {
+                        title: "Clipboard";
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 12px;
+                            Text {
+                                text: root.clipboard-allowed ? "Send text to the host's clipboard, or fetch what it holds." : "Clipboard sync is not allowed for this device.";
+                                color: Theme.muted;
+                                font-size: Theme.caption-size;
+                                wrap: word-wrap;
+                            }
+                            TextField {
+                                multiline: true;
+                                placeholder: "Text to send";
+                                text <=> root.clipboard-text;
+                                enabled: root.clipboard-allowed;
+                                want-focus: root.nav == 4;
+                                nav(k) => {
+                                    return root.move(4, k);
+                                }
+                                entered => {
+                                    root.nav = 4;
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                ActionButton {
+                                    text: "Send to host";
+                                    icon: "upload";
+                                    kind: 1;
+                                    enabled: root.clipboard-allowed && !root.busy && root.clipboard-text != "";
+                                    want-focus: root.nav == 5;
+                                    nav(k) => {
+                                        return root.move(5, k);
+                                    }
+                                    entered => {
+                                        root.nav = 5;
+                                    }
                                     clicked => {
-                                        root.run-command(cmd.id);
+                                        root.send-clipboard(root.clipboard-text);
+                                    }
+                                }
+                                ActionButton {
+                                    text: "Get from host";
+                                    icon: "download";
+                                    enabled: root.clipboard-allowed && !root.busy;
+                                    want-focus: root.nav == 6;
+                                    nav(k) => {
+                                        return root.move(6, k);
+                                    }
+                                    entered => {
+                                        root.nav = 6;
+                                    }
+                                    clicked => {
+                                        root.fetch-clipboard();
                                     }
                                 }
                             }
                         }
                     }
 
-                    ToolCard {
-                        title: "Clipboard";
-                        Text {
-                            text: root.clipboard-allowed ? "Send text to the host's clipboard, or fetch what it holds." : "Clipboard sync is not allowed for this device.";
-                            color: Theme.muted;
-                            font-size: 13px;
-                            wrap: word-wrap;
-                        }
-                        TextEdit {
-                            height: 96px;
-                            text <=> root.clipboard-text;
-                            enabled: root.clipboard-allowed;
-                            wrap: word-wrap;
-                        }
-                        HorizontalLayout {
-                            spacing: 8px;
-                            alignment: start;
-                            PillButton {
-                                text: "Send to host";
-                                primary: true;
-                                enabled: root.clipboard-allowed && !root.busy && root.clipboard-text != "";
-                                clicked => {
-                                    root.send-clipboard(root.clipboard-text);
-                                }
-                            }
-                            PillButton {
-                                text: "Get from host";
-                                enabled: root.clipboard-allowed && !root.busy;
-                                clicked => {
-                                    root.fetch-clipboard();
-                                }
-                            }
-                        }
-                    }
-
-                    ToolCard {
+                    Group {
                         title: "This device";
-                        Text {
-                            text: root.permissions == "" ? "…" : root.permissions;
-                            color: Theme.muted;
-                            font-size: 13px;
-                            wrap: word-wrap;
+                        InfoRow {
+                            want-focus: root.nav == 7;
+                            nav(k) => {
+                                return root.move(7, k);
+                            }
+                            entered => {
+                                root.nav = 7;
+                            }
+                            Text {
+                                text: root.permissions == "" ? "…" : root.permissions;
+                                color: Theme.text;
+                                font-size: Theme.body-size;
+                                wrap: word-wrap;
+                            }
                         }
                     }
 
-                    if root.diagnostics.length > 0: ToolCard {
+                    if root.diagnostics.length > 0: Group {
                         title: "All diagnostics fields";
-                        for line in root.diagnostics: Text {
-                            text: line;
-                            color: Theme.muted;
-                            font-size: 12px;
-                            wrap: word-wrap;
+                        InfoRow {
+                            want-focus: root.nav == 8;
+                            nav(k) => {
+                                return root.move(8, k);
+                            }
+                            entered => {
+                                root.nav = 8;
+                            }
+                            for line in root.diagnostics: Text {
+                                text: line;
+                                color: Theme.muted;
+                                font-size: Theme.caption-size;
+                                wrap: word-wrap;
+                            }
                         }
                     }
                 }
@@ -1667,6 +2407,10 @@ export component ToolsPage inherits Rectangle {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Stream report
+// ---------------------------------------------------------------------------
 
 // Shown when a stream ends (or fails to start): what happened, where the
 // full report with every log line was saved, and ways to get it out.
@@ -1682,26 +2426,104 @@ export component ReportPage inherits Rectangle {
     callback export;
     callback send-to-host;
 
+    // Focus: header Back (-2) and Done (-3); the summary (0), Share (1),
+    // Send to host (2) and the log lines (3).
+    property <int> nav: -1;
+    in property <int> refocus;
+    changed refocus => {
+        start.focus();
+        root.nav = -1;
+    }
+    function move(from: int, key: string) -> bool {
+        if (from == -2 || from == -3) {
+            if (key == Key.RightArrow && from == -2) {
+                root.nav = -3;
+            } else if (key == Key.LeftArrow && from == -3) {
+                root.nav = -2;
+            } else if (key == Key.DownArrow) {
+                root.nav = 0;
+            } else {
+                return false;
+            }
+            return true;
+        }
+        if (key == Key.RightArrow && from == 1 && root.can-send-to-host) {
+            root.nav = 2;
+        } else if (key == Key.LeftArrow && from == 2) {
+            root.nav = 1;
+        } else if (key == Key.DownArrow && from == 0) {
+            root.nav = 1;
+        } else if (key == Key.DownArrow && (from == 1 || from == 2)) {
+            root.nav = root.log-tail.length > 0 ? 3 : from;
+        } else if (key == Key.UpArrow && from == 3) {
+            root.nav = 1;
+        } else if (key == Key.UpArrow && (from == 1 || from == 2)) {
+            root.nav = 0;
+        } else if (key == Key.UpArrow && from == 0) {
+            root.nav = -3;
+        } else {
+            return key == Key.DownArrow;
+        }
+        return true;
+    }
+
+    property <bool> shown;
+    Timer {
+        interval: 16ms;
+        running: !root.shown;
+        triggered => {
+            root.shown = true;
+        }
+    }
+    opacity: root.shown ? 1 : 0;
+    animate opacity { duration: 200ms; easing: ease-out; }
+
+    start := FocusScope {
+        width: 0px;
+        height: 0px;
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
+                root.nav = 1;
+                return accept;
+            }
+            return reject;
+        }
+    }
+
     VerticalLayout {
-        report-header := PageHeader {
+        TopBar {
             title: "Stream report";
             subtitle: root.title;
-            show-back: Theme.compact;
+            back-focus: root.nav == -2;
             back => {
                 root.done();
             }
+            back-nav(k) => {
+                return root.move(-2, k);
+            }
+            back-entered => {
+                root.nav = -2;
+            }
             if root.busy: VerticalLayout {
                 alignment: center;
-                Spinner {
-                    width: 22px;
-                    height: 22px;
-                    indeterminate: true;
+                Loader {
+                    dot: 7px;
                 }
             }
-            if !Theme.compact: VerticalLayout {
+            VerticalLayout {
                 alignment: center;
-                PillButton {
+                ActionButton {
                     text: "Done";
+                    want-focus: root.nav == -3;
+                    nav(k) => {
+                        return root.move(-3, k);
+                    }
+                    entered => {
+                        root.nav = -3;
+                    }
                     clicked => {
                         root.done();
                     }
@@ -1709,67 +2531,104 @@ export component ReportPage inherits Rectangle {
             }
         }
 
-        // Explicit height: a short report must not leave the extra space to
-        // the header (it would drift down the screen).
         Flickable {
-            height: root.height - report-header.preferred-height;
+            vertical-stretch: 1;
             content-width: self.width;
             content-height: report-form.preferred-height;
             report-form := HorizontalLayout {
                 width: root.width;
                 alignment: center;
                 VerticalLayout {
-                    width: Math.min(720px, root.width - 2 * Theme.page-padding);
-                    padding-top: 8px;
-                    padding-bottom: 32px;
-                    spacing: 12px;
+                    width: Math.min(760px, root.width - 2 * Theme.page-padding);
+                    padding-top: 6px;
+                    padding-bottom: 40px;
+                    spacing: 24px;
 
-                    ToolCard {
+                    Group {
                         title: "Summary";
-                        for line in root.summary: Text {
-                            text: line;
-                            color: Theme.text;
-                            font-size: Theme.body-size;
-                            wrap: word-wrap;
+                        InfoRow {
+                            want-focus: root.nav == 0;
+                            nav(k) => {
+                                return root.move(0, k);
+                            }
+                            entered => {
+                                root.nav = 0;
+                            }
+                            for line[i] in root.summary: Text {
+                                text: line;
+                                color: i == 0 ? Theme.text : Theme.muted;
+                                font-size: i == 0 ? Theme.heading-size : Theme.body-size;
+                                font-weight: i == 0 ? 600 : 400;
+                                wrap: word-wrap;
+                            }
                         }
                     }
 
-                    ToolCard {
+                    Group {
                         title: "Full report";
-                        Text {
-                            text: root.path == "" ? "Not saved to a file." : "Saved with every log line to:\n" + root.path;
-                            color: Theme.muted;
-                            font-size: 13px;
-                            wrap: word-wrap;
-                        }
-                        HorizontalLayout {
-                            spacing: 8px;
-                            alignment: start;
-                            PillButton {
-                                text: root.export-label;
-                                primary: true;
-                                enabled: !root.busy;
-                                clicked => {
-                                    root.export();
-                                }
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 12px;
+                            Text {
+                                text: root.path == "" ? "Not saved to a file." : "Saved with every log line to " + root.path;
+                                color: Theme.muted;
+                                font-size: Theme.caption-size;
+                                wrap: word-wrap;
                             }
-                            if root.can-send-to-host: PillButton {
-                                text: "Send to host clipboard";
-                                enabled: !root.busy;
-                                clicked => {
-                                    root.send-to-host();
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                ActionButton {
+                                    text: root.export-label;
+                                    icon: "share";
+                                    kind: 1;
+                                    enabled: !root.busy;
+                                    want-focus: root.nav == 1;
+                                    nav(k) => {
+                                        return root.move(1, k);
+                                    }
+                                    entered => {
+                                        root.nav = 1;
+                                    }
+                                    clicked => {
+                                        root.export();
+                                    }
+                                }
+                                if root.can-send-to-host: ActionButton {
+                                    text: "Send to host clipboard";
+                                    icon: "clipboard";
+                                    enabled: !root.busy;
+                                    want-focus: root.nav == 2;
+                                    nav(k) => {
+                                        return root.move(2, k);
+                                    }
+                                    entered => {
+                                        root.nav = 2;
+                                    }
+                                    clicked => {
+                                        root.send-to-host();
+                                    }
                                 }
                             }
                         }
                     }
 
-                    if root.log-tail.length > 0: ToolCard {
+                    if root.log-tail.length > 0: Group {
                         title: "Last log lines";
-                        for line in root.log-tail: Text {
-                            text: line;
-                            color: Theme.muted;
-                            font-size: 11px;
-                            wrap: word-wrap;
+                        InfoRow {
+                            want-focus: root.nav == 3;
+                            nav(k) => {
+                                return root.move(3, k);
+                            }
+                            entered => {
+                                root.nav = 3;
+                            }
+                            for line in root.log-tail: Text {
+                                text: line;
+                                color: Theme.muted;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
                         }
                     }
                 }
