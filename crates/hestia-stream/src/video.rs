@@ -35,6 +35,8 @@ pub const FLAG_SOF: u8 = 0x4;
 
 const PING_INTERVAL: Duration = Duration::from_millis(500);
 const FIRST_DATA_TIMEOUT: Duration = Duration::from_secs(10);
+const VIDEO_STALL_PROBE: Duration = Duration::from_secs(2);
+const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(6);
 const REORDER_WINDOW: Duration = Duration::from_millis(6);
 const MAX_FRAME_LOOKAHEAD: u32 = 2;
 
@@ -204,20 +206,25 @@ impl FrameAssembler {
     }
 
     fn add_at(&mut self, packet: &[u8], now: Instant) -> Vec<AssemblerOutput> {
-        let mut out = self.expire(now);
-        let Some(info) = parse_packet(packet) else {
-            return out;
-        };
-        let total_shards = usize::from(info.data_shards) + usize::from(info.parity_shards());
-        if info.data_shards == 0
-            || total_shards > fec::MAX_SHARDS
-            || usize::from(info.fec_index) >= total_shards
-            || info.block > info.last_block
-            || packet.len() > self.shard_len
-        {
-            return out;
+        match self.packet_info(packet) {
+            Some(info) => self.add_shard_at(packet, info, now),
+            None => self.expire(now),
         }
+    }
 
+    fn packet_info(&self, packet: &[u8]) -> Option<PacketInfo> {
+        let info = parse_packet(packet)?;
+        let total_shards = usize::from(info.data_shards) + usize::from(info.parity_shards());
+        (info.data_shards != 0
+            && total_shards <= fec::MAX_SHARDS
+            && usize::from(info.fec_index) < total_shards
+            && info.block <= info.last_block
+            && packet.len() <= self.shard_len)
+            .then_some(info)
+    }
+
+    fn add_shard_at(&mut self, packet: &[u8], info: PacketInfo, now: Instant) -> Vec<AssemblerOutput> {
+        let mut out = self.expire(now);
         let next = *self.next_frame.get_or_insert(info.frame);
         if frame_before(info.frame, next) {
             return out;
@@ -441,6 +448,8 @@ pub enum VideoFeedback {
     NeedIdr,
     FirstFrame,
     NoVideo,
+    VideoStalled,
+    SocketFailed(String),
     SinkFailed(String),
 }
 
@@ -523,7 +532,18 @@ pub fn ping_packet(payload: Option<&[u8; 16]>, seq: u32) -> Vec<u8> {
 }
 
 impl VideoReceiver {
-    pub fn start(cfg: VideoConfig, mut sink: Box<dyn VideoSink>, feedback: Sender<VideoFeedback>) -> io::Result<Self> {
+    pub fn start(cfg: VideoConfig, sink: Box<dyn VideoSink>, feedback: Sender<VideoFeedback>) -> io::Result<Self> {
+        Self::start_with_events(cfg, sink, move |event| {
+            let _ = feedback.send(event);
+        })
+    }
+
+    pub(super) fn start_with_events(
+        cfg: VideoConfig,
+        mut sink: Box<dyn VideoSink>,
+        emit: impl Fn(VideoFeedback) + Send + Sync + 'static,
+    ) -> io::Result<Self> {
+        let emit = Arc::new(emit);
         // The decoder's requests go through the receive loop, which keeps
         // one IDR request in flight (see `IdrRequests`).
         let decoder_wants_idr = Arc::new(AtomicBool::new(false));
@@ -533,9 +553,9 @@ impl VideoReceiver {
                 flag.store(true, Ordering::Relaxed);
             }));
         }
-        let failed = feedback.clone();
+        let failed = emit.clone();
         sink.attach_failure_handler(Box::new(move |why| {
-            let _ = failed.send(VideoFeedback::SinkFailed(why));
+            failed(VideoFeedback::SinkFailed(why));
         }));
         sink.setup(cfg.format, cfg.width, cfg.height, cfg.fps)
             .map_err(|e| io::Error::other(format!("video decoder setup failed: {e}")))?;
@@ -546,16 +566,18 @@ impl VideoReceiver {
             Err(e) => warn!("could not enlarge the video receive buffer: {e}"),
         }
         socket.set_read_timeout(Some(REORDER_WINDOW))?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let counters = Arc::new(VideoCounters::default());
-        let mut threads = Vec::new();
+        let mut receiver = Self {
+            stop: Arc::new(AtomicBool::new(false)),
+            counters: Arc::new(VideoCounters::default()),
+            threads: Vec::new(),
+        };
 
         {
             let socket = socket.try_clone()?;
-            let stop = stop.clone();
+            let stop = receiver.stop.clone();
             let remote = cfg.remote;
             let payload = cfg.ping_payload;
-            threads.push(
+            receiver.threads.push(
                 std::thread::Builder::new()
                     .name("hestia-video-ping".into())
                     .spawn(move || {
@@ -570,19 +592,17 @@ impl VideoReceiver {
         }
 
         {
-            let stop = stop.clone();
-            let counters = counters.clone();
-            threads.push(
+            let stop = receiver.stop.clone();
+            let counters = receiver.counters.clone();
+            receiver.threads.push(
                 std::thread::Builder::new()
                     .name("hestia-video-rx".into())
-                    .spawn(move || receive_loop(socket, cfg, sink, feedback, stop, counters, decoder_wants_idr))?,
+                    .spawn(move || {
+                        receive_loop(socket, cfg, sink, emit.as_ref(), stop, counters, decoder_wants_idr)
+                    })?,
             );
         }
-        Ok(Self {
-            stop,
-            threads,
-            counters,
-        })
+        Ok(receiver)
     }
 
     pub fn stop(mut self) {
@@ -603,11 +623,57 @@ impl Drop for VideoReceiver {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum VideoInactivity {
+    WaitingForFirstPacket,
+    Probe,
+    Stalled,
+}
+
+struct VideoActivity {
+    started: Instant,
+    last_packet: Option<Instant>,
+    probed: bool,
+}
+
+impl VideoActivity {
+    fn new(started: Instant) -> Self {
+        Self {
+            started,
+            last_packet: None,
+            probed: false,
+        }
+    }
+
+    fn received(&mut self, now: Instant) {
+        if self.last_packet.replace(now).is_none() {
+            info!("first video packet after {:?}", now.duration_since(self.started));
+        }
+        self.probed = false;
+    }
+
+    fn inactivity(&mut self, now: Instant) -> Option<VideoInactivity> {
+        let Some(last) = self.last_packet else {
+            return (now.duration_since(self.started) >= FIRST_DATA_TIMEOUT)
+                .then_some(VideoInactivity::WaitingForFirstPacket);
+        };
+        let silent = now.duration_since(last);
+        if silent >= VIDEO_STALL_TIMEOUT {
+            return Some(VideoInactivity::Stalled);
+        }
+        if silent >= VIDEO_STALL_PROBE && !self.probed {
+            self.probed = true;
+            return Some(VideoInactivity::Probe);
+        }
+        None
+    }
+}
+
 fn receive_loop(
     socket: UdpSocket,
     cfg: VideoConfig,
     mut sink: Box<dyn VideoSink>,
-    feedback: Sender<VideoFeedback>,
+    emit: &impl Fn(VideoFeedback),
     stop: Arc<AtomicBool>,
     counters: Arc<VideoCounters>,
     decoder_wants_idr: Arc<AtomicBool>,
@@ -615,8 +681,7 @@ fn receive_loop(
     let mut assembler = FrameAssembler::new(cfg.packet_size, cfg.format.codec);
     let shard_len = assembler.shard_len();
     let mut buf = vec![0u8; shard_len + ENC_PREFIX_LEN + 64];
-    let started = Instant::now();
-    let mut got_data = false;
+    let mut activity = VideoActivity::new(Instant::now());
     let mut first_frame = false;
     let mut idr = IdrRequests::default();
 
@@ -625,64 +690,89 @@ fn receive_loop(
         if decoder_wants_idr.swap(false, Ordering::Relaxed) {
             assembler.wait_for_keyframe();
             if idr.want(now) {
-                let _ = feedback.send(VideoFeedback::NeedIdr);
+                emit(VideoFeedback::NeedIdr);
             }
+        }
+        let packet = match socket.recv_from(&mut buf) {
+            Ok((len, from)) if from.ip() == cfg.remote.ip() => {
+                counters.packets.fetch_add(1, Ordering::Relaxed);
+                counters.bytes.fetch_add(len as u64, Ordering::Relaxed);
+                Some(&buf[..len])
+            }
+            Ok(_) => None,
+            // ConnectionReset can be an ICMP port-unreachable. Interrupted
+            // can be a signal while Android is sending the app to the background.
+            Err(e) if matches!(
+                e.kind(),
+                io::ErrorKind::WouldBlock
+                    | io::ErrorKind::TimedOut
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::Interrupted
+            ) => None,
+            Err(e) => {
+                if !stop.load(Ordering::Relaxed) {
+                    warn!("video socket error: {e}");
+                    emit(VideoFeedback::SocketFailed(e.to_string()));
+                }
+                break;
+            }
+        };
+        let now = Instant::now();
+        let plain;
+        let packet = match (packet, &cfg.decrypt_key) {
+            (Some(packet), Some(key)) if packet.len() >= ENC_PREFIX_LEN + RTP_HEADER_LEN => {
+                let iv: [u8; 12] = packet[..12].try_into().unwrap_or_default();
+                plain = gcm_decrypt(key, &iv, &packet[ENC_PREFIX_LEN..], &packet[16..32]);
+                plain.as_deref()
+            }
+            (packet, None) => packet,
+            _ => None,
+        };
+        let outputs = match packet.and_then(|packet| assembler.packet_info(packet).map(|info| (packet, info))) {
+            Some((packet, info)) => {
+                activity.received(now);
+                assembler.add_shard_at(packet, info, now)
+            }
+            None => assembler.expire(now),
+        };
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        match activity.inactivity(now) {
+            Some(VideoInactivity::WaitingForFirstPacket) => {
+                warn!("no video traffic from the host");
+                emit(VideoFeedback::NoVideo);
+                break;
+            }
+            Some(VideoInactivity::Probe) => {
+                debug!("video paused; probing with a keyframe request");
+                if idr.want(now) {
+                    emit(VideoFeedback::NeedIdr);
+                }
+            }
+            Some(VideoInactivity::Stalled) => {
+                warn!("video stopped arriving from the host");
+                emit(VideoFeedback::VideoStalled);
+                break;
+            }
+            None => {}
         }
         if idr.retry_due(now) {
             debug!("no keyframe yet; asking again");
-            let _ = feedback.send(VideoFeedback::NeedIdr);
+            emit(VideoFeedback::NeedIdr);
         }
-        let outputs = match socket.recv_from(&mut buf) {
-            Ok((len, from)) if from.ip() == cfg.remote.ip() => {
-                let received_at = Instant::now();
-                if !got_data {
-                    got_data = true;
-                    info!("first video packet after {:?}", started.elapsed());
-                }
-                counters.packets.fetch_add(1, Ordering::Relaxed);
-                counters.bytes.fetch_add(len as u64, Ordering::Relaxed);
 
-                if let Some(key) = &cfg.decrypt_key {
-                    if len < ENC_PREFIX_LEN + RTP_HEADER_LEN {
-                        continue;
-                    }
-                    let iv: [u8; 12] = buf[..12].try_into().unwrap_or_default();
-                    let Some(plain) = gcm_decrypt(key, &iv, &buf[ENC_PREFIX_LEN..len], &buf[16..32]) else {
-                        continue;
-                    };
-                    assembler.add_at(&plain, received_at)
-                } else {
-                    assembler.add_at(&buf[..len], received_at)
-                }
-            }
-            Ok(_) => continue,
-            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
-                if !got_data && started.elapsed() > FIRST_DATA_TIMEOUT {
-                    warn!("no video traffic from the host");
-                    let _ = feedback.send(VideoFeedback::NoVideo);
-                    return;
-                }
-                assembler.expire(Instant::now())
-            }
-            // ConnectionReset: ICMP port unreachable; Interrupted: a signal
-            // (Android's freezer when the app goes to the background).
-            Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::Interrupted) => continue,
-            Err(e) => {
-                warn!("video socket error: {e}");
-                return;
-            }
-        };
         for output in outputs {
             match output {
                 AssemblerOutput::NeedIdr => {
                     if idr.want(Instant::now()) {
-                        let _ = feedback.send(VideoFeedback::NeedIdr);
+                        emit(VideoFeedback::NeedIdr);
                     }
                 }
                 AssemblerOutput::Frame(frame) => {
                     if !first_frame {
                         first_frame = true;
-                        let _ = feedback.send(VideoFeedback::FirstFrame);
+                        emit(VideoFeedback::FirstFrame);
                     }
                     counters.frames.fetch_add(1, Ordering::Relaxed);
                     if frame.keyframe {
@@ -705,7 +795,7 @@ fn receive_loop(
                         debug!("decoder asked for a keyframe");
                         assembler.wait_for_keyframe();
                         if idr.want(Instant::now()) {
-                            let _ = feedback.send(VideoFeedback::NeedIdr);
+                            emit(VideoFeedback::NeedIdr);
                         }
                         break;
                     }
@@ -719,6 +809,7 @@ fn receive_loop(
             .lost_frames
             .store(assembler.stats.lost_frames, Ordering::Relaxed);
     }
+    stop.store(true, Ordering::Relaxed);
     sink.cleanup();
 }
 
@@ -863,6 +954,28 @@ mod tests {
         let mut v = vec![0, 0, 0, 1, if idr { 0x65 } else { 0x41 }];
         v.extend((0..len).map(|i| (i * 7 + 3) as u8 | 1));
         v
+    }
+
+    #[test]
+    fn video_inactivity_probes_then_times_out_and_rearms_on_packets() {
+        let start = Instant::now();
+        let mut watchdog = VideoActivity::new(start);
+        assert_eq!(watchdog.inactivity(start + VIDEO_STALL_TIMEOUT), None);
+        assert_eq!(
+            watchdog.inactivity(start + FIRST_DATA_TIMEOUT),
+            Some(VideoInactivity::WaitingForFirstPacket)
+        );
+
+        let first = start + FIRST_DATA_TIMEOUT;
+        watchdog.received(first);
+        assert_eq!(watchdog.inactivity(first + VIDEO_STALL_PROBE / 2), None);
+        assert_eq!(watchdog.inactivity(first + VIDEO_STALL_PROBE), Some(VideoInactivity::Probe));
+        assert_eq!(watchdog.inactivity(first + VIDEO_STALL_PROBE), None);
+
+        let recovered = first + VIDEO_STALL_PROBE + Duration::from_millis(50);
+        watchdog.received(recovered);
+        assert_eq!(watchdog.inactivity(recovered + VIDEO_STALL_PROBE), Some(VideoInactivity::Probe));
+        assert_eq!(watchdog.inactivity(recovered + VIDEO_STALL_TIMEOUT), Some(VideoInactivity::Stalled));
     }
 
     #[test]

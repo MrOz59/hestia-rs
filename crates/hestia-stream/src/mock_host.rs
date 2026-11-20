@@ -38,6 +38,15 @@ impl MockHost {
     /// Starts the host; it streams `frames` (Annex B) after the client's
     /// START B and a video ping, then terminates the session gracefully.
     pub fn start(key: [u8; 16], frames: Vec<Vec<u8>>, packet_size: usize) -> Self {
+        Self::spawn(key, frames, packet_size, true)
+    }
+
+    /// Stops sending video after the given frames while audio and ENet continue.
+    pub fn stall_video(key: [u8; 16], frames: Vec<Vec<u8>>, packet_size: usize) -> Self {
+        Self::spawn(key, frames, packet_size, false)
+    }
+
+    fn spawn(key: [u8; 16], frames: Vec<Vec<u8>>, packet_size: usize, terminate_after_video: bool) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let announce = Arc::new(Mutex::new(None));
         let control_messages = Arc::new(Mutex::new(Vec::new()));
@@ -264,11 +273,21 @@ impl MockHost {
                     }
                     std::thread::sleep(Duration::from_millis(5));
                 }
-                std::thread::sleep(Duration::from_millis(200));
-                let _ = frames_done_tx.send(());
+                if terminate_after_video {
+                    std::thread::sleep(Duration::from_millis(200));
+                    let _ = frames_done_tx.send(());
+                } else {
+                    // Keep accepting pings while only the video output stops.
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = video.recv_from(&mut buf);
+                    }
+                }
             });
         }
-        drop(audio);
+        if !terminate_after_video {
+            let stop = stop.clone();
+            std::thread::spawn(move || send_audio_until_stopped(audio, &stop));
+        }
 
         Self {
             rtsp_port,
@@ -276,6 +295,38 @@ impl MockHost {
             control_messages,
             stop,
         }
+    }
+}
+
+fn send_audio_until_stopped(audio: UdpSocket, stop: &AtomicBool) {
+    audio.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+    let mut buf = [0u8; 64];
+    let peer = loop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Ok((n, from)) = audio.recv_from(&mut buf)
+            && n == 20
+            && &buf[..16] == PING_PAYLOAD
+        {
+            break from;
+        }
+    };
+    // An RTP packet with a dummy payload. The test sink counts these packets
+    // without decoding their audio.
+    let mut packet = [0u8; 13];
+    packet[0] = 0x80;
+    packet[1] = 97;
+    packet[12] = 1;
+    let mut seq = 0u16;
+    let mut timestamp = 0u32;
+    while !stop.load(Ordering::Relaxed) {
+        packet[2..4].copy_from_slice(&seq.to_be_bytes());
+        packet[4..8].copy_from_slice(&timestamp.to_be_bytes());
+        let _ = audio.send_to(&packet, peer);
+        seq = seq.wrapping_add(1);
+        timestamp = timestamp.wrapping_add(240);
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 

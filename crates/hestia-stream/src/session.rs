@@ -4,9 +4,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{info, warn};
 
@@ -19,12 +19,21 @@ use crate::sink::{AudioSink, VideoSink};
 use crate::video::{VideoConfig, VideoFeedback, VideoReceiver};
 use crate::{SessionListener, StreamConfig, StreamError, StreamEvent, StreamStage, StreamStats};
 
+enum SessionFeedback {
+    Control(ControlEvent),
+    Video(VideoFeedback),
+    Stop,
+}
+
+const STATS_INTERVAL: Duration = Duration::from_secs(1);
+
 pub struct StreamSession {
     negotiated: Negotiated,
     control: Arc<ControlStream>,
     video: Option<VideoReceiver>,
     audio: Option<AudioReceiver>,
     stop: Arc<AtomicBool>,
+    feedback: Sender<SessionFeedback>,
     supervisor: Option<JoinHandle<()>>,
 }
 
@@ -68,9 +77,12 @@ impl StreamSession {
             encrypted_control,
         )
         .map_err(|e| StreamError::Io(fail(StreamStage::Control, format!("control stream: {e}"))))?;
-        let (control_tx, control_rx) = mpsc::channel();
+        let (feedback, events) = mpsc::channel();
+        let control_feedback = feedback.clone();
         control
-            .run(control_tx)
+            .run_with_events(move |event| {
+                let _ = control_feedback.send(SessionFeedback::Control(event));
+            })
             .map_err(|e| StreamError::Io(fail(StreamStage::Control, e.to_string())))?;
         control
             .start()
@@ -83,8 +95,8 @@ impl StreamSession {
         } else {
             negotiated.packet_size
         };
-        let (video_tx, video_rx) = mpsc::channel();
-        let video = VideoReceiver::start(
+        let video_feedback = feedback.clone();
+        let video = VideoReceiver::start_with_events(
             VideoConfig {
                 remote: SocketAddr::new(ip, negotiated.video_port),
                 ping_payload: negotiated.video_ping_payload,
@@ -97,7 +109,9 @@ impl StreamSession {
                     .then_some(config.remote_input_key),
             },
             video_sink,
-            video_tx,
+            move |event| {
+                let _ = video_feedback.send(SessionFeedback::Video(event));
+            },
         )
         .map_err(|e| StreamError::Io(fail(StreamStage::Video, e.to_string())))?;
 
@@ -139,66 +153,70 @@ impl StreamSession {
             std::thread::Builder::new()
                 .name("hestia-session".into())
                 .spawn(move || {
-                    let mut last_stats = std::time::Instant::now();
+                    let mut last_stats = Instant::now();
                     while !stop.load(Ordering::Relaxed) {
-                        while let Ok(fb) = video_rx.try_recv() {
-                            match fb {
-                                // The video loop already keeps one request in flight.
-                                VideoFeedback::NeedIdr => {
-                                    let _ = control.request_idr();
-                                }
-                                VideoFeedback::FirstFrame => listener.on_event(StreamEvent::FirstFrame),
-                                VideoFeedback::NoVideo => {
-                                    listener.on_event(StreamEvent::Terminated {
-                                        reason: "no video received from the host".into(),
-                                        graceful: false,
-                                    });
-                                    return;
-                                }
-                                VideoFeedback::SinkFailed(reason) => {
-                                    listener.on_event(StreamEvent::Terminated {
-                                        reason,
-                                        graceful: false,
-                                    });
-                                    return;
-                                }
-                            }
+                        let wait = STATS_INTERVAL.saturating_sub(last_stats.elapsed());
+                        let event = events.recv_timeout(wait);
+                        if stop.load(Ordering::Relaxed) {
+                            return;
                         }
-                        match control_rx.recv_timeout(Duration::from_millis(20)) {
-                            Ok(ControlEvent::Terminated { code }) => {
+                        let (reason, graceful) = match event {
+                            // The video loop keeps one IDR request in flight.
+                            Ok(SessionFeedback::Video(VideoFeedback::NeedIdr)) => {
+                                if let Err(e) = control.request_idr() {
+                                    warn!("could not request a video keyframe: {e}");
+                                }
+                                (None, false)
+                            }
+                            Ok(SessionFeedback::Video(VideoFeedback::FirstFrame)) => {
+                                listener.on_event(StreamEvent::FirstFrame);
+                                (None, false)
+                            }
+                            Ok(SessionFeedback::Video(VideoFeedback::NoVideo)) => {
+                                (Some("no video received from the host".into()), false)
+                            }
+                            Ok(SessionFeedback::Video(VideoFeedback::VideoStalled)) => {
+                                (Some("video stopped arriving from the host".into()), false)
+                            }
+                            Ok(SessionFeedback::Video(VideoFeedback::SocketFailed(e))) => {
+                                (Some(format!("video socket failed: {e}")), false)
+                            }
+                            Ok(SessionFeedback::Video(VideoFeedback::SinkFailed(reason))) => (Some(reason), false),
+                            Ok(SessionFeedback::Control(ControlEvent::Terminated { code })) => {
                                 let graceful = code == TERMINATION_GRACEFUL || code == 0;
                                 info!("host ended the stream (code {code:#x})");
-                                listener.on_event(StreamEvent::Terminated {
-                                    reason: if graceful {
-                                        "the app was closed on the host".into()
-                                    } else {
-                                        format!("the host ended the stream (error {code:#010x})")
-                                    },
-                                    graceful,
-                                });
-                                return;
+                                let reason = if graceful {
+                                    "the app was closed on the host".into()
+                                } else {
+                                    format!("the host ended the stream (error {code:#010x})")
+                                };
+                                (Some(reason), graceful)
                             }
-                            Ok(ControlEvent::ConnectionLost) => {
-                                listener.on_event(StreamEvent::Terminated {
-                                    reason: "lost the connection to the host".into(),
-                                    graceful: false,
-                                });
-                                return;
+                            Ok(SessionFeedback::Control(ControlEvent::ConnectionLost)) => {
+                                (Some("lost the connection to the host".into()), false)
                             }
-                            Ok(ControlEvent::Rumble { controller, low, high }) => {
+                            Ok(SessionFeedback::Control(ControlEvent::Rumble { controller, low, high })) => {
                                 listener.on_event(StreamEvent::Rumble {
                                     gamepad: controller as u8,
                                     low,
                                     high,
                                 });
+                                (None, false)
                             }
-                            Ok(ControlEvent::HdrMode { enabled }) => listener.on_event(StreamEvent::HdrMode(enabled)),
-                            Ok(ControlEvent::TriggerRumble { .. }) => {}
-                            Err(RecvTimeoutError::Timeout) => {}
-                            Err(RecvTimeoutError::Disconnected) => return,
+                            Ok(SessionFeedback::Control(ControlEvent::HdrMode { enabled })) => {
+                                listener.on_event(StreamEvent::HdrMode(enabled));
+                                (None, false)
+                            }
+                            Ok(SessionFeedback::Control(ControlEvent::TriggerRumble { .. }))
+                            | Err(RecvTimeoutError::Timeout) => (None, false),
+                            Ok(SessionFeedback::Stop) | Err(RecvTimeoutError::Disconnected) => return,
+                        };
+                        if let Some(reason) = reason {
+                            listener.on_event(StreamEvent::Terminated { reason, graceful });
+                            return;
                         }
-                        if last_stats.elapsed() >= Duration::from_secs(1) {
-                            last_stats = std::time::Instant::now();
+                        if last_stats.elapsed() >= STATS_INTERVAL {
+                            last_stats = Instant::now();
                             let (rtt, rtt_var) = control.round_trip();
                             listener.on_event(StreamEvent::Stats(StreamStats {
                                 frames: counters.frames.load(Ordering::Relaxed),
@@ -224,6 +242,7 @@ impl StreamSession {
             video: Some(video),
             audio,
             stop,
+            feedback,
             supervisor: Some(supervisor),
         })
     }
@@ -252,6 +271,7 @@ impl StreamSession {
     fn shutdown(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(s) = self.supervisor.take() {
+            let _ = self.feedback.send(SessionFeedback::Stop);
             let _ = s.join();
         }
         if let Some(v) = self.video.take() {
@@ -276,6 +296,7 @@ mod tests {
     use crate::mock_host::MockHost;
     use crate::sink::{AudioFormat, EncodedFrame, SubmitResult, VideoCodec, VideoFormat};
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
 
     struct Collect(Arc<Mutex<Vec<EncodedFrame>>>);
     impl VideoSink for Collect {
@@ -307,14 +328,8 @@ mod tests {
         v
     }
 
-    #[test]
-    fn end_to_end_against_mock_host() {
-        let key = [0x42u8; 16];
-        let frames: Vec<Vec<u8>> = (0..5).map(|i| frame(i, 3000 + i * 2500)).collect();
-        let host = MockHost::start(key, frames.clone(), 1392);
-        let got = Arc::new(Mutex::new(Vec::new()));
-        let events = Arc::new(Events(Mutex::new(Vec::new())));
-        let config = StreamConfig {
+    fn test_config(host: &MockHost, key: [u8; 16]) -> StreamConfig {
+        StreamConfig {
             session_url: crate::SessionUrl::parse(&format!("rtsp://127.0.0.1:{}", host.rtsp_port), "127.0.0.1")
                 .unwrap(),
             server_codec_modes: 1,
@@ -333,9 +348,18 @@ mod tests {
             remote_input_key: key,
             remote_input_key_id: 7,
             streaming_remotely: false,
-        };
+        }
+    }
+
+    #[test]
+    fn end_to_end_against_mock_host() {
+        let key = [0x42u8; 16];
+        let frames: Vec<Vec<u8>> = (0..5).map(|i| frame(i, 3000 + i * 2500)).collect();
+        let host = MockHost::start(key, frames.clone(), 1392);
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let events = Arc::new(Events(Mutex::new(Vec::new())));
         let session = StreamSession::start(
-            config,
+            test_config(&host, key),
             Box::new(Collect(got.clone())),
             Box::new(NoAudio),
             events.clone(),
@@ -394,5 +418,66 @@ mod tests {
                 .any(|(t, p)| *t == crate::control::PT_INPUT && p.len() == 14),
             "keyboard input arrives decrypted"
         );
+    }
+
+    #[test]
+    fn video_stall_ends_session_while_audio_and_control_continue() {
+        struct CountAudio(Arc<AtomicUsize>);
+        impl AudioSink for CountAudio {
+            fn setup(&mut self, _: &AudioFormat) -> Result<(), String> {
+                Ok(())
+            }
+
+            fn submit(&mut self, payload: &[u8]) {
+                if !payload.is_empty() {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        struct Forward(Sender<StreamEvent>);
+        impl SessionListener for Forward {
+            fn on_event(&self, event: StreamEvent) {
+                let _ = self.0.send(event);
+            }
+        }
+
+        let key = [0x42u8; 16];
+        let host = MockHost::stall_video(key, vec![frame(0, 3000)], 1392);
+        let video_frames = Arc::new(Mutex::new(Vec::new()));
+        let audio_packets = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = mpsc::channel();
+        let session = StreamSession::start(
+            test_config(&host, key),
+            Box::new(Collect(video_frames.clone())),
+            Box::new(CountAudio(audio_packets.clone())),
+            Arc::new(Forward(tx)),
+        )
+        .expect("session starts");
+
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let mut audio_at_first_frame = None;
+        loop {
+            let event = rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("session should report a stall");
+            match event {
+                StreamEvent::FirstFrame => audio_at_first_frame = Some(audio_packets.load(Ordering::Relaxed)),
+                StreamEvent::Terminated { reason, graceful } => {
+                    assert!(!graceful);
+                    assert_eq!(reason, "video stopped arriving from the host");
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(video_frames.lock().unwrap().len(), 1);
+        assert!(audio_packets.load(Ordering::Relaxed) > audio_at_first_frame.expect("video played"));
+        let types: Vec<_> = host.control_messages.lock().unwrap().iter().map(|(ty, _)| *ty).collect();
+        let mut requests = types.iter().enumerate().filter(|(_, ty)| **ty == crate::control::PT_REQUEST_IDR);
+        requests.next().expect("START A");
+        let (probe, _) = requests.next().expect("IDR probe for stalled video");
+        assert!(types[probe + 1..].contains(&crate::control::PT_PERIODIC_PING));
+        session.stop();
     }
 }
