@@ -194,6 +194,12 @@ impl ControlStream {
 
     /// Starts the receive and ping threads. Host events go to `events`.
     pub fn run(&mut self, events: Sender<ControlEvent>) -> io::Result<()> {
+        self.run_with_events(move |event| {
+            let _ = events.send(event);
+        })
+    }
+
+    pub(super) fn run_with_events(&mut self, emit: impl Fn(ControlEvent) + Send + 'static) -> io::Result<()> {
         let socket = self.lock().enet.socket_handle()?;
 
         // Receive / retransmit loop.
@@ -216,7 +222,7 @@ impl ControlStream {
                             match polled {
                                 Ok((evs, key, encrypted)) => {
                                     for ev in evs {
-                                        if !handle_event(ev, &key, encrypted, &events) {
+                                        if !handle_event(ev, &key, encrypted, &emit) {
                                             stop.store(true, Ordering::Relaxed);
                                         }
                                     }
@@ -225,7 +231,7 @@ impl ControlStream {
                                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                                 Err(e) => {
                                     warn!("control stream receive failed: {e}");
-                                    let _ = events.send(ControlEvent::ConnectionLost);
+                                    emit(ControlEvent::ConnectionLost);
                                     break;
                                 }
                             }
@@ -286,7 +292,7 @@ impl Drop for ControlStream {
 }
 
 /// Returns false when the stream is over.
-fn handle_event(ev: Event, key: &[u8; 16], encrypted: bool, events: &Sender<ControlEvent>) -> bool {
+fn handle_event(ev: Event, key: &[u8; 16], encrypted: bool, emit: &impl Fn(ControlEvent)) -> bool {
     match ev {
         Event::Receive { data, .. } => {
             let message = if encrypted {
@@ -303,14 +309,14 @@ fn handle_event(ev: Event, key: &[u8; 16], encrypted: bool, events: &Sender<Cont
             match parse_host_message(ptype, &payload) {
                 Some(event) => {
                     let terminated = matches!(event, ControlEvent::Terminated { .. });
-                    let _ = events.send(event);
+                    emit(event);
                     !terminated
                 }
                 None => true,
             }
         }
         Event::Disconnected { .. } | Event::TimedOut => {
-            let _ = events.send(ControlEvent::ConnectionLost);
+            emit(ControlEvent::ConnectionLost);
             false
         }
         Event::Connected => true,
