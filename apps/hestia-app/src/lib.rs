@@ -14,6 +14,7 @@ mod netroute;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod padmap;
 mod platform;
+mod presentation;
 mod touch;
 mod typing;
 mod view;
@@ -70,9 +71,6 @@ pub fn pad_preview(width: f32, height: f32) -> Vec<PadControl> {
 pub fn run(data_dir: PathBuf) -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     ui.set_is_android(cfg!(target_os = "android"));
-    // Hardware-decoded video drawn straight from GPU buffers.
-    #[cfg(target_os = "android")]
-    gpu_render::install(&ui);
     let controller = controller::Controller::new(&ui);
     controller.wire(&ui);
     // Desktop: game controllers straight from evdev.

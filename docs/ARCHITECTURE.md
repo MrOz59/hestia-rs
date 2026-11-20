@@ -23,8 +23,8 @@ Hestia RS is split into small crates with one direction of dependencies:
 - **Optional Hermes.** Every Hermes extension is probed first and falls back to
   plain GameStream behaviour, like Hestia does.
 - **Swappable media.** Streaming produces `EncodedFrame`s and Opus packets into
-  `VideoSink` / `AudioSink` traits; decoders (MediaCodec, VA-API, software) are
-  backends behind them.
+  `VideoSink` / `AudioSink` traits. Decoding produces a `DecodedFrame` that
+  owns its CPU or native GPU buffer until presentation.
 
 ## Crates
 
@@ -65,7 +65,9 @@ discovered and added by hand. `launch()` prepares a Hermes session when
 available, then launches or resumes, and returns a `LaunchedSession` carrying
 the AES key material the streaming layer needs; `LaunchedSession::
 stream_config()` turns it into a `StreamConfig` (session URL, codec modes,
-audio layout, LAN/WAN packet size, codec preference).
+  audio layout, LAN/WAN packet size, codec preference). `ManagedStream` owns
+  the host preparation and transport session. It exposes input, keyframes,
+  negotiated media, shutdown and final counters to the frontends.
 
 ### hestia-stream
 Pure-Rust data plane, following moonlight-common-c's Sunshine path:
@@ -85,21 +87,23 @@ Pure-Rust data plane, following moonlight-common-c's Sunshine path:
   `StreamEvent`s (stages, first frame, stats, termination).
 
 ### hestia-media
-Backends for the sink traits. `DecodingSink` decodes on its own thread with
-any `FrameDecoder` and gives RGBA pictures to a `FramePresenter`; on queue
-overflow or decode errors it drops until the next keyframe and asks for an IDR
-through the session's `KeyframeRequester`. Backends today: OpenH264 (feature
-`openh264`), Opus + cpal playback (feature `audio`), null and dump sinks.
-Planned: Android MediaCodec into a `Surface`, Linux VA-API, surround audio,
-AAudio.
+Backends for the sink traits. `DecodingSink` runs a `FrameDecoder` on its own
+thread and hands each `DecodedFrame` to a `FramePresenter`. A decoded frame
+owns either reusable RGBA pixels or an Android hardware picture. Queue overflow
+and decoder errors still use the same keyframe recovery policy. Backends include
+OpenH264, Android MediaCodec, Opus + cpal playback, Android audio, and null and
+dump sinks. Linux VA-API and surround playback are planned.
 
 ### hestia-app
 Slint UI (`ui/*.slint`, fluent-dark base style with a custom theme). A
 `Controller` owns the core and pushes view models to the window through
 `upgrade_in_event_loop`; no network call ever runs on the UI thread. The same
 crate builds a desktop binary and an Android `cdylib` (`android_main`). The
-stream screen (`ui/stream.slint`) shows frames pushed from the decoder thread
-(only the newest pending frame is kept) and sends input through the session.
+stream screen (`ui/stream.slint`) takes input and shows frames from
+`presentation.rs`. Each session owns one pending picture slot shared by the
+Slint event loop and the native renderer. The Android renderer imports the
+hardware picture, draws it without a CPU copy, and releases it with a GPU
+fence. The decoder receives renderer availability explicitly at construction.
 
 ### hestia-cli
 `hestia` binary over the same core, for scripting and for testing hosts without

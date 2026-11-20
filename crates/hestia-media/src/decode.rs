@@ -15,30 +15,33 @@ use std::time::{Duration, Instant};
 use hestia_stream::{EncodedFrame, KeyframeRequester, SubmitResult, VideoFormat, VideoSink};
 use log::{info, warn};
 
-/// A decoded picture in RGBA8, row-major, no padding.
-#[derive(Debug, Clone)]
-pub struct RgbaFrame {
+/// Pixel storage owned by a decoded picture.
+pub enum FrameBuffer {
+    /// RGBA8, row-major, without padding.
+    Rgba(Vec<u8>),
+    #[cfg(target_os = "android")]
+    Android(crate::gpu_video::GpuPicture),
+}
+
+/// The decoder hands its buffer and its timing to the presenter together.
+pub struct DecodedFrame {
     pub width: u32,
     pub height: u32,
-    pub data: Vec<u8>,
-    /// The picture went to the GPU renderer (Android zero-copy, see
-    /// `gpu_video`); `data` doesn't hold it.
-    pub on_gpu: bool,
+    pub buffer: FrameBuffer,
     pub frame_number: u32,
-    /// When the first packet of the frame arrived.
+    /// When the first packet of this frame arrived.
     pub received_at: Instant,
     pub decoded_at: Instant,
     pub idr_requested_at: Option<Instant>,
 }
 
-impl Default for RgbaFrame {
+impl Default for DecodedFrame {
     fn default() -> Self {
         let now = Instant::now();
         Self {
             width: 0,
             height: 0,
-            data: Vec::new(),
-            on_gpu: false,
+            buffer: FrameBuffer::Rgba(Vec::new()),
             frame_number: 0,
             received_at: now,
             decoded_at: now,
@@ -47,13 +50,35 @@ impl Default for RgbaFrame {
     }
 }
 
-impl RgbaFrame {
-    /// Resizes the buffer for a `width` × `height` picture.
-    pub fn reshape(&mut self, width: u32, height: u32) {
+impl DecodedFrame {
+    pub fn rgba(&self) -> Option<&[u8]> {
+        match &self.buffer {
+            FrameBuffer::Rgba(data) => Some(data),
+            #[cfg(target_os = "android")]
+            FrameBuffer::Android(_) => None,
+        }
+    }
+
+    /// Keeps a CPU allocation for reuse without retaining a native buffer.
+    pub fn discard_native(&mut self) {
+        #[cfg(target_os = "android")]
+        if matches!(self.buffer, FrameBuffer::Android(_)) {
+            self.buffer = FrameBuffer::Rgba(Vec::new());
+        }
+    }
+
+    pub fn reshape(&mut self, width: u32, height: u32) -> &mut [u8] {
+        self.discard_native();
         self.width = width;
         self.height = height;
-        self.on_gpu = false;
-        self.data.resize(width as usize * height as usize * 4, 0);
+        match &mut self.buffer {
+            FrameBuffer::Rgba(data) => {
+                data.resize(width as usize * height as usize * 4, 0);
+                data
+            }
+            #[cfg(target_os = "android")]
+            FrameBuffer::Android(_) => unreachable!("native output was discarded"),
+        }
     }
 }
 
@@ -94,7 +119,7 @@ pub trait FrameDecoder: Send {
         Ok(())
     }
     /// Decodes one access unit; `Ok(true)` when `out` now holds a picture.
-    fn decode(&mut self, frame: &EncodedFrame, out: &mut RgbaFrame) -> Result<bool, String>;
+    fn decode(&mut self, frame: &EncodedFrame, out: &mut DecodedFrame) -> Result<bool, String>;
 
     /// Discards pending output and references before decoding a recovery IDR.
     fn reset(&mut self) -> Result<(), String> {
@@ -106,12 +131,9 @@ pub trait FrameDecoder: Send {
         None
     }
 
-    fn drain_output(&mut self, _out: &mut RgbaFrame) -> Result<Option<FrameTiming>, String> {
+    fn drain_output(&mut self, _out: &mut DecodedFrame) -> Result<Option<FrameTiming>, String> {
         Ok(None)
     }
-
-    /// Publish or discard a staged platform picture after checking the queue generation.
-    fn finish_output(&mut self, _publish: bool) {}
 
     fn attach_stats(&mut self, _stats: Arc<DecodeStats>) {}
 
@@ -123,7 +145,7 @@ pub trait FrameDecoder: Send {
     fn decode_timed(
         &mut self,
         frame: &EncodedFrame,
-        out: &mut RgbaFrame,
+        out: &mut DecodedFrame,
         mut timing: FrameTiming,
     ) -> Result<Option<FrameTiming>, String> {
         if !self.decode(frame, out)? {
@@ -137,11 +159,11 @@ pub trait FrameDecoder: Send {
 /// Receives pictures on the decoder thread. A presenter handing a picture to
 /// another thread can take the buffer and return an older one for reuse.
 pub trait FramePresenter: Send {
-    fn present(&mut self, frame: &mut RgbaFrame);
+    fn present(&mut self, frame: &mut DecodedFrame);
 }
 
-impl<F: FnMut(&RgbaFrame) + Send> FramePresenter for F {
-    fn present(&mut self, frame: &mut RgbaFrame) {
+impl<F: FnMut(&DecodedFrame) + Send> FramePresenter for F {
+    fn present(&mut self, frame: &mut DecodedFrame) {
         self(frame)
     }
 }
@@ -469,7 +491,7 @@ fn decode_loop(
     requester: Option<KeyframeRequester>,
     failure_handler: Option<Box<dyn Fn(String) + Send>>,
 ) {
-    let mut picture = RgbaFrame::default();
+    let mut picture = DecodedFrame::default();
     let mut logged_size = (0, 0);
     let mut decoder_generation = 0;
     loop {
@@ -561,7 +583,7 @@ fn decode_loop(
         if queue.generation != generation {
             // A newer keyframe may already be queued. Its generation owns recovery.
             drop(queue);
-            decoder.finish_output(false);
+            picture.discard_native();
             if input_number.is_some() {
                 shared.dropped_backlog(1);
             }
@@ -570,7 +592,6 @@ fn decode_loop(
         match result {
             Ok(Some(timing)) => {
                 drop(queue);
-                decoder.finish_output(true);
                 picture.frame_number = timing.frame_number;
                 picture.received_at = timing.received_at;
                 picture.decoded_at = Instant::now();
@@ -599,12 +620,13 @@ fn decode_loop(
                     info!("decoding {}x{}", picture.width, picture.height);
                 }
                 presenter.present(&mut picture);
+                picture.discard_native();
             }
             Ok(None) => {}
             Err(e) => {
                 let dropped = queue.invalidate();
                 drop(queue);
-                decoder.finish_output(false);
+                picture.discard_native();
                 // The first few in full, then a reminder now and then: a
                 // decoder failing every frame would bury the log.
                 let errors = shared.stats.errors.fetch_add(1, Ordering::Relaxed) + 1;
@@ -643,12 +665,11 @@ mod tests {
         fn supports(&self, f: VideoFormat) -> bool {
             f.codec == VideoCodec::H264
         }
-        fn decode(&mut self, frame: &EncodedFrame, out: &mut RgbaFrame) -> Result<bool, String> {
+        fn decode(&mut self, frame: &EncodedFrame, out: &mut DecodedFrame) -> Result<bool, String> {
             if self.fail.contains(&frame.frame_number) {
                 return Err("corrupt".into());
             }
-            out.reshape(2, 1);
-            out.data[0] = frame.frame_number as u8;
+            out.reshape(2, 1)[0] = frame.frame_number as u8;
             Ok(true)
         }
     }
@@ -682,13 +703,13 @@ mod tests {
             fn supports(&self, _: VideoFormat) -> bool {
                 true
             }
-            fn decode(&mut self, _: &EncodedFrame, _: &mut RgbaFrame) -> Result<bool, String> {
+            fn decode(&mut self, _: &EncodedFrame, _: &mut DecodedFrame) -> Result<bool, String> {
                 unreachable!("the worker uses the timed API")
             }
             fn decode_timed(
                 &mut self,
                 _: &EncodedFrame,
-                _: &mut RgbaFrame,
+                _: &mut DecodedFrame,
                 timing: FrameTiming,
             ) -> Result<Option<FrameTiming>, String> {
                 self.0 = Some(timing);
@@ -697,7 +718,7 @@ mod tests {
             fn output_poll_interval(&self) -> Option<Duration> {
                 self.0.map(|_| Duration::from_millis(1))
             }
-            fn drain_output(&mut self, out: &mut RgbaFrame) -> Result<Option<FrameTiming>, String> {
+            fn drain_output(&mut self, out: &mut DecodedFrame) -> Result<Option<FrameTiming>, String> {
                 out.reshape(2, 1);
                 Ok(self.0.take().map(|mut timing| {
                     timing.codec_output_at = Instant::now();
@@ -709,7 +730,7 @@ mod tests {
         let (presented, pictures) = mpsc::channel();
         let mut sink = DecodingSink::new(
             Box::new(Delayed::default()),
-            Box::new(move |frame: &RgbaFrame| presented.send((frame.frame_number, frame.idr_requested_at)).unwrap()),
+            Box::new(move |frame: &DecodedFrame| presented.send((frame.frame_number, frame.idr_requested_at)).unwrap()),
         );
         let stats = sink.stats();
         sink.setup(H264, 2, 1, 60).unwrap();
@@ -733,7 +754,7 @@ mod tests {
         let s = shown.clone();
         let mut sink = DecodingSink::new(
             Box::new(Fake { fail: vec![3] }),
-            Box::new(move |f: &RgbaFrame| s.lock().unwrap().push(f.data[0] as u32)),
+            Box::new(move |f: &DecodedFrame| s.lock().unwrap().push(f.rgba().unwrap()[0] as u32)),
         );
         sink.attach_keyframe_requester(KeyframeRequester::new(move || {
             requested.send(()).unwrap();
@@ -774,10 +795,9 @@ mod tests {
             fn supports(&self, _f: VideoFormat) -> bool {
                 true
             }
-            fn decode(&mut self, frame: &EncodedFrame, out: &mut RgbaFrame) -> Result<bool, String> {
+            fn decode(&mut self, frame: &EncodedFrame, out: &mut DecodedFrame) -> Result<bool, String> {
                 std::thread::sleep(Duration::from_millis(5));
-                out.reshape(2, 1);
-                out.data[0] = frame.frame_number as u8;
+                out.reshape(2, 1)[0] = frame.frame_number as u8;
                 Ok(true)
             }
         }
@@ -786,7 +806,7 @@ mod tests {
         let s = shown.clone();
         let mut sink = DecodingSink::new(
             Box::new(Slow),
-            Box::new(move |f: &RgbaFrame| s.lock().unwrap().push(f.data[0] as u32)),
+            Box::new(move |f: &DecodedFrame| s.lock().unwrap().push(f.rgba().unwrap()[0] as u32)),
         );
         sink.attach_keyframe_requester(KeyframeRequester::new(move || {
             requested.send(()).unwrap();
@@ -835,7 +855,7 @@ mod tests {
             fn supports(&self, _format: VideoFormat) -> bool {
                 true
             }
-            fn decode(&mut self, _frame: &EncodedFrame, _out: &mut RgbaFrame) -> Result<bool, String> {
+            fn decode(&mut self, _frame: &EncodedFrame, _out: &mut DecodedFrame) -> Result<bool, String> {
                 self.0 = true;
                 Err("no usable video output".into())
             }
@@ -846,7 +866,7 @@ mod tests {
 
         let (send_error, errors) = mpsc::channel();
         let (send_idr, idrs) = mpsc::channel();
-        let mut sink = DecodingSink::new(Box::new(Broken(false)), Box::new(|_: &RgbaFrame| {}));
+        let mut sink = DecodingSink::new(Box::new(Broken(false)), Box::new(|_: &DecodedFrame| {}));
         sink.attach_failure_handler(Box::new(move |reason| send_error.send(reason).unwrap()));
         sink.attach_keyframe_requester(KeyframeRequester::new(move || send_idr.send(()).unwrap()));
         sink.setup(H264, 1280, 720, 60).unwrap();
@@ -863,7 +883,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_codec() {
-        let mut sink = DecodingSink::new(Box::new(Fake { fail: vec![] }), Box::new(|_: &RgbaFrame| {}));
+        let mut sink = DecodingSink::new(Box::new(Fake { fail: vec![] }), Box::new(|_: &DecodedFrame| {}));
         let hevc = VideoFormat {
             codec: VideoCodec::Hevc,
             ..H264

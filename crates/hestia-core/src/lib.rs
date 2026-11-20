@@ -185,17 +185,44 @@ pub struct ManagedStream {
     stream: stream::StreamSession,
 }
 
-impl std::ops::Deref for ManagedStream {
-    type Target = stream::StreamSession;
-
-    fn deref(&self) -> &Self::Target {
-        &self.stream
-    }
+/// The agreed media formats and encryption state, independent of the handshake.
+pub struct StreamDetails {
+    pub video_format: stream::VideoFormat,
+    pub audio_format: stream::AudioFormat,
+    pub encryption_enabled: u32,
 }
 
 impl ManagedStream {
+    pub fn details(&self) -> StreamDetails {
+        let details = self.stream.negotiated();
+        StreamDetails {
+            video_format: details.video_format,
+            audio_format: details.audio_format,
+            encryption_enabled: details.encryption_enabled,
+        }
+    }
+
+    pub fn report_negotiation(&self, report: &mut report::StreamReport) {
+        add_negotiated_to_report(self.stream.negotiated(), report);
+    }
+
+    pub fn send_input(&self, event: &stream::InputEvent) {
+        self.stream.send_input(event);
+    }
+
+    pub fn request_keyframe(&self) {
+        self.stream.request_keyframe();
+    }
+
     pub fn stop(self) {
         drop(self);
+    }
+
+    /// Snapshot final counters after the receive and control workers have stopped.
+    pub fn stop_with_stats(self) -> Option<report::VideoTransportStats> {
+        let counters = self.stream.video_counters();
+        self.stop();
+        counters.as_deref().map(report::VideoTransportStats::from)
     }
 }
 
@@ -1025,7 +1052,7 @@ pub fn add_stream_config_to_report(c: &hestia_stream::StreamConfig, decoder: &st
 }
 
 /// Adds what the RTSP handshake settled on to a report.
-pub fn add_negotiated_to_report(n: &hestia_stream::rtsp::Negotiated, r: &mut report::StreamReport) {
+fn add_negotiated_to_report(n: &hestia_stream::rtsp::Negotiated, r: &mut report::StreamReport) {
     r.field("Negotiated", "video", format!("{:?}", n.video_format));
     r.field(
         "Negotiated",

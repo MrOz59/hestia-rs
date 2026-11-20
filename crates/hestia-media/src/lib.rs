@@ -39,7 +39,8 @@ pub mod software_h264;
 
 pub use color::Colorimetry;
 pub use decode::{
-    DecodeStats, DecodingSink, FrameDecoder, FramePresenter, LatencyHistogram, RecoveryLatency, RgbaFrame,
+    DecodeStats, DecodedFrame, DecodingSink, FrameBuffer, FrameDecoder, FramePresenter, LatencyHistogram,
+    RecoveryLatency,
 };
 pub use hestia_stream::sink::{AudioFormat, AudioSink, EncodedFrame, SubmitResult, VideoCodec, VideoFormat, VideoSink};
 
@@ -101,8 +102,9 @@ pub fn decoder_with(colorimetry: Colorimetry, hardware: bool) -> Result<DecoderC
 pub fn decoder_with_android_capabilities(
     colorimetry: Colorimetry,
     candidates: Vec<(VideoCodec, String)>,
+    output: Option<std::sync::Arc<gpu_video::GpuOutput>>,
 ) -> Result<DecoderChoice, String> {
-    if let Some(decoder) = mediacodec::MediaCodecDecoder::with_components(colorimetry, candidates) {
+    if let Some(decoder) = mediacodec::MediaCodecDecoder::with_components(colorimetry, candidates, output) {
         let formats = decoder.formats();
         return Ok((Box::new(decoder), formats));
     }

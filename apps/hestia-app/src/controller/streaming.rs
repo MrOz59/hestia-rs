@@ -11,17 +11,13 @@ use hestia_core::report::StatsSample;
 use hestia_core::stream::input::{Modifiers, MouseButton, TouchPhase};
 use hestia_core::stream::{InputEvent, SessionListener, StreamEvent, StreamStats};
 use hestia_core::{LaunchedSession, ManagedStream, StreamHost};
-#[cfg(target_os = "android")]
-use hestia_media::gpu_video::{GpuSessionGuard, GpuVideo, GpuVideoStats};
-use hestia_media::{
-    DecodeStats, DecoderChoice, DecodingSink, FramePresenter, LatencyHistogram, RecoveryLatency, RgbaFrame,
-};
+use hestia_media::{DecodeStats, DecodingSink};
 use log::{info, warn};
-use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
+use slint::{ComponentHandle, Image, ModelRc, SharedString, VecModel};
 
 use super::report::{self, SharedReport};
 use super::{Controller, Shared, spawn};
-use crate::AppWindow;
+use crate::presentation::{Presentation, StreamVideo, UiPresenter};
 use crate::keymap::{self, Mapped};
 use crate::touch::{self, Trackpad};
 use crate::typing;
@@ -95,9 +91,7 @@ pub(super) struct ActiveStream {
     zoom: Zoom,
     report: SharedReport,
     decode: Arc<DecodeStats>,
-    present: Arc<PresentStats>,
-    #[cfg(target_os = "android")]
-    _gpu_session: GpuSessionGuard,
+    present: Arc<Presentation>,
 }
 
 impl ActiveStream {
@@ -113,98 +107,6 @@ fn trackpad_events(outputs: Vec<touch::Output>) -> impl Iterator<Item = InputEve
         touch::Output::Move { dx, dy } => InputEvent::MouseMove { dx, dy },
         touch::Output::Button { button, pressed } => InputEvent::MouseButton { button, pressed },
     })
-}
-
-/// Counts the handoff to Slint, where physical presentation is not observed.
-#[derive(Default)]
-struct PresentStats {
-    delivered: AtomicU64,
-    superseded: AtomicU64,
-    closed: AtomicBool,
-    handoff: LatencyHistogram,
-    receive_to_ui: LatencyHistogram,
-    recovery: RecoveryLatency,
-    #[cfg(target_os = "android")]
-    gpu: Arc<GpuVideoStats>,
-}
-
-impl PresentStats {
-    fn superseded(&self) -> u64 {
-        let cpu = self.superseded.load(Ordering::Relaxed);
-        #[cfg(target_os = "android")]
-        let cpu = cpu + self.gpu.superseded.load(Ordering::Relaxed);
-        cpu
-    }
-}
-
-#[derive(Default)]
-struct PendingPicture {
-    latest: Option<RgbaFrame>,
-    spare: Option<RgbaFrame>,
-    scheduled: bool,
-}
-
-struct UiPresenter {
-    weak: slint::Weak<AppWindow>,
-    pending: Arc<Mutex<PendingPicture>>,
-    stats: Arc<PresentStats>,
-}
-
-impl FramePresenter for UiPresenter {
-    fn present(&mut self, frame: &mut RgbaFrame) {
-        let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
-        if self.stats.closed.load(Ordering::Acquire) {
-            return;
-        }
-        let reusable = if let Some(older) = pending.latest.take() {
-            if !older.on_gpu {
-                self.stats.superseded.fetch_add(1, Ordering::Relaxed);
-            }
-            older
-        } else {
-            pending.spare.take().unwrap_or_default()
-        };
-        pending.latest = Some(std::mem::replace(frame, reusable));
-        if pending.scheduled {
-            return;
-        }
-        pending.scheduled = true;
-        drop(pending);
-
-        let pending = self.pending.clone();
-        let stats = self.stats.clone();
-        let _ = self.weak.upgrade_in_event_loop(move |ui| {
-            let frame = {
-                let mut pending = pending.lock().unwrap_or_else(|p| p.into_inner());
-                pending.scheduled = false;
-                pending.latest.take()
-            };
-            if let Some(frame) = frame
-                && !stats.closed.load(Ordering::Acquire)
-            {
-                if frame.on_gpu {
-                    // The renderer counts its own draws and superseded GPU images.
-                    #[cfg(target_os = "android")]
-                    stats.gpu.redraw_requests.fetch_add(1, Ordering::Relaxed);
-                    ui.window().request_redraw();
-                } else {
-                    let buffer =
-                        SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&frame.data, frame.width, frame.height);
-                    ui.set_stream_frame(Image::from_rgba8(buffer));
-                    let delivered_at = Instant::now();
-                    stats.recovery.record(frame.idr_requested_at, delivered_at);
-                    stats.handoff.record(delivered_at.duration_since(frame.decoded_at));
-                    stats
-                        .receive_to_ui
-                        .record(delivered_at.duration_since(frame.received_at));
-                    if stats.delivered.fetch_add(1, Ordering::Relaxed) == 0 {
-                        ui.set_stream_status(SharedString::new());
-                    }
-                }
-                pending.lock().unwrap_or_else(|p| p.into_inner()).spare = Some(frame);
-            }
-        });
-    }
 }
 
 #[derive(Clone)]
@@ -225,7 +127,7 @@ struct Listener {
     label: String,
     last: Mutex<Option<Totals>>,
     report: SharedReport,
-    present: Arc<PresentStats>,
+    present: Arc<Presentation>,
     target_fps: u32,
     spikes: Mutex<SpikeHistory>,
     host_id: String,
@@ -442,27 +344,28 @@ impl Controller {
         host_id: String,
         launched: &LaunchedSession,
         host: StreamHost,
-        (decoder, formats): DecoderChoice,
+        video: StreamVideo,
         session_report: SharedReport,
         launch_seq: u64,
     ) -> Result<(), String> {
+        let (decoder, formats) = video.decoder;
         let config = launched.stream_config(&formats).map_err(|e| e.to_string())?;
         hestia_core::add_stream_config_to_report(&config, decoder.name(), &mut report::lock(&session_report));
         let generation = self.stream_generation.fetch_add(1, Ordering::Relaxed) + 1;
         let weak = self.weak.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        #[cfg(target_os = "android")]
-        let gpu_session = GpuVideo::global().prepare(launched.settings.gpu_video);
-        let present = Arc::new(PresentStats {
+        let present = Arc::new(Presentation::new(
             #[cfg(target_os = "android")]
-            gpu: gpu_session.stats(),
-            ..PresentStats::default()
-        });
+            generation,
+            #[cfg(target_os = "android")]
+            video.gpu,
+        ));
+        #[cfg(target_os = "android")]
+        self.gpu_window.set_active(&present);
         let sink = DecodingSink::new(
             decoder,
             Box::new(UiPresenter {
                 weak,
-                pending: Arc::new(Mutex::new(PendingPicture::default())),
-                stats: present.clone(),
+                presentation: present.clone(),
             }),
         );
         let decode = sink.stats();
@@ -501,18 +404,18 @@ impl Controller {
                 listener.clone(),
             )
             .map_err(|e| {
-                present.closed.store(true, Ordering::Release);
+                present.close();
                 e.to_string()
             })?;
         if !self.launch_current(launch_seq) {
-            present.closed.store(true, Ordering::Release);
+            present.close();
             session.stop();
             return Err("cancelled".into());
         }
-        let codec = format!("{:?}", session.negotiated().video_format.codec);
+        let codec = format!("{:?}", session.details().video_format.codec);
         info!("streaming {size} {codec} from {}", launched.host.name);
         *listener.video.lock().unwrap_or_else(|p| p.into_inner()) = format!("{size}@{} {codec}", launched.request.fps);
-        hestia_core::add_negotiated_to_report(session.negotiated(), &mut report::lock(&session_report));
+        session.report_negotiation(&mut report::lock(&session_report));
 
         // A stream replacing another keeps the laid-out view (no new layout
         // event comes for it).
@@ -543,11 +446,9 @@ impl Controller {
             report: session_report,
             decode,
             present,
-            #[cfg(target_os = "android")]
-            _gpu_session: gpu_session,
         });
         if let Some(previous) = previous {
-            previous.present.closed.store(true, Ordering::Release);
+            previous.present.close();
             spawn("hestia-stream-stop", move || previous.session.stop());
         }
         let pad = launched.settings.onscreen_controller;
@@ -583,7 +484,7 @@ impl Controller {
             if stale { None } else { guard.take() }
         };
         let Some(active) = active else { return };
-        active.present.closed.store(true, Ordering::Release);
+        active.present.close();
         let c = self.clone();
         spawn("hestia-stream-stop", move || {
             let ActiveStream {
@@ -594,11 +495,10 @@ impl Controller {
                 present,
                 ..
             } = active;
-            let video_counters = session.video_counters();
-            session.stop();
+            let video_stats = session.stop_with_stats();
             {
                 let mut r = report::lock(&session_report);
-                if let Some(video) = video_counters {
+                if let Some(video) = video_stats {
                     r.video_transport(&video);
                 }
                 r.decoder_totals(

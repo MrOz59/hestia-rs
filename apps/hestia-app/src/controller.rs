@@ -51,6 +51,8 @@ pub struct Controller {
     state: Mutex<State>,
     stream: Mutex<Option<streaming::ActiveStream>>,
     stream_generation: AtomicU64,
+    #[cfg(target_os = "android")]
+    gpu_window: Arc<crate::presentation::GpuWindow>,
     /// What a finger does in the stream (`TouchMode` index; persisted).
     touch_mode: AtomicU8,
     /// The report screen's content.
@@ -67,12 +69,18 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
 
 impl Controller {
     pub fn new(ui: &AppWindow) -> Shared {
+        #[cfg(target_os = "android")]
+        let gpu_window = Arc::new(crate::presentation::GpuWindow::default());
+        #[cfg(target_os = "android")]
+        crate::gpu_render::install(ui, gpu_window.clone());
         Arc::new(Self {
             weak: Mutex::new(ui.as_weak()),
             core: OnceLock::new(),
             state: Mutex::new(State::default()),
             stream: Mutex::new(None),
             stream_generation: AtomicU64::new(0),
+            #[cfg(target_os = "android")]
+            gpu_window,
             touch_mode: AtomicU8::new(0),
             last_report: Mutex::new(None),
         })
@@ -786,20 +794,11 @@ impl Controller {
                     info!("launching with stream profile “{name}”");
                     report::lock(&session_report).field("Settings", "profile", name);
                 }
-                let colorimetry = hestia_media::Colorimetry::default();
-                #[cfg(target_os = "android")]
-                let decoder = if settings.hardware_decoding {
-                    let candidates = platform::video_decoders(settings.width, settings.height, settings.fps)
-                        .unwrap_or_else(|e| {
-                            warn!("could not check Android video decoders: {e}");
-                            Vec::new()
-                        });
-                    hestia_media::decoder_with_android_capabilities(colorimetry, candidates)
-                } else {
-                    hestia_media::decoder_with(colorimetry, false)
-                };
-                #[cfg(not(target_os = "android"))]
-                let decoder = hestia_media::decoder_with(colorimetry, settings.hardware_decoding);
+                let decoder = crate::presentation::StreamVideo::select(
+                    &settings,
+                    #[cfg(target_os = "android")]
+                    &c.gpu_window,
+                );
                 let launched = decoder.and_then(|decoder| {
                     if !c.launch_current(seq) {
                         return Err("cancelled".into());

@@ -15,7 +15,7 @@ use hestia_core::report::{StatsSample, StreamReport};
 use hestia_core::stream::{SessionListener, StreamEvent, VideoCodec, VideoFormat, VideoSink};
 use hestia_core::{DeviceInfo, HestiaClient, logcapture};
 use hestia_media::null::{NullAudioSink, NullVideoSink};
-use hestia_media::{Colorimetry, DecodeStats, DecodingSink, RgbaFrame, dump::DumpVideoSink};
+use hestia_media::{Colorimetry, DecodeStats, DecodingSink, DecodedFrame, dump::DumpVideoSink};
 
 use crate::Result;
 
@@ -63,10 +63,11 @@ fn all_formats() -> Vec<VideoFormat> {
 }
 
 /// Saves one decoded picture as a binary PPM (any image viewer opens it).
-fn write_ppm(path: &Path, frame: &RgbaFrame) -> std::io::Result<()> {
+fn write_ppm(path: &Path, frame: &DecodedFrame) -> std::io::Result<()> {
+    let pixels = frame.rgba().ok_or_else(|| std::io::Error::other("snapshot requires a CPU frame"))?;
     let mut out = BufWriter::new(File::create(path)?);
     write!(out, "P6\n{} {}\n255\n", frame.width, frame.height)?;
-    for px in frame.data.chunks_exact(4) {
+    for px in pixels.chunks_exact(4) {
         out.write_all(&px[..3])?;
     }
     out.flush()
@@ -98,7 +99,7 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
             let snapshot = opts.snapshot.clone();
             let started = Instant::now();
             let mut saved = false;
-            let presenter = move |frame: &RgbaFrame| {
+            let presenter = move |frame: &DecodedFrame| {
                 if let Some(path) = snapshot.as_deref().filter(|_| !saved) {
                     if started.elapsed() > Duration::from_secs(2) {
                         saved = true;
@@ -175,8 +176,8 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
             return Err(e.into());
         }
     };
-    hestia_core::add_negotiated_to_report(session.negotiated(), &mut report);
-    let n = session.negotiated();
+    session.report_negotiation(&mut report);
+    let n = session.details();
     eprintln!(
         "streaming {:?} video, {} audio channels, encryption {:#x}{}",
         n.video_format.codec,
@@ -305,9 +306,8 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
             Err(RecvTimeoutError::Disconnected) => break None,
         }
     };
-    let video_counters = session.video_counters();
-    session.stop();
-    if let Some(video) = video_counters {
+    let video_stats = session.stop_with_stats();
+    if let Some(video) = video_stats {
         report.video_transport(&video);
     }
     if let Some(d) = &decode_stats {
