@@ -29,7 +29,9 @@ impl PcmOutput for AAudioOutput {
     }
 
     fn maintain(&mut self) {
-        if self.lost.swap(false, Ordering::Relaxed) && let Some(reader) = &self.reader {
+        if self.lost.swap(false, Ordering::Relaxed)
+            && let Some(reader) = &self.reader
+        {
             self.stream = None;
             match open_output(reader.clone(), self.lost.clone()) {
                 Ok(output) => self.stream = Some(output),
