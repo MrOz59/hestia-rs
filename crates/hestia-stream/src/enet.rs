@@ -748,6 +748,43 @@ fn ack_command(channel: u8, seq: u16, sent_time: u16) -> [u8; 8] {
 }
 
 /// Waits until `socket` is readable or `timeout` passes, without consuming data.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn wait_readable(socket: &UdpSocket, timeout: Duration) -> io::Result<bool> {
+    use std::ffi::{c_int, c_short};
+    use std::os::fd::AsRawFd;
+
+    #[cfg(target_os = "linux")]
+    type Nfds = std::ffi::c_ulong;
+    #[cfg(target_os = "android")]
+    type Nfds = std::ffi::c_uint;
+
+    #[repr(C)]
+    struct PollFd {
+        fd: c_int,
+        events: c_short,
+        revents: c_short,
+    }
+
+    unsafe extern "C" {
+        fn poll(fds: *mut PollFd, count: Nfds, timeout_ms: c_int) -> c_int;
+    }
+
+    const POLLIN: c_short = 0x0001;
+    let mut fd = PollFd {
+        fd: socket.as_raw_fd(),
+        events: POLLIN,
+        revents: 0,
+    };
+    let timeout_ms = timeout.as_nanos().div_ceil(1_000_000).clamp(1, c_int::MAX as u128) as c_int;
+    // SAFETY: fd is a live pollfd and the borrowed socket outlives the call.
+    match unsafe { poll(&mut fd, 1, timeout_ms) } {
+        -1 => Err(io::Error::last_os_error()),
+        0 => Ok(false),
+        _ => Ok(true), // Readable or an error for recv_from to handle.
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub fn wait_readable(socket: &UdpSocket, timeout: Duration) -> io::Result<bool> {
     let probe = socket.try_clone()?;
     probe.set_nonblocking(false)?;
@@ -783,6 +820,24 @@ pub(crate) fn fill_random(out: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn readiness_does_not_consume_udp_or_change_socket_options() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket.set_read_timeout(Some(Duration::from_millis(73))).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let read_timeout = socket.read_timeout().unwrap();
+        assert!(!wait_readable(&socket, Duration::from_millis(5)).unwrap());
+        assert_eq!(socket.read_timeout().unwrap(), read_timeout);
+
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender.send_to(b"ready", socket.local_addr().unwrap()).unwrap();
+        assert!(wait_readable(&socket, Duration::from_millis(100)).unwrap());
+        let mut buf = [0; 16];
+        let (len, _) = socket.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..len], b"ready");
+    }
 
     #[test]
     fn sequence_ordering() {

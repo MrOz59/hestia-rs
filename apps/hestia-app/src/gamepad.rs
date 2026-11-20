@@ -120,9 +120,9 @@ impl Controllers {
     }
 
     /// The slot for `device`, assigning the next free one.
-    fn slot(&mut self, device: i32) -> Option<&mut Slot> {
+    fn slot(&mut self, device: i32) -> Option<(&mut Slot, bool)> {
         if let Some(i) = self.slots.iter().position(|s| s.device == device) {
-            return self.slots.get_mut(i);
+            return Some((&mut self.slots[i], false));
         }
         if self.slots.len() >= MAX_CONTROLLERS {
             return None;
@@ -142,7 +142,7 @@ impl Controllers {
         for s in &mut self.slots {
             s.state.active_mask = mask;
         }
-        self.slots.last_mut()
+        self.slots.last_mut().map(|slot| (slot, true))
     }
 
     /// Android device id of controller `index`, for rumble.
@@ -157,7 +157,7 @@ impl Controllers {
     /// A controller key went down or up; the new state if it changed.
     pub fn key(&mut self, device: i32, keycode: u32, pressed: bool) -> Option<GamepadState> {
         let control = control_for_keycode(keycode)?;
-        let slot = self.slot(device)?;
+        let (slot, joining) = self.slot(device)?;
         let before = slot.state;
         match control {
             Control::Button(bit) => {
@@ -181,7 +181,7 @@ impl Controllers {
         } else if matches!(control, Control::RightTrigger) {
             slot.state.right_trigger = 0;
         }
-        (slot.state != before).then_some(slot.state)
+        (joining || slot.state != before).then_some(slot.state)
     }
 
     /// The whole state of a controller at once (the on-screen one); the
@@ -194,7 +194,7 @@ impl Controllers {
         right_stick: (i16, i16),
         triggers: (u8, u8),
     ) -> Option<GamepadState> {
-        let slot = self.slot(device)?;
+        let (slot, joining) = self.slot(device)?;
         let before = slot.state;
         slot.keys = buttons;
         slot.hat = 0;
@@ -202,21 +202,27 @@ impl Controllers {
         slot.state.left_stick = left_stick;
         slot.state.right_stick = right_stick;
         (slot.state.left_trigger, slot.state.right_trigger) = triggers;
-        (slot.state != before).then_some(slot.state)
+        (joining || slot.state != before).then_some(slot.state)
     }
 
-    /// Forgets one controller (the on-screen one, when it's hidden).
-    pub fn remove(&mut self, device: i32) {
-        self.slots.retain(|s| s.device != device);
+    /// Releases this controller's host slot, even if its buttons are neutral.
+    pub fn remove(&mut self, device: i32) -> Option<GamepadState> {
+        let i = self.slots.iter().position(|s| s.device == device)?;
+        let index = self.slots.remove(i).state.index;
         let mask = self.mask();
         for s in &mut self.slots {
             s.state.active_mask = mask;
         }
+        Some(GamepadState {
+            index,
+            active_mask: mask,
+            ..Default::default()
+        })
     }
 
     /// New joystick axes; the new state if it changed.
     pub fn motion(&mut self, device: i32, a: Axes) -> Option<GamepadState> {
-        let slot = self.slot(device)?;
+        let (slot, joining) = self.slot(device)?;
         let before = slot.state;
         slot.state.left_stick = stick(a.x, a.y);
         // Most controllers put the right stick on Z/RZ; some on RX/RY.
@@ -244,7 +250,7 @@ impl Controllers {
             slot.hat |= buttons::DOWN;
         }
         Self::apply_buttons(slot);
-        (slot.state != before).then_some(slot.state)
+        (joining || slot.state != before).then_some(slot.state)
     }
 
     fn apply_buttons(slot: &mut Slot) {
@@ -368,8 +374,19 @@ mod tests {
             (1, buttons::B, 0b11, 255)
         );
         assert!(c.set(ON_SCREEN, buttons::B, (100, -100), (0, 0), (0, 255)).is_none());
-        c.remove(ON_SCREEN);
+        assert_eq!(
+            c.remove(ON_SCREEN),
+            Some(GamepadState {
+                index: 1,
+                active_mask: 0b1,
+                ..Default::default()
+            })
+        );
+        assert_eq!(c.remove(ON_SCREEN), None);
         assert_eq!(c.key(5, 96, false).unwrap().active_mask, 0b1);
+        let neutral = c.set(9, 0, (0, 0), (0, 0), (0, 0)).unwrap();
+        assert_eq!((neutral.index, neutral.active_mask), (1, 0b11));
+        assert_eq!(c.remove(9).unwrap().active_mask, 0b1);
     }
 
     #[test]
