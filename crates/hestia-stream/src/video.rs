@@ -597,9 +597,7 @@ impl VideoReceiver {
             receiver.threads.push(
                 std::thread::Builder::new()
                     .name("hestia-video-rx".into())
-                    .spawn(move || {
-                        receive_loop(socket, cfg, sink, emit.as_ref(), stop, counters, decoder_wants_idr)
-                    })?,
+                    .spawn(move || receive_loop(socket, cfg, sink, emit.as_ref(), stop, counters, decoder_wants_idr))?,
             );
         }
         Ok(receiver)
@@ -702,13 +700,17 @@ fn receive_loop(
             Ok(_) => None,
             // ConnectionReset can be an ICMP port-unreachable. Interrupted
             // can be a signal while Android is sending the app to the background.
-            Err(e) if matches!(
-                e.kind(),
-                io::ErrorKind::WouldBlock
-                    | io::ErrorKind::TimedOut
-                    | io::ErrorKind::ConnectionReset
-                    | io::ErrorKind::Interrupted
-            ) => None,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                None
+            }
             Err(e) => {
                 if !stop.load(Ordering::Relaxed) {
                     warn!("video socket error: {e}");
@@ -969,13 +971,22 @@ mod tests {
         let first = start + FIRST_DATA_TIMEOUT;
         watchdog.received(first);
         assert_eq!(watchdog.inactivity(first + VIDEO_STALL_PROBE / 2), None);
-        assert_eq!(watchdog.inactivity(first + VIDEO_STALL_PROBE), Some(VideoInactivity::Probe));
+        assert_eq!(
+            watchdog.inactivity(first + VIDEO_STALL_PROBE),
+            Some(VideoInactivity::Probe)
+        );
         assert_eq!(watchdog.inactivity(first + VIDEO_STALL_PROBE), None);
 
         let recovered = first + VIDEO_STALL_PROBE + Duration::from_millis(50);
         watchdog.received(recovered);
-        assert_eq!(watchdog.inactivity(recovered + VIDEO_STALL_PROBE), Some(VideoInactivity::Probe));
-        assert_eq!(watchdog.inactivity(recovered + VIDEO_STALL_TIMEOUT), Some(VideoInactivity::Stalled));
+        assert_eq!(
+            watchdog.inactivity(recovered + VIDEO_STALL_PROBE),
+            Some(VideoInactivity::Probe)
+        );
+        assert_eq!(
+            watchdog.inactivity(recovered + VIDEO_STALL_TIMEOUT),
+            Some(VideoInactivity::Stalled)
+        );
     }
 
     #[test]

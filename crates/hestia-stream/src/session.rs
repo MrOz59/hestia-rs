@@ -473,8 +473,17 @@ mod tests {
         }
         assert_eq!(video_frames.lock().unwrap().len(), 1);
         assert!(audio_packets.load(Ordering::Relaxed) > audio_at_first_frame.expect("video played"));
-        let types: Vec<_> = host.control_messages.lock().unwrap().iter().map(|(ty, _)| *ty).collect();
-        let mut requests = types.iter().enumerate().filter(|(_, ty)| **ty == crate::control::PT_REQUEST_IDR);
+        let types: Vec<_> = host
+            .control_messages
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(ty, _)| *ty)
+            .collect();
+        let mut requests = types
+            .iter()
+            .enumerate()
+            .filter(|(_, ty)| **ty == crate::control::PT_REQUEST_IDR);
         requests.next().expect("START A");
         let (probe, _) = requests.next().expect("IDR probe for stalled video");
         assert!(types[probe + 1..].contains(&crate::control::PT_PERIODIC_PING));
