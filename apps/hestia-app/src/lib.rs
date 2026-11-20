@@ -1,6 +1,7 @@
 //! Hestia RS graphical client. The UI lives in `ui/*.slint`; this crate wires
 //! it to `hestia-core` and runs every network call on worker threads.
 
+mod clipsync;
 mod controller;
 mod gamepad;
 #[cfg(target_os = "android")]

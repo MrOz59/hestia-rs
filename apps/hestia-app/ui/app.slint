@@ -127,6 +127,9 @@ export component AppWindow inherits Window {
     in property <int> stream-touch-mode: 0;
     in-out property <bool> stream-menu-open: false;
     in property <bool> stream-pad-visible: false;
+    in property <bool> stream-clipboard: false;
+    callback stream-clipboard-send();
+    callback stream-clipboard-fetch();
     in property <[PadControl]> stream-pad-controls;
     in property <bool> stream-zoom-mode: false;
     in property <float> stream-zoom: 1;
@@ -175,6 +178,14 @@ export component AppWindow inherits Window {
     in-out property <bool> cfg-show-menu-button: false;
     in-out property <bool> cfg-hardware-decoding: true;
     in-out property <bool> cfg-gpu-video: true;
+    in property <[string]> cfg-profile-names;
+    in-out property <int> cfg-profile-pick;
+    callback settings-save-profile(string);
+    callback settings-load-profile(int);
+    callback settings-delete-profile(int);
+    in property <[string]> apps-profile-options;
+    in-out property <int> apps-profile-index;
+    callback apps-profile-chosen(int);
     in property <bool> is-android: false;
     in-out property <int> cfg-orientation: 0;
     callback settings-custom-resolution(string);
@@ -298,6 +309,11 @@ export component AppWindow inherits Window {
             loading: root.apps-loading;
             app-running: root.app-running;
             hermes: root.host-hermes;
+            profile-options: root.apps-profile-options;
+            profile-index <=> root.apps-profile-index;
+            profile-chosen(index) => {
+                root.apps-profile-chosen(index);
+            }
             tools => {
                 root.open-tools();
             }
@@ -341,6 +357,13 @@ export component AppWindow inherits Window {
             touch-mode: root.stream-touch-mode;
             menu-open <=> root.stream-menu-open;
             pad-visible: root.stream-pad-visible;
+            clipboard-actions: root.stream-clipboard;
+            clipboard-send => {
+                root.stream-clipboard-send();
+            }
+            clipboard-fetch => {
+                root.stream-clipboard-fetch();
+            }
             pad-controls: root.stream-pad-controls;
             zoom-mode: root.stream-zoom-mode;
             zoom: root.stream-zoom;
@@ -490,6 +513,17 @@ export component AppWindow inherits Window {
         gpu-video <=> root.cfg-gpu-video;
         android: root.is-android;
         orientation <=> root.cfg-orientation;
+        profile-names: root.cfg-profile-names;
+        profile-pick <=> root.cfg-profile-pick;
+        save-profile(name) => {
+            root.settings-save-profile(name);
+        }
+        load-profile(index) => {
+            root.settings-load-profile(index);
+        }
+        delete-profile(index) => {
+            root.settings-delete-profile(index);
+        }
         custom-resolution(text) => {
             root.settings-custom-resolution(text);
         }

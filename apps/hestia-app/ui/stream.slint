@@ -74,6 +74,10 @@ export component StreamView inherits Rectangle {
     callback cycle-touch-mode();
     // On-screen controller.
     in property <bool> pad-visible: false;
+    // Hermes host with clipboard support: one-off send / fetch in the menu.
+    in property <bool> clipboard-actions: false;
+    callback clipboard-send();
+    callback clipboard-fetch();
     in property <[PadControl]> pad-controls;
     callback toggle-pad();
     // The view's size, for the controller's layout.
@@ -482,6 +486,22 @@ export component StreamView inherits Rectangle {
                     text: root.keyboard-open ? "Hide keyboard" : root.soft-keyboard ? "Keyboard (3-finger tap)" : "Shortcut keys";
                     clicked => {
                         root.keyboard-open = !root.keyboard-open;
+                        root.menu-open = false;
+                    }
+                }
+                if root.clipboard-actions: MenuItem {
+                    icon: "clipboard";
+                    text: "Send clipboard to host";
+                    clicked => {
+                        root.clipboard-send();
+                        root.menu-open = false;
+                    }
+                }
+                if root.clipboard-actions: MenuItem {
+                    icon: "clipboard";
+                    text: "Get host's clipboard";
+                    clicked => {
+                        root.clipboard-fetch();
                         root.menu-open = false;
                     }
                 }

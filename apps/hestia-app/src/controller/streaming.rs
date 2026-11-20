@@ -417,6 +417,18 @@ impl Controller {
         self.stream.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Stream `generation` is still the one running.
+    pub(super) fn stream_is(&self, generation: u64) -> bool {
+        self.active_stream()
+            .as_ref()
+            .is_some_and(|a| a.generation == generation)
+    }
+
+    /// The host of the running stream.
+    pub(super) fn stream_host(&self) -> Option<String> {
+        self.active_stream().as_ref().map(|a| a.host_id.clone())
+    }
+
     /// Opens the stream for a launched app; runs on a worker thread (the RTSP
     /// handshake blocks). On success the window switches to the stream view.
     pub(super) fn start_stream(
@@ -501,6 +513,15 @@ impl Controller {
         let view = self.active_stream().as_ref().map_or((0.0, 0.0), |a| a.view);
         let mut pad = VirtualPad::default();
         pad.resize(view.0, view.1);
+        // Hermes host offering clipboard sync (the menu's actions, and the
+        // setting's live sync).
+        let clipboard = self
+            .state()
+            .snapshots
+            .get(&host_id)
+            .and_then(|s| s.capabilities.as_ref())
+            .is_some_and(|c| c.features.clipboard_sync);
+        let clipboard_host = host_id.clone();
         let previous = self.active_stream().replace(ActiveStream {
             generation,
             session,
@@ -524,9 +545,13 @@ impl Controller {
             spawn("hestia-stream-stop", move || previous.session.stop());
         }
         let pad = launched.settings.onscreen_controller;
+        if clipboard && launched.settings.clipboard_sync {
+            self.start_clipboard_sync(generation, clipboard_host);
+        }
         self.ui(move |ui| {
             ui.set_stream_stats(format!("{size} {codec}").into());
             ui.set_stream_pad_visible(pad);
+            ui.set_stream_clipboard(clipboard);
             ui.set_stream_menu_open(false);
             ui.set_stream_zoom_mode(false);
             ui.set_stream_zoom(1.0);

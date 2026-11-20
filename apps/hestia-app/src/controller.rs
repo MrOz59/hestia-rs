@@ -19,6 +19,8 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use crate::AppWindow;
 use crate::{platform, view};
 
+mod clipboard;
+mod profiles;
 mod report;
 mod streaming;
 mod tools;
@@ -170,6 +172,10 @@ impl Controller {
         let c = self.clone();
         ui.on_stream_toggle_pad(move || c.toggle_pad());
         let c = self.clone();
+        ui.on_stream_clipboard_send(move || c.stream_clipboard_send());
+        let c = self.clone();
+        ui.on_stream_clipboard_fetch(move || c.stream_clipboard_fetch());
+        let c = self.clone();
         ui.on_stream_toggle_zoom(move || c.toggle_zoom());
         let c = self.clone();
         ui.on_stream_view_size(move |w, h| c.stream_view_size(w, h));
@@ -218,8 +224,17 @@ impl Controller {
             if let Some(core) = c.core() {
                 let settings = core.settings();
                 c.ui(move |ui| view::load_settings_into(&ui, &settings, platform::native_display()));
+                c.push_profiles();
             }
         });
+        let c = self.clone();
+        ui.on_settings_save_profile(move |name| c.save_profile(&name));
+        let c = self.clone();
+        ui.on_settings_load_profile(move |index| c.load_profile(index));
+        let c = self.clone();
+        ui.on_settings_delete_profile(move |index| c.delete_profile(index));
+        let c = self.clone();
+        ui.on_apps_profile_chosen(move |index| c.choose_host_profile(index));
         let c = self.clone();
         ui.on_save_settings(move || c.save_settings());
         let c = self.clone();
@@ -635,6 +650,7 @@ impl Controller {
             ui.set_app_running(running);
             ui.set_screen(1);
         });
+        self.push_profiles();
 
         let running_app = snapshot.info.as_ref().map_or(0, |i| i.current_game);
         let c = self.clone();
@@ -763,7 +779,12 @@ impl Controller {
                 let Some(core) = c.core() else { return };
                 let session_report = report::begin(&title, &host_name, &device);
                 let failure: String;
-                let settings = core.settings();
+                // The host's stream profile, if it has one, over the settings.
+                let (settings, profile) = core.settings_for_host(&id);
+                if let Some(name) = profile {
+                    info!("launching with stream profile “{name}”");
+                    report::lock(&session_report).field("Settings", "profile", name);
+                }
                 let colorimetry = hestia_media::Colorimetry::default();
                 #[cfg(target_os = "android")]
                 let decoder = if settings.hardware_decoding {
