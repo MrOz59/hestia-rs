@@ -110,9 +110,10 @@ server commands) when the host offers them.
   rumble and hot plugging. They drive the host only while streaming;
   otherwise (Android) they navigate the app: A confirms, B goes back.
 - **Android TV**: a launcher banner and entry, nothing touch-only required,
-  and the whole app works with a remote: arrows move a focus ring over the
-  host and app grids and their actions, form screens move from control to
-  control, and the stream menu (Back) is walked with the D-pad.
+  and the whole app works with a remote: the arrows move an ember focus glow
+  over every control (host and app grids, settings rows, dialogs, the stream
+  menu), left/right change a settings row's value, and the focused control
+  always scrolls into view.
 - **Touch extras**: two-finger tap right-clicks, two-finger drag scrolls,
   three-finger tap opens the keyboard.
 - **Wake-on-LAN**: tapping an offline host wakes it (once its MAC address is
@@ -121,8 +122,11 @@ server commands) when the host offers them.
   Android backend with an input hook (controllers), a fix for mouse-wheel
   scrolling, which crashed upstream, and remote/controller keys for the UI
   (see its `PATCHES.md`).
-- **UI** in Slint (dark theme, responsive grid) for desktop Linux and Android
-  (NativeActivity), and a `hestia` CLI for scripting and testing.
+- **UI** in Slint for desktop Linux and Android (NativeActivity): a dark,
+  warm theme with an ember-orange accent and the bundled Outfit typeface
+  (SIL OFL, `apps/hestia-app/fonts`), layouts for phones, TVs and desktop
+  windows, and confirmations before quitting an app or forgetting a host.
+  Plus a `hestia` CLI for scripting and testing.
 
 ### Known limits of the prototype
 

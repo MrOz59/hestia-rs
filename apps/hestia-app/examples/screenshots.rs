@@ -5,14 +5,17 @@
 //!
 //! CI attaches the results to the nightly release, so each build's UI can be
 //! checked without a device. The software renderer is close to, but not
-//! pixel-identical with, the GPU renderers the app uses (no drop shadows).
+//! pixel-identical with, the GPU renderers the app uses (no drop shadows, so
+//! no focus glow). The TV shots move the focus with the arrow keys, like a
+//! remote's D-pad.
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Duration;
 
 use hestia_app::{AppCard, AppWindow, CommandRow, HostCard};
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
-use slint::platform::{Platform, WindowAdapter, WindowEvent};
+use slint::platform::{Key, Platform, WindowAdapter, WindowEvent};
 use slint::{
     ComponentHandle, Image, ModelRc, PhysicalSize, Rgb8Pixel, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel,
 };
@@ -106,6 +109,8 @@ fn fill_sample_data(ui: &AppWindow) {
             .collect(),
     ));
     ui.set_app_running(true);
+    ui.set_apps_profile_options(strings(&["Settings", "Couch TV", "Phone on the go"]));
+    ui.set_cfg_profile_names(strings(&["Couch TV", "Phone on the go"]));
     ui.set_client_id("6F3A9C21D4E0B7F1".into());
     ui.set_data_dir("/data/user/0/com.mroz59.hestia.rs/files".into());
     ui.set_version_text("Hestia RS 0.1.0 (preview)".into());
@@ -189,14 +194,42 @@ fn fill_sample_data(ui: &AppWindow) {
     ui.set_pair_busy(true);
 }
 
-fn save(window: &MinimalSoftwareWindow, size: PhysicalSize, path: &Path) {
+/// Lets timers fire and animations (page fades, dialogs, focus) finish.
+fn settle() {
+    for _ in 0..8 {
+        slint::platform::update_timers_and_animations();
+        std::thread::sleep(Duration::from_millis(50));
+    }
     slint::platform::update_timers_and_animations();
+}
+
+/// Presses and releases `key`, `times` times, like a remote's D-pad.
+fn press(window: &MinimalSoftwareWindow, key: Key, times: usize) {
+    for _ in 0..times {
+        window.dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+        window.dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+        settle();
+    }
+}
+
+/// Draws the window into a fresh buffer.
+fn render(window: &MinimalSoftwareWindow, size: PhysicalSize) -> Vec<Rgb8Pixel> {
     window.request_redraw();
     let (w, h) = (size.width as usize, size.height as usize);
     let mut pixels = vec![Rgb8Pixel::default(); w * h];
     window.draw_if_needed(|renderer| {
         renderer.render(&mut pixels, w);
     });
+    pixels
+}
+
+fn save(window: &MinimalSoftwareWindow, size: PhysicalSize, path: &Path) {
+    // Animations (page fades, dialogs) start when a frame first draws
+    // them: draw once, let them run, then draw the picture to keep.
+    settle();
+    render(window, size);
+    settle();
+    let pixels = render(window, size);
     let bytes: Vec<u8> = pixels.iter().flat_map(|p| [p.r, p.g, p.b]).collect();
     image::RgbImage::from_raw(size.width, size.height, bytes)
         .expect("buffer size")
@@ -266,4 +299,53 @@ fn main() {
     ui.set_stream_menu_open(true);
     save(&window, size, &out.join("phone-landscape-stream-menu.png"));
     ui.set_stream_menu_open(false);
+
+    // A 1080p TV (960 × 540 dp), driven with the remote's D-pad: the focus
+    // glow (an ember outline here, without the shadow) shows where it is.
+    let (lw, lh, scale) = (960u32, 540u32, 2.0f32);
+    window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
+    let size = PhysicalSize::new((lw as f32 * scale) as u32, (lh as f32 * scale) as u32);
+    window.set_size(size);
+
+    ui.set_screen(0);
+    settle();
+    press(&window, Key::DownArrow, 1);
+    save(&window, size, &out.join("tv-hosts.png"));
+
+    // From here on the remote has been used, so pages open with the focus
+    // already placed (Resume on the host's page).
+    ui.set_screen(1);
+    settle();
+    // Down from Resume to the first poster.
+    press(&window, Key::DownArrow, 1);
+    save(&window, size, &out.join("tv-apps.png"));
+
+    ui.set_screen(3);
+    settle();
+    // Down from Preset to the bitrate slider.
+    press(&window, Key::DownArrow, 4);
+    save(&window, size, &out.join("tv-settings.png"));
+    // The option list of the frame rate row.
+    press(&window, Key::UpArrow, 1);
+    press(&window, Key::Return, 1);
+    save(&window, size, &out.join("tv-settings-options.png"));
+    press(&window, Key::Escape, 1);
+
+    ui.set_screen(5);
+    settle();
+    press(&window, Key::DownArrow, 2);
+    save(&window, size, &out.join("tv-tools.png"));
+
+    ui.set_screen(4);
+    settle();
+    ui.set_stream_menu_open(true);
+    settle();
+    press(&window, Key::DownArrow, 2);
+    save(&window, size, &out.join("tv-stream-menu.png"));
+    ui.set_stream_menu_open(false);
+
+    ui.set_screen(0);
+    ui.set_pair_visible(true);
+    save(&window, size, &out.join("tv-pairing.png"));
+    ui.set_pair_visible(false);
 }

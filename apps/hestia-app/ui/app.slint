@@ -1,5 +1,4 @@
-import { LineEdit, Spinner } from "std-widgets.slint";
-import { Theme, PillButton, LinkButton, Dialog } from "theme.slint";
+import { Theme, Nav, Icon, ActionButton, Loader, TextField, Modal, DialogTitle, DialogText } from "theme.slint";
 import { HostCard, AppCard, CommandRow, PreflightRow, HostsPage, AppsPage, SessionPage, SettingsPage, ToolsPage, ReportPage } from "pages.slint";
 import { StreamView, PadControl } from "stream.slint";
 
@@ -11,17 +10,22 @@ export component AppWindow inherits Window {
     preferred-width: 1180px;
     preferred-height: 760px;
     min-width: 340px;
-    min-height: 480px;
+    min-height: 400px;
     background: Theme.bg;
+    default-font-family: Theme.font;
     default-font-size: Theme.body-size;
     forward-focus: keys;
 
-    // Phone-sized (or narrow) windows get the compact layout.
+    // Phones, TVs and desktop windows: the layout follows the window size.
     init => {
-        Theme.compact = self.width < 640px;
+        Theme.window-width = self.width;
+        Theme.window-height = self.height;
     }
     changed width => {
-        Theme.compact = self.width < 640px;
+        Theme.window-width = self.width;
+    }
+    changed height => {
+        Theme.window-height = self.height;
     }
 
     // 0 = hosts, 1 = apps, 2 = session (launching / errors), 3 = settings, 4 = stream, 5 = host tools,
@@ -196,8 +200,8 @@ export component AppWindow inherits Window {
     callback open-settings();
     callback save-settings();
 
-    // Escape (and the Android back key, if the platform reports it as
-    // Escape) closes dialogs and walks back through the screens.
+    // Escape (and the Android back key) closes dialogs and walks back
+    // through the screens.
     function go-back() -> bool {
         if (root.pair-visible) {
             root.pair-cancel();
@@ -237,35 +241,50 @@ export component AppWindow inherits Window {
         root.stream-keyboard(root.stream-keyboard-open);
     }
 
-    // The stream view and text fields take focus; give it back afterwards.
-    // The host and app pages hold it themselves (their remote navigation).
+    // Pages hold the focus themselves (remote navigation) and take it on
+    // creation; after a dialog closes they get it back.
     property <int> nav-refocus;
     function take-focus() {
-        if (root.screen == 0 || root.screen == 1) {
+        if (root.screen != 4) {
             root.nav-refocus += 1;
-        } else if (root.screen != 4) {
-            keys.focus();
         }
     }
-    changed screen => {
-        if (root.screen != 0 && root.screen != 1 && root.screen != 4) {
-            keys.focus();
-        }
+    // The focused control of the open dialog.
+    // -1: none yet (touch); the dialog holds the focus until an arrow key.
+    property <int> dlg: -1;
+    // Where a dialog's focus starts: typing right away on the desktop, the
+    // first control with a remote, nothing on a touch screen.
+    pure function pair-start() -> int {
+        return root.pair-otp-mode ? (!root.is-android || Nav.keyboard ? 0 : -1) : (Nav.keyboard ? 1 : -1);
     }
     changed add-visible => {
-        if (!root.add-visible) {
+        if (root.add-visible) {
+            root.dlg = !root.is-android || Nav.keyboard ? 0 : -1;
+        } else {
+            root.dlg = -1;
             root.take-focus();
         }
     }
     changed pair-visible => {
-        if (!root.pair-visible) {
+        if (root.pair-visible) {
+            root.dlg = root.pair-start();
+        } else {
+            root.dlg = -1;
             root.take-focus();
         }
     }
+    changed pair-otp-mode => {
+        root.dlg = root.pair-start();
+    }
+    changed pair-failed => {
+        if (root.pair-failed && !root.pair-otp-mode && root.pair-visible && Nav.keyboard) {
+            root.dlg = 2;
+        }
+    }
 
-    // TV remotes: on form screens (and dialogs) the D-pad's up/down move
-    // the focus from control to control (Android).
-    out property <bool> form-navigation: root.screen == 2 || root.screen == 3 || root.screen == 5 || root.screen == 6 || root.add-visible || root.pair-visible;
+    // The pages move the focus with the arrow keys themselves, so the TV
+    // remote's D-pad always arrives as arrows (no Tab conversion).
+    out property <bool> form-navigation: false;
     callback form-navigation-changed(bool);
     changed form-navigation => {
         root.form-navigation-changed(self.form-navigation);
@@ -274,22 +293,33 @@ export component AppWindow inherits Window {
     // Every screen lives inside this scope, so keys nobody else handled
     // (Escape, the Android back button) bubble up to it wherever the focus
     // is. Unhandled Back on the hosts screen lets Android close the app.
-    property <bool> back-consumed;
     keys := FocusScope {
         width: 100%;
         height: 100%;
+        // Every key press, before anyone handles it.
+        capture-key-pressed(event) => {
+            Nav.keyboard = true;
+            return reject;
+        }
         key-pressed(event) => {
-            if ((event.text == Key.Escape || event.text == Key.Back) && root.go-back()) {
-                root.back-consumed = event.text == Key.Back;
-                return accept;
+            if (event.text == Key.Escape || event.text == Key.Back) {
+                if (root.go-back()) {
+                    if (event.text == Key.Back) {
+                        Nav.back-taken = true;
+                    }
+                    return accept;
+                }
+                if (event.text == Key.Back) {
+                    Nav.back-taken = false;
+                }
             }
             return reject;
         }
         key-released(event) => {
             // Android sends the release separately; keep it from reaching
-            // the Activity once the press was ours.
-            if (event.text == Key.Back && root.back-consumed) {
-                root.back-consumed = false;
+            // the Activity once the press was handled.
+            if (event.text == Key.Back && Nav.back-taken) {
+                Nav.back-taken = false;
                 return accept;
             }
             return reject;
@@ -353,6 +383,7 @@ export component AppWindow inherits Window {
         if root.screen == 2: SessionPage {
             width: 100%;
             height: 100%;
+            refocus: root.nav-refocus;
             title: root.session-title;
             subtitle: root.session-subtitle;
             lines: root.session-lines;
@@ -371,6 +402,8 @@ export component AppWindow inherits Window {
             frame: root.stream-frame;
             stats: root.stream-stats;
             status: root.stream-status;
+            title: root.session-title;
+            subtitle: root.host-name;
             show-stats: root.stream-show-stats;
             fullscreen: root.stream-fullscreen;
             touch-mode: root.stream-touch-mode;
@@ -440,6 +473,7 @@ export component AppWindow inherits Window {
         if root.screen == 6: ReportPage {
             width: 100%;
             height: 100%;
+            refocus: root.nav-refocus;
             title: root.report-title;
             summary: root.report-summary;
             path: root.report-path;
@@ -461,6 +495,7 @@ export component AppWindow inherits Window {
         if root.screen == 5: ToolsPage {
             width: 100%;
             height: 100%;
+            refocus: root.nav-refocus;
             host-name: root.host-name;
             loading: root.tools-loading;
             busy: root.tools-busy;
@@ -504,6 +539,7 @@ export component AppWindow inherits Window {
         if root.screen == 3: SettingsPage {
             width: 100%;
             height: 100%;
+            refocus: root.nav-refocus;
             resolution-options: root.cfg-resolution-options;
             fps-options: root.cfg-fps-options;
             preset <=> root.cfg-preset;
@@ -527,25 +563,25 @@ export component AppWindow inherits Window {
             data-dir: root.data-dir;
             version: root.version-text;
             show-report <=> root.cfg-show-report;
-        show-menu-button <=> root.cfg-show-menu-button;
-        hardware-decoding <=> root.cfg-hardware-decoding;
-        gpu-video <=> root.cfg-gpu-video;
-        android: root.is-android;
-        orientation <=> root.cfg-orientation;
-        profile-names: root.cfg-profile-names;
-        profile-pick <=> root.cfg-profile-pick;
-        save-profile(name) => {
-            root.settings-save-profile(name);
-        }
-        load-profile(index) => {
-            root.settings-load-profile(index);
-        }
-        delete-profile(index) => {
-            root.settings-delete-profile(index);
-        }
-        custom-resolution(text) => {
-            root.settings-custom-resolution(text);
-        }
+            show-menu-button <=> root.cfg-show-menu-button;
+            hardware-decoding <=> root.cfg-hardware-decoding;
+            gpu-video <=> root.cfg-gpu-video;
+            android: root.is-android;
+            orientation <=> root.cfg-orientation;
+            profile-names: root.cfg-profile-names;
+            profile-pick <=> root.cfg-profile-pick;
+            save-profile(name) => {
+                root.settings-save-profile(name);
+            }
+            load-profile(index) => {
+                root.settings-load-profile(index);
+            }
+            delete-profile(index) => {
+                root.settings-delete-profile(index);
+            }
+            custom-resolution(text) => {
+                root.settings-custom-resolution(text);
+            }
             open-last-report => {
                 root.open-last-report();
             }
@@ -562,63 +598,117 @@ export component AppWindow inherits Window {
         }
 
         // ---------------------------------------------------------------
-        // Add host dialog
+        // Add host dialog: address (0), Cancel (1), Add (2)
         // ---------------------------------------------------------------
-        if root.add-visible: Dialog {
+        if root.add-visible: Modal {
             width: 100%;
             height: 100%;
+            hold-focus: root.dlg < 0;
+            arrow => {
+                root.dlg = 0;
+            }
             dismissed => {
                 if (!root.add-busy) {
                     root.add-visible = false;
                 }
             }
 
-            Text {
+            DialogTitle {
                 text: "Add a host";
-                color: Theme.text;
-                font-size: 20px;
-                font-weight: 700;
             }
-            Text {
-                text: "IP address or name of the PC running Hermes. Add :port if it doesn't use the default 47989.";
-                color: Theme.muted;
-                wrap: word-wrap;
+            DialogText {
+                text: "The IP address or name of the PC running Hermes. Add :port if it doesn't use 47989.";
             }
-            LineEdit {
-                placeholder-text: "192.168.0.10";
+            TextField {
+                placeholder: "192.168.0.10";
                 text <=> root.add-address;
                 enabled: !root.add-busy;
+                auto-edit: !root.is-android;
+                want-focus: root.dlg == 0;
+                nav(k) => {
+                    if (k == Key.DownArrow) {
+                        root.dlg = 2;
+                        return true;
+                    }
+                    return false;
+                }
+                entered => {
+                    root.dlg = 0;
+                }
                 accepted(text) => {
                     root.add-host(text);
                 }
             }
-            if root.add-error != "": Text {
-                text: root.add-error;
-                color: Theme.danger;
-                wrap: word-wrap;
+            if root.add-error != "": HorizontalLayout {
+                spacing: 8px;
+                VerticalLayout {
+                    alignment: start;
+                    Icon {
+                        width: 18px;
+                        height: 18px;
+                        name: "error";
+                        tint: Theme.danger;
+                    }
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.add-error;
+                    color: Theme.danger;
+                    font-size: Theme.body-size;
+                    wrap: word-wrap;
+                }
             }
             HorizontalLayout {
                 spacing: 10px;
                 alignment: end;
+                padding-top: 4px;
                 if root.add-busy: VerticalLayout {
                     alignment: center;
-                    Spinner {
-                        width: 22px;
-                        height: 22px;
-                        indeterminate: true;
+                    Loader {
+                        dot: 7px;
                     }
                 }
-                PillButton {
+                ActionButton {
                     text: "Cancel";
                     enabled: !root.add-busy;
+                    want-focus: root.dlg == 1;
+                    nav(k) => {
+                        if (k == Key.RightArrow) {
+                            root.dlg = 2;
+                            return true;
+                        }
+                        if (k == Key.UpArrow) {
+                            root.dlg = 0;
+                            return true;
+                        }
+                        return false;
+                    }
+                    entered => {
+                        root.dlg = 1;
+                    }
                     clicked => {
                         root.add-visible = false;
                     }
                 }
-                PillButton {
-                    text: "Add";
-                    primary: true;
+                ActionButton {
+                    text: "Add host";
+                    kind: 1;
                     enabled: !root.add-busy && root.add-address != "";
+                    want-focus: root.dlg == 2;
+                    nav(k) => {
+                        if (k == Key.LeftArrow) {
+                            root.dlg = 1;
+                            return true;
+                        }
+                        if (k == Key.UpArrow) {
+                            root.dlg = 0;
+                            return true;
+                        }
+                        return false;
+                    }
+                    entered => {
+                        root.dlg = 2;
+                    }
                     clicked => {
                         root.add-host(root.add-address);
                     }
@@ -627,68 +717,120 @@ export component AppWindow inherits Window {
         }
 
         // ---------------------------------------------------------------
-        // Pairing dialog
+        // Pairing dialog. PIN: "Use a one-time code" (0), Cancel (1), Try
+        // again (2). One-time code: PIN (0), passphrase (1), Cancel (2),
+        // Pair (3).
         // ---------------------------------------------------------------
-        if root.pair-visible: Dialog {
+        if root.pair-visible: Modal {
             width: 100%;
             height: 100%;
-            card-width: 440px;
+            card-width: 460px;
+            hold-focus: root.dlg < 0;
+            arrow => {
+                root.dlg = root.pair-otp-mode ? 0 : 1;
+            }
             dismissed => { }
 
-            Text {
+            DialogTitle {
                 text: "Pair with " + root.pair-host-name;
-                color: Theme.text;
-                font-size: 20px;
-                font-weight: 700;
-                overflow: elide;
             }
 
             if !root.pair-otp-mode: VerticalLayout {
                 spacing: 14px;
-                Text {
-                    text: "Open the Hermes web UI on the host, go to PIN and enter:";
-                    color: Theme.muted;
-                    wrap: word-wrap;
+                DialogText {
+                    text: "Open the Hermes web UI on the host, go to PIN and enter this code:";
                 }
                 Rectangle {
-                    height: 84px;
-                    border-radius: 12px;
-                    background: Theme.card;
+                    height: 96px;
+                    border-radius: Theme.radius;
+                    background: Theme.bg;
+                    border-width: 1px;
+                    border-color: Theme.accent.transparentize(0.6);
+                    Rectangle {
+                        background: @radial-gradient(circle, Theme.accent.transparentize(0.86) 0%, Theme.accent.transparentize(1) 70%);
+                        border-radius: Theme.radius;
+                    }
                     Text {
                         text: root.pair-pin;
                         color: Theme.accent;
-                        font-size: 44px;
-                        font-weight: 800;
-                        letter-spacing: 12px;
+                        font-size: 50px;
+                        font-weight: 700;
+                        letter-spacing: 16px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
                 }
-                LinkButton {
-                    text: "Use a one-time code from Hermes instead";
-                    clicked => {
-                        root.pair-use-otp();
+                HorizontalLayout {
+                    alignment: start;
+                    ActionButton {
+                        text: "Use a one-time code instead";
+                        icon: "link";
+                        kind: 3;
+                        want-focus: root.dlg == 0;
+                        nav(k) => {
+                            if (k == Key.DownArrow) {
+                                root.dlg = 1;
+                                return true;
+                            }
+                            return false;
+                        }
+                        entered => {
+                            root.dlg = 0;
+                        }
+                        clicked => {
+                            root.pair-use-otp();
+                        }
                     }
                 }
             }
 
             if root.pair-otp-mode: VerticalLayout {
                 spacing: 10px;
-                Text {
+                DialogText {
                     text: "Enter the one-time PIN and passphrase shown by Hermes.";
-                    color: Theme.muted;
-                    wrap: word-wrap;
                 }
-                LineEdit {
-                    placeholder-text: "PIN";
-                    input-type: number;
+                TextField {
+                    placeholder: "PIN";
+                    input-type: InputType.number;
                     text <=> root.otp-pin;
                     enabled: !root.pair-busy;
+                    auto-edit: !root.is-android;
+                    want-focus: root.dlg == 0;
+                    nav(k) => {
+                        if (k == Key.DownArrow) {
+                            root.dlg = 1;
+                            return true;
+                        }
+                        return false;
+                    }
+                    entered => {
+                        root.dlg = 0;
+                    }
                 }
-                LineEdit {
-                    placeholder-text: "Passphrase";
+                TextField {
+                    placeholder: "Passphrase";
                     text <=> root.otp-passphrase;
                     enabled: !root.pair-busy;
+                    want-focus: root.dlg == 1;
+                    nav(k) => {
+                        if (k == Key.DownArrow) {
+                            root.dlg = 3;
+                            return true;
+                        }
+                        if (k == Key.UpArrow) {
+                            root.dlg = 0;
+                            return true;
+                        }
+                        return false;
+                    }
+                    entered => {
+                        root.dlg = 1;
+                    }
+                    accepted(text) => {
+                        if (root.otp-pin != "" && root.otp-passphrase != "" && !root.pair-busy) {
+                            root.pair-submit-otp(root.otp-pin, root.otp-passphrase);
+                        }
+                    }
                 }
             }
 
@@ -696,15 +838,14 @@ export component AppWindow inherits Window {
                 spacing: 10px;
                 if root.pair-busy: VerticalLayout {
                     alignment: center;
-                    Spinner {
-                        width: 20px;
-                        height: 20px;
-                        indeterminate: true;
+                    Loader {
+                        dot: 7px;
                     }
                 }
                 Text {
                     text: root.pair-status;
                     color: root.pair-failed ? Theme.danger : Theme.muted;
+                    font-size: Theme.body-size;
                     wrap: word-wrap;
                     vertical-alignment: center;
                     horizontal-stretch: 1;
@@ -714,23 +855,69 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 spacing: 10px;
                 alignment: end;
-                PillButton {
+                ActionButton {
                     text: "Cancel";
+                    want-focus: root.dlg == (root.pair-otp-mode ? 2 : 1);
+                    nav(k) => {
+                        if (k == Key.RightArrow && (root.pair-otp-mode || root.pair-failed)) {
+                            root.dlg = root.pair-otp-mode ? 3 : 2;
+                            return true;
+                        }
+                        if (k == Key.UpArrow) {
+                            root.dlg = root.pair-otp-mode ? 1 : 0;
+                            return true;
+                        }
+                        return false;
+                    }
+                    entered => {
+                        root.dlg = root.pair-otp-mode ? 2 : 1;
+                    }
                     clicked => {
                         root.pair-cancel();
                     }
                 }
-                if root.pair-failed && !root.pair-otp-mode: PillButton {
+                if root.pair-failed && !root.pair-otp-mode: ActionButton {
                     text: "Try again";
-                    primary: true;
+                    icon: "refresh";
+                    kind: 1;
+                    want-focus: root.dlg == 2;
+                    nav(k) => {
+                        if (k == Key.LeftArrow) {
+                            root.dlg = 1;
+                            return true;
+                        }
+                        if (k == Key.UpArrow) {
+                            root.dlg = 0;
+                            return true;
+                        }
+                        return false;
+                    }
+                    entered => {
+                        root.dlg = 2;
+                    }
                     clicked => {
                         root.pair-retry();
                     }
                 }
-                if root.pair-otp-mode: PillButton {
+                if root.pair-otp-mode: ActionButton {
                     text: "Pair";
-                    primary: true;
+                    kind: 1;
                     enabled: !root.pair-busy && root.otp-pin != "" && root.otp-passphrase != "";
+                    want-focus: root.dlg == 3;
+                    nav(k) => {
+                        if (k == Key.LeftArrow) {
+                            root.dlg = 2;
+                            return true;
+                        }
+                        if (k == Key.UpArrow) {
+                            root.dlg = 1;
+                            return true;
+                        }
+                        return false;
+                    }
+                    entered => {
+                        root.dlg = 3;
+                    }
                     clicked => {
                         root.pair-submit-otp(root.otp-pin, root.otp-passphrase);
                     }
@@ -741,23 +928,52 @@ export component AppWindow inherits Window {
         // ---------------------------------------------------------------
         // Toast
         // ---------------------------------------------------------------
-        if root.toast != "": Rectangle {
+        if root.toast != "": toast-box := Rectangle {
+            property <bool> shown;
+            Timer {
+                interval: 16ms;
+                running: !toast-box.shown;
+                triggered => {
+                    toast-box.shown = true;
+                }
+            }
             x: (root.width - self.width) / 2;
             // Above the floating "Add host" button on phones.
-            y: root.height - self.height - (Theme.compact && root.screen == 0 ? 92px : 24px);
-            width: Math.min(toast-text.preferred-width + 40px, root.width - 32px);
-            height: toast-text.preferred-height + 24px;
-            border-radius: 12px;
-            background: #2a2f3b;
-            drop-shadow-blur: 20px;
-            drop-shadow-color: #00000080;
-            toast-text := Text {
-                width: parent.width - 40px;
-                text: root.toast;
-                color: Theme.text;
-                wrap: word-wrap;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            y: root.height - self.height - (Theme.compact && root.screen == 0 ? 100px : 28px) + (self.shown ? 0px : 16px);
+            width: Math.min(toast-row.preferred-width, root.width - 32px);
+            height: toast-row.preferred-height;
+            opacity: self.shown ? 1 : 0;
+            animate y { duration: 200ms; easing: ease-out; }
+            animate opacity { duration: 160ms; }
+            border-radius: 14px;
+            background: Theme.card-hover;
+            border-width: 1px;
+            border-color: Theme.border;
+            drop-shadow-blur: 24px;
+            drop-shadow-offset-y: 6px;
+            drop-shadow-color: #00000090;
+            toast-row := HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 18px;
+                padding-top: 12px;
+                padding-bottom: 12px;
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: start;
+                    Rectangle {
+                        width: 4px;
+                        height: 18px;
+                        border-radius: 2px;
+                        background: Theme.accent;
+                    }
+                }
+                Text {
+                    max-width: root.width - 80px;
+                    text: root.toast;
+                    color: Theme.text;
+                    font-size: Theme.body-size;
+                    wrap: word-wrap;
+                }
             }
         }
 
@@ -769,27 +985,42 @@ export component AppWindow inherits Window {
             height: 100%;
             background: Theme.bg;
             TouchArea { }
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2 - 60px;
+                width: 520px;
+                height: 520px;
+                background: @radial-gradient(circle, Theme.accent.transparentize(0.84) 0%, Theme.accent.transparentize(1) 65%);
+            }
             VerticalLayout {
                 alignment: center;
-                spacing: 16px;
+                spacing: 18px;
+                HorizontalLayout {
+                    alignment: center;
+                    Icon {
+                        width: 64px;
+                        height: 64px;
+                        name: "flame";
+                        tint: Theme.accent;
+                    }
+                }
                 Text {
                     text: "Hestia";
                     color: Theme.text;
-                    font-size: 34px;
-                    font-weight: 800;
+                    font-size: 40px;
+                    font-weight: 700;
                     horizontal-alignment: center;
                 }
                 HorizontalLayout {
                     alignment: center;
-                    Spinner {
-                        width: 30px;
-                        height: 30px;
-                        indeterminate: true;
+                    Loader {
+                        dot: 8px;
                     }
                 }
                 Text {
                     text: root.starting-text;
                     color: Theme.muted;
+                    font-size: Theme.body-size;
                     horizontal-alignment: center;
                     wrap: word-wrap;
                 }

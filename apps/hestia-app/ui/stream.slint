@@ -1,22 +1,22 @@
-import { Spinner } from "std-widgets.slint";
-import { Theme, Icon, IconButton, MenuItem } from "theme.slint";
+import { Theme, Icon, Focusable, IconButton, Loader, Toggle } from "theme.slint";
 
-// Small pill for the keyboard bar's shortcut keys.
+// Small key for the keyboard bar's shortcuts.
 component KeyChip inherits Rectangle {
     in property <string> text;
     callback clicked;
-    height: Theme.compact ? 40px : 32px;
-    min-width: label.preferred-width + 24px;
-    preferred-width: label.preferred-width + 24px;
+    height: Theme.compact ? 40px : 34px;
+    min-width: label.preferred-width + 26px;
+    preferred-width: label.preferred-width + 26px;
     horizontal-stretch: 0;
-    border-radius: 8px;
-    background: touch.pressed ? Theme.card-hover : Theme.card;
+    border-radius: 10px;
+    background: touch.pressed ? Theme.accent : (touch.has-hover ? Theme.card-hover : Theme.card);
     border-width: 1px;
-    border-color: Theme.border;
+    border-color: touch.pressed ? Theme.accent : Theme.border;
+    animate background { duration: 90ms; }
     label := Text {
         text: root.text;
-        color: Theme.text;
-        font-size: 13px;
+        color: touch.pressed ? Theme.on-accent : Theme.text;
+        font-size: Theme.caption-size + 1px;
         font-weight: 600;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -53,9 +53,105 @@ component PadArrow inherits Rectangle {
     width: 34%;
     height: 34%;
     border-radius: 6px;
-    background: root.lit ? #ffffff80 : #ffffff22;
+    background: root.lit ? #ff7a2ea0 : #ffffff22;
     border-width: 1.5px;
-    border-color: #ffffffa0;
+    border-color: root.lit ? #ff9a57 : #ffffff90;
+}
+
+// A line of the stream menu: icon, label, and a value or an on/off pill.
+component QuickRow inherits Focusable {
+    in property <string> icon;
+    in property <string> text;
+    in property <string> value;
+    // -1 no switch, 0 off, 1 on
+    in property <int> state: -1;
+
+    accessible-role: button;
+    accessible-label: root.text;
+    height: Theme.compact ? 52px : 46px;
+    border-radius: 12px;
+    background: root.pressed ? Theme.border : (root.focused || root.hovered ? Theme.card-hover : Theme.surface.transparentize(1));
+    border-width: root.focused ? 2px : 0px;
+    border-color: Theme.accent;
+    drop-shadow-blur: root.focused ? 14px : 0px;
+    drop-shadow-color: Theme.glow;
+    animate background { duration: 100ms; }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 14px;
+        VerticalLayout {
+            alignment: center;
+            Icon {
+                name: root.icon;
+                tint: root.state == 1 ? Theme.accent : Theme.muted;
+            }
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.text;
+            color: Theme.text;
+            font-size: Theme.body-size;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if root.value != "": Text {
+            text: root.value;
+            color: root.focused ? Theme.accent : Theme.muted;
+            font-size: Theme.caption-size + 1px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+        if root.state >= 0: VerticalLayout {
+            alignment: center;
+            Toggle {
+                on: root.state == 1;
+            }
+        }
+    }
+}
+
+// The two big actions at the top of the stream menu.
+component QuickTile inherits Focusable {
+    in property <string> icon;
+    in property <string> text;
+    in property <bool> danger;
+
+    accessible-role: button;
+    accessible-label: root.text;
+    height: Theme.compact ? 76px : 70px;
+    border-radius: 14px;
+    background: root.danger
+        ? (root.pressed || root.focused || root.hovered ? Theme.danger.transparentize(0.72) : Theme.danger.transparentize(0.86))
+        : (root.pressed ? Theme.border : (root.focused || root.hovered ? Theme.card-hover : Theme.card));
+    border-width: root.focused ? 2px : 0px;
+    border-color: root.danger ? Theme.danger : Theme.accent;
+    drop-shadow-blur: root.focused ? 16px : 0px;
+    drop-shadow-color: root.danger ? Theme.danger.transparentize(0.5) : Theme.glow;
+    animate background { duration: 100ms; }
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 6px;
+        padding: 8px;
+        HorizontalLayout {
+            alignment: center;
+            Icon {
+                name: root.icon;
+                tint: root.danger ? Theme.danger : Theme.text;
+            }
+        }
+        Text {
+            text: root.text;
+            color: root.danger ? Theme.danger : Theme.text;
+            font-size: Theme.caption-size + 1px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
 }
 
 // Full-window video with input capture. Keyboard, mouse and touch go to the
@@ -67,6 +163,9 @@ export component StreamView inherits Rectangle {
     in property <string> stats;
     // Shown over the video while there is no picture yet.
     in property <string> status;
+    // What's streaming, for the menu's header: the app and the host.
+    in property <string> title;
+    in property <string> subtitle;
     in property <bool> show-stats: true;
     in property <bool> fullscreen;
     // 0 trackpad, 1 mouse, 2 touchscreen
@@ -150,41 +249,60 @@ export component StreamView inherits Rectangle {
         }
     }
 
-    // TV remote / keyboard in the menu: the focused item (see the MenuItem
-    // indices below), -1 until an arrow key is pressed.
+    // TV remote / keyboard in the menu: the focused entry, -1 until an
+    // arrow key is pressed. 0 close, 1 Disconnect, 2 Quit app, 3 keyboard,
+    // 4 / 5 clipboard (Hermes), 6 touch, 7 controller, 8 zoom, 9 picture,
+    // 10 statistics, 11 fix picture, 12 full screen.
     property <int> menu-focus: -1;
+    // Quit asks for a second press.
+    property <bool> quit-armed;
     changed menu-open => {
+        root.quit-armed = false;
         if (!root.menu-open) {
             root.menu-focus = -1;
             focus.focus();
         }
     }
-    function menu-ok(i: int) -> bool {
-        return i >= 0 && i <= 11 && ((i != 3 && i != 4) || root.clipboard-actions);
+    pure function menu-ok(i: int) -> bool {
+        return i >= 3 && i <= 12 && ((i != 4 && i != 5) || root.clipboard-actions);
     }
-    function menu-step(from: int, dir: int) -> int {
-        if (root.menu-ok(from + dir)) {
-            return from + dir;
-        }
-        if (root.menu-ok(from + 2 * dir)) {
-            return from + 2 * dir;
-        }
-        if (root.menu-ok(from + 3 * dir)) {
-            return from + 3 * dir;
-        }
-        return from;
+    pure function menu-step(from: int, dir: int) -> int {
+        return root.menu-ok(from + dir) ? from + dir
+            : root.menu-ok(from + 2 * dir) ? from + 2 * dir
+            : root.menu-ok(from + 3 * dir) ? from + 3 * dir : from;
     }
     function menu-move(from: int, key: string) -> bool {
+        if (key == Key.Back || key == Key.Escape) {
+            root.menu-open = false;
+            return true;
+        }
+        if (from == 0) {
+            if (key == Key.DownArrow) {
+                root.menu-focus = 1;
+                return true;
+            }
+            return false;
+        }
+        if (from == 1 || from == 2) {
+            if (key == Key.RightArrow && from == 1) {
+                root.menu-focus = 2;
+            } else if (key == Key.LeftArrow && from == 2) {
+                root.menu-focus = 1;
+            } else if (key == Key.UpArrow) {
+                root.menu-focus = 0;
+            } else if (key == Key.DownArrow) {
+                root.menu-focus = 3;
+            } else {
+                return false;
+            }
+            return true;
+        }
         if (key == Key.DownArrow) {
             root.menu-focus = root.menu-step(from, 1);
             return true;
         }
         if (key == Key.UpArrow) {
-            root.menu-focus = root.menu-step(from, -1);
-            return true;
-        }
-        if (key == Key.Back || key == Key.Escape) {
-            root.menu-open = false;
+            root.menu-focus = from == 3 ? 1 : root.menu-step(from, -1);
             return true;
         }
         return false;
@@ -206,9 +324,9 @@ export component StreamView inherits Rectangle {
                 }
                 return accept;
             }
-            // Menu open: the first arrow key focuses its first item.
-            if (root.menu-open && (event.text == Key.UpArrow || event.text == Key.DownArrow)) {
-                root.menu-focus = 0;
+            // Menu open: the first arrow key focuses Disconnect.
+            if (root.menu-open && (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow)) {
+                root.menu-focus = 1;
                 return accept;
             }
             root.key-event(event.text, true, event.repeat, event.modifiers.control, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta);
@@ -279,9 +397,9 @@ export component StreamView inherits Rectangle {
                 width: 100%;
                 height: 100%;
                 border-radius: c.kind == 0 ? self.height / 2 : 10px;
-                background: c.pressed ? #ffffff70 : #ffffff24;
+                background: c.pressed ? #ff7a2e90 : #ffffff22;
                 border-width: 1.5px;
-                border-color: #ffffffa0;
+                border-color: c.pressed ? #ff9a57 : #ffffff90;
                 Text {
                     width: 100%;
                     height: 100%;
@@ -297,7 +415,7 @@ export component StreamView inherits Rectangle {
                 width: 100%;
                 height: 100%;
                 border-radius: self.width / 2;
-                background: #ffffff18;
+                background: #ffffff16;
                 border-width: 1.5px;
                 border-color: #ffffff70;
                 Rectangle {
@@ -306,7 +424,7 @@ export component StreamView inherits Rectangle {
                     x: (parent.width - self.width) / 2 + c.knob-x;
                     y: (parent.height - self.height) / 2 + c.knob-y;
                     border-radius: self.width / 2;
-                    background: c.pressed ? #ffffff90 : #ffffff50;
+                    background: c.pressed ? #ff7a2ec0 : #ffffff50;
                 }
             }
             if c.kind == 3: Rectangle {
@@ -336,48 +454,63 @@ export component StreamView inherits Rectangle {
         }
     }
 
-    if root.status != "": VerticalLayout {
+    // No picture yet: what's happening, over a soft ember glow.
+    if root.status != "": Rectangle {
         width: 100%;
         height: 100%;
-        alignment: center;
-        spacing: 14px;
-        HorizontalLayout {
+        background: @radial-gradient(circle, #ff7a2e1c 0%, #ff7a2e00 60%);
+        VerticalLayout {
             alignment: center;
-            Spinner {
-                width: 36px;
-                height: 36px;
-                indeterminate: true;
-            }
-        }
-        HorizontalLayout {
-            alignment: center;
-            Text {
-                width: Math.min(root.width - 48px, 520px);
-                horizontal-alignment: center;
-                wrap: word-wrap;
-                text: root.status;
+            spacing: 18px;
+            padding: 24px;
+            if root.title != "": Text {
+                text: root.title;
                 color: Theme.text;
-                font-size: 15px;
+                font-size: Theme.display-size;
+                font-weight: 700;
+                horizontal-alignment: center;
+                overflow: elide;
+            }
+            HorizontalLayout {
+                alignment: center;
+                Loader {
+                    dot: 10px;
+                }
+            }
+            HorizontalLayout {
+                alignment: center;
+                Text {
+                    width: Math.min(root.width - 48px, 520px);
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                    text: root.status;
+                    color: Theme.muted;
+                    font-size: Theme.body-size + 1px;
+                }
             }
         }
     }
 
     if root.show-stats && root.stats != "" && !root.keyboard-open: Rectangle {
         x: 12px;
-        y: 12px;
+        // Under the menu button when the controller puts it in the middle.
+        y: root.pad-visible && root.show-menu-button ? Theme.control-height + 20px : 12px;
         // Wraps on narrow screens instead of running under the menu button.
         property <length> max-w: root.width - 84px;
-        width: Theme.compact ? self.max-w : Math.min(stats-text.preferred-width + 20px, self.max-w);
-        height: stats-text.preferred-height + 12px;
-        border-radius: 10px;
-        background: #000000a8;
+        width: Theme.compact ? self.max-w : Math.min(stats-text.preferred-width + 24px, self.max-w);
+        height: stats-text.preferred-height + 14px;
+        border-radius: 12px;
+        background: #0a0807b8;
+        border-width: 1px;
+        border-color: #ffffff12;
         stats-text := Text {
-            x: 10px;
-            y: 6px;
-            width: parent.width - 20px;
+            x: 12px;
+            y: 7px;
+            width: parent.width - 24px;
             text: root.stats;
-            color: #e6e8ee;
+            color: #f0e9e3;
             font-size: 12px;
+            font-weight: 500;
             wrap: word-wrap;
         }
     }
@@ -385,19 +518,34 @@ export component StreamView inherits Rectangle {
     if root.banner != "" && !root.keyboard-open: Rectangle {
         x: (root.width - self.width) / 2;
         y: root.height - self.height - 24px;
-        width: Math.min(banner-text.preferred-width + 32px, root.width - 32px);
-        height: banner-text.preferred-height + 20px;
-        border-radius: 12px;
-        background: #000000c0;
-        banner-text := Text {
-            x: 16px;
-            y: 10px;
-            width: parent.width - 32px;
-            text: root.banner;
-            color: #e6e8ee;
-            font-size: 13px;
-            wrap: word-wrap;
-            horizontal-alignment: center;
+        width: Math.min(banner-row.preferred-width, root.width - 32px);
+        height: banner-row.preferred-height;
+        border-radius: 14px;
+        background: #0a0807d0;
+        border-width: 1px;
+        border-color: Theme.accent.transparentize(0.6);
+        banner-row := HorizontalLayout {
+            padding-left: 14px;
+            padding-right: 16px;
+            padding-top: 10px;
+            padding-bottom: 10px;
+            spacing: 10px;
+            VerticalLayout {
+                alignment: start;
+                Icon {
+                    width: 18px;
+                    height: 18px;
+                    name: "flame";
+                    tint: Theme.accent;
+                }
+            }
+            Text {
+                max-width: root.width - 90px;
+                text: root.banner;
+                color: #f0e9e3;
+                font-size: Theme.caption-size + 1px;
+                wrap: word-wrap;
+            }
         }
     }
 
@@ -409,8 +557,8 @@ export component StreamView inherits Rectangle {
         y: 8px;
         width: root.width - (root.show-menu-button ? Theme.control-height + 28px : 16px);
         height: key-bar.preferred-height;
-        border-radius: 14px;
-        background: Theme.surface.transparentize(0.08);
+        border-radius: 16px;
+        background: Theme.surface.transparentize(0.06);
         border-width: 1px;
         border-color: Theme.border;
 
@@ -418,7 +566,7 @@ export component StreamView inherits Rectangle {
             padding: 6px;
             spacing: 6px;
             Flickable {
-                height: Theme.compact ? 40px : 32px;
+                height: Theme.compact ? 40px : 34px;
                 content-height: self.height;
                 content-width: key-row.preferred-width;
                 key-row := HorizontalLayout {
@@ -435,6 +583,7 @@ export component StreamView inherits Rectangle {
             }
             IconButton {
                 icon: "close";
+                label: "Hide the keyboard";
                 clicked => {
                     root.keyboard-open = false;
                 }
@@ -443,230 +592,317 @@ export component StreamView inherits Rectangle {
     }
 
     // Menu handle, top right: only when asked for in Settings (Back or
-    // Escape open the menu otherwise), or while the menu is open.
-    // With the on-screen controller it moves to the top centre, off the
-    // triggers.
-    if root.show-menu-button || root.menu-open: Rectangle {
+    // Escape open the menu otherwise). With the on-screen controller it
+    // moves to the top centre, off the triggers.
+    if root.show-menu-button && !root.menu-open: Rectangle {
         x: root.pad-visible && !root.keyboard-open ? (parent.width - self.width) / 2 : parent.width - self.width - 12px;
         y: 12px;
         width: Theme.control-height;
         height: Theme.control-height;
         border-radius: self.height / 2;
-        background: handle.has-hover || root.menu-open ? #ffffff30 : #00000070;
+        background: handle.has-hover || handle.pressed ? Theme.accent.transparentize(0.3) : #0a0807a0;
+        border-width: 1px;
+        border-color: #ffffff1c;
         animate background { duration: 120ms; }
         Icon {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            name: root.menu-open ? "close" : "menu";
+            name: "menu";
             tint: white;
         }
         // On press, not click: nothing under the finger can swallow it.
         handle := TouchArea {
             pointer-event(event) => {
                 if (event.kind == PointerEventKind.down) {
-                    root.menu-open = !root.menu-open;
+                    root.menu-open = true;
                 }
             }
         }
     }
 
+    // The menu: a panel on the right over a dimmed picture; tapping the
+    // picture closes it.
     if root.menu-open: Rectangle {
-        x: root.pad-visible && !root.keyboard-open ? (parent.width - self.width) / 2 : parent.width - self.width - 12px;
-        y: Theme.control-height + 20px;
-        width: 260px;
-        // Fits under the handle; the list scrolls when the screen is short.
-        height: Math.min(menu-top.preferred-height + menu-list.preferred-height + 1px, root.height - self.y - 12px);
-        clip: true;
-        border-radius: Theme.radius;
+        background: #0000007a;
+        TouchArea {
+            clicked => {
+                root.menu-open = false;
+            }
+        }
+    }
+    if root.menu-open: panel := Rectangle {
+        property <bool> shown;
+        Timer {
+            interval: 16ms;
+            running: !panel.shown;
+            triggered => {
+                panel.shown = true;
+            }
+        }
+        width: Math.min(Theme.compact ? 340px : 360px, root.width - 20px);
+        height: root.height - 20px;
+        x: root.width - self.width - 10px + (self.shown ? 0px : 48px);
+        y: 10px;
+        opacity: self.shown ? 1 : 0;
+        animate x { duration: 220ms; easing: cubic-bezier(0.2, 0.9, 0.3, 1); }
+        animate opacity { duration: 140ms; }
+        border-radius: Theme.radius + 2px;
         background: Theme.surface;
         border-width: 1px;
         border-color: Theme.border;
-        drop-shadow-blur: 24px;
-        drop-shadow-color: #00000090;
+        drop-shadow-blur: 30px;
+        drop-shadow-color: #000000a0;
+        clip: true;
 
-        // Leaving the stream stays in reach at the top.
-        menu-top := VerticalLayout {
-            y: 0;
-            width: parent.width;
-            height: self.preferred-height;
-            padding: 6px;
-            padding-bottom: 4px;
-            MenuItem {
-                icon: "logout";
-                want-focus: root.menu-focus == 0;
-                nav(key) => {
-                    return root.menu-move(0, key);
-                }
-                text: "Disconnect";
-                clicked => {
-                    root.menu-open = false;
-                    root.disconnect();
-                }
-            }
-            MenuItem {
-                icon: "stop";
-                want-focus: root.menu-focus == 1;
-                nav(key) => {
-                    return root.menu-move(1, key);
-                }
-                text: "Quit app";
-                danger: true;
-                clicked => {
-                    root.menu-open = false;
-                    root.quit-app();
-                }
-            }
-        }
-        Rectangle {
-            y: menu-top.height;
-            x: 10px;
-            width: parent.width - 20px;
-            height: 1px;
-            background: Theme.border;
-        }
+        // Swallow taps so they don't reach the picture.
+        TouchArea { }
+
         Flickable {
-            y: menu-top.height + 1px;
-            width: parent.width;
-            height: parent.height - self.y;
             content-width: self.width;
             content-height: menu-list.preferred-height;
-            // Keep the item the remote focuses in view (list items start at
-            // index 2; the clipboard pair may be hidden).
-            property <int> list-pos: root.menu-focus < 2 ? -1 : root.menu-focus - 2 - (!root.clipboard-actions && root.menu-focus > 4 ? 2 : 0);
-            property <length> item-top: 6px + self.list-pos * Theme.control-height;
-            changed list-pos => {
-                if (self.list-pos >= 0 && self.item-top + self.content-y < 0) {
-                    self.content-y = -self.item-top;
-                } else if (self.list-pos >= 0 && self.item-top + Theme.control-height + self.content-y > self.height) {
-                    self.content-y = self.height - self.item-top - Theme.control-height - 6px;
-                }
-            }
             menu-list := VerticalLayout {
-                width: 260px;
-                height: self.preferred-height;
-                padding: 6px;
-                MenuItem {
-                    icon: "keyboard";
-                    want-focus: root.menu-focus == 2;
-                    nav(key) => {
-                        return root.menu-move(2, key);
+                width: panel.width;
+                padding: 10px;
+                spacing: 4px;
+
+                HorizontalLayout {
+                    padding-left: 6px;
+                    padding-bottom: 6px;
+                    spacing: 8px;
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: root.title == "" ? "Stream" : root.title;
+                            color: Theme.text;
+                            font-size: Theme.title-size;
+                            font-weight: 700;
+                            overflow: elide;
+                        }
+                        if root.subtitle != "": Text {
+                            text: root.subtitle;
+                            color: Theme.muted;
+                            font-size: Theme.caption-size;
+                            overflow: elide;
+                        }
                     }
-                    text: root.keyboard-open ? "Hide keyboard" : root.soft-keyboard ? "Keyboard (3-finger tap)" : "Shortcut keys";
+                    IconButton {
+                        icon: "close";
+                        label: "Close the menu";
+                        want-focus: root.menu-focus == 0;
+                        nav(key) => {
+                            return root.menu-move(0, key);
+                        }
+                        entered => {
+                            root.menu-focus = 0;
+                        }
+                        clicked => {
+                            root.menu-open = false;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    padding-bottom: 8px;
+                    QuickTile {
+                        icon: "logout";
+                        text: "Disconnect";
+                        want-focus: root.menu-focus == 1;
+                        nav(key) => {
+                            return root.menu-move(1, key);
+                        }
+                        entered => {
+                            root.menu-focus = 1;
+                        }
+                        clicked => {
+                            root.menu-open = false;
+                            root.disconnect();
+                        }
+                    }
+                    QuickTile {
+                        icon: "power";
+                        text: root.quit-armed ? "Press again to quit" : "Quit app";
+                        danger: true;
+                        want-focus: root.menu-focus == 2;
+                        nav(key) => {
+                            return root.menu-move(2, key);
+                        }
+                        entered => {
+                            root.menu-focus = 2;
+                        }
+                        clicked => {
+                            if (root.quit-armed) {
+                                root.menu-open = false;
+                                root.quit-app();
+                            } else {
+                                root.quit-armed = true;
+                            }
+                        }
+                    }
+                }
+
+                QuickRow {
+                    icon: "keyboard";
+                    text: root.keyboard-open ? "Hide keyboard" : (root.soft-keyboard ? "Keyboard" : "Shortcut keys");
+                    value: root.soft-keyboard && !root.keyboard-open ? "3-finger tap" : "";
+                    want-focus: root.menu-focus == 3;
+                    nav(key) => {
+                        return root.menu-move(3, key);
+                    }
+                    entered => {
+                        root.menu-focus = 3;
+                    }
                     clicked => {
                         root.keyboard-open = !root.keyboard-open;
                         root.menu-open = false;
                     }
                 }
-                if root.clipboard-actions: MenuItem {
-                    icon: "clipboard";
-                    want-focus: root.menu-focus == 3;
-                    nav(key) => {
-                        return root.menu-move(3, key);
-                    }
+                if root.clipboard-actions: QuickRow {
+                    icon: "upload";
                     text: "Send clipboard to host";
+                    want-focus: root.menu-focus == 4;
+                    nav(key) => {
+                        return root.menu-move(4, key);
+                    }
+                    entered => {
+                        root.menu-focus = 4;
+                    }
                     clicked => {
                         root.clipboard-send();
                         root.menu-open = false;
                     }
                 }
-                if root.clipboard-actions: MenuItem {
-                    icon: "clipboard";
-                    want-focus: root.menu-focus == 4;
-                    nav(key) => {
-                        return root.menu-move(4, key);
-                    }
+                if root.clipboard-actions: QuickRow {
+                    icon: "download";
                     text: "Get host's clipboard";
+                    want-focus: root.menu-focus == 5;
+                    nav(key) => {
+                        return root.menu-move(5, key);
+                    }
+                    entered => {
+                        root.menu-focus = 5;
+                    }
                     clicked => {
                         root.clipboard-fetch();
                         root.menu-open = false;
                     }
                 }
-                MenuItem {
+                QuickRow {
                     icon: "mouse";
-                    want-focus: root.menu-focus == 5;
-                    nav(key) => {
-                        return root.menu-move(5, key);
-                    }
-                    text: root.touch-mode == 0 ? "Touch: trackpad" : root.touch-mode == 1 ? "Touch: mouse" : "Touch: touchscreen";
-                    clicked => {
-                        root.cycle-touch-mode();
-                    }
-                }
-                MenuItem {
-                    icon: "play";
+                    text: "Touch";
+                    value: root.touch-mode == 0 ? "Trackpad" : (root.touch-mode == 1 ? "Mouse" : "Touchscreen");
                     want-focus: root.menu-focus == 6;
                     nav(key) => {
                         return root.menu-move(6, key);
                     }
-                    text: root.pad-visible ? "Hide on-screen controller" : "On-screen controller";
+                    entered => {
+                        root.menu-focus = 6;
+                    }
+                    clicked => {
+                        root.cycle-touch-mode();
+                    }
+                }
+                QuickRow {
+                    icon: "gamepad";
+                    text: "On-screen controller";
+                    state: root.pad-visible ? 1 : 0;
+                    want-focus: root.menu-focus == 7;
+                    nav(key) => {
+                        return root.menu-move(7, key);
+                    }
+                    entered => {
+                        root.menu-focus = 7;
+                    }
                     clicked => {
                         root.toggle-pad();
                         root.menu-open = false;
                     }
                 }
-                MenuItem {
-                    icon: "fullscreen";
-                    want-focus: root.menu-focus == 7;
+                QuickRow {
+                    icon: "zoom";
+                    text: root.zoom-mode ? "Zoom (pinch, pan with 2 fingers)" : "Zoom";
+                    state: root.zoom-mode ? 1 : 0;
+                    want-focus: root.menu-focus == 8;
                     nav(key) => {
-                        return root.menu-move(7, key);
+                        return root.menu-move(8, key);
                     }
-                    text: root.zoom-mode ? "Zoom: on (pinch, two-finger pan)" : "Zoom";
+                    entered => {
+                        root.menu-focus = 8;
+                    }
                     clicked => {
                         root.toggle-zoom();
                         root.menu-open = false;
                     }
                 }
-                MenuItem {
-                    icon: "monitor";
-                    want-focus: root.menu-focus == 8;
-                    nav(key) => {
-                        return root.menu-move(8, key);
-                    }
-                    text: root.video-scale == 0 ? "Picture: fit" : root.video-scale == 1 ? "Picture: fill" : "Picture: stretch";
-                    clicked => {
-                        root.cycle-scale();
-                    }
-                }
-                MenuItem {
-                    icon: "stats";
+                QuickRow {
+                    icon: "aspect";
+                    text: "Picture";
+                    value: root.video-scale == 0 ? "Fit" : (root.video-scale == 1 ? "Fill" : "Stretch");
                     want-focus: root.menu-focus == 9;
                     nav(key) => {
                         return root.menu-move(9, key);
                     }
-                    text: root.show-stats ? "Hide statistics" : "Show statistics";
+                    entered => {
+                        root.menu-focus = 9;
+                    }
                     clicked => {
-                        root.toggle-stats();
+                        root.cycle-scale();
                     }
                 }
-                MenuItem {
-                    icon: "refresh";
+                QuickRow {
+                    icon: "stats";
+                    text: "Statistics";
+                    state: root.show-stats ? 1 : 0;
                     want-focus: root.menu-focus == 10;
                     nav(key) => {
                         return root.menu-move(10, key);
                     }
-                    text: "Fix picture (new keyframe)";
+                    entered => {
+                        root.menu-focus = 10;
+                    }
+                    clicked => {
+                        root.toggle-stats();
+                    }
+                }
+                QuickRow {
+                    icon: "refresh";
+                    text: "Fix picture";
+                    value: "New keyframe";
+                    want-focus: root.menu-focus == 11;
+                    nav(key) => {
+                        return root.menu-move(11, key);
+                    }
+                    entered => {
+                        root.menu-focus = 11;
+                    }
                     clicked => {
                         root.request-keyframe();
                         root.menu-open = false;
                     }
                 }
-                MenuItem {
-                    icon: "fullscreen";
-                    want-focus: root.menu-focus == 11;
+                QuickRow {
+                    icon: root.fullscreen ? "fullscreen-exit" : "fullscreen";
+                    text: "Full screen";
+                    state: root.fullscreen ? 1 : 0;
+                    want-focus: root.menu-focus == 12;
                     nav(key) => {
-                        return root.menu-move(11, key);
+                        return root.menu-move(12, key);
                     }
-                    text: root.fullscreen ? "Leave full screen" : "Full screen";
+                    entered => {
+                        root.menu-focus = 12;
+                    }
                     clicked => {
                         root.toggle-fullscreen();
                         root.menu-open = false;
                     }
                 }
                 if !Theme.compact: Text {
-                    text: "Ctrl+Alt+Shift+Q disconnects";
-                    color: Theme.muted;
-                    font-size: 11px;
+                    text: "Ctrl+Alt+Shift+Q disconnects, Ctrl+Alt+Shift+S shows statistics";
+                    color: Theme.faint;
+                    font-size: Theme.caption-size;
                     horizontal-alignment: center;
+                    wrap: word-wrap;
                 }
             }
         }
