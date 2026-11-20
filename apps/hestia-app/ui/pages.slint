@@ -36,10 +36,39 @@ component HostTile inherits Rectangle {
     in property <HostCard> host;
     callback clicked;
 
+    // TV remote / keyboard: the grid moves the focus (`want-focus`);
+    // Return presses, arrows and Back go to `nav`.
+    in property <bool> want-focus;
+    callback nav(string) -> bool;
+    init => {
+        if (self.want-focus) {
+            fs.focus();
+        }
+    }
+    changed want-focus => {
+        if (self.want-focus) {
+            fs.focus();
+        }
+    }
+    fs := FocusScope {
+        width: 0;
+        height: 0;
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.clicked();
+                return accept;
+            }
+            if (root.nav(event.text)) {
+                return accept;
+            }
+            return reject;
+        }
+    }
+
     border-radius: Theme.radius;
-    background: touch.has-hover ? Theme.card-hover : Theme.card;
-    border-width: 1px;
-    border-color: root.host.paired ? Theme.accent.transparentize(0.6) : Theme.border;
+    background: touch.has-hover || fs.has-focus ? Theme.card-hover : Theme.card;
+    border-width: fs.has-focus ? 3px : 1px;
+    border-color: fs.has-focus ? Theme.accent : (root.host.paired ? Theme.accent.transparentize(0.6) : Theme.border);
     drop-shadow-blur: 18px;
     drop-shadow-color: #00000050;
     animate background { duration: 120ms; }
@@ -119,11 +148,40 @@ component AppTile inherits Rectangle {
     in property <AppCard> app;
     callback clicked;
 
+    // TV remote / keyboard: the grid moves the focus (`want-focus`);
+    // Return presses, arrows and Back go to `nav`.
+    in property <bool> want-focus;
+    callback nav(string) -> bool;
+    init => {
+        if (self.want-focus) {
+            fs.focus();
+        }
+    }
+    changed want-focus => {
+        if (self.want-focus) {
+            fs.focus();
+        }
+    }
+    fs := FocusScope {
+        width: 0;
+        height: 0;
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.clicked();
+                return accept;
+            }
+            if (root.nav(event.text)) {
+                return accept;
+            }
+            return reject;
+        }
+    }
+
     border-radius: Theme.radius;
     background: Theme.card;
     clip: true;
-    border-width: root.app.running ? 2px : 1px;
-    border-color: root.app.running ? Theme.accent : (touch.has-hover ? Theme.accent.transparentize(0.5) : Theme.border);
+    border-width: fs.has-focus ? 3px : (root.app.running ? 2px : 1px);
+    border-color: fs.has-focus ? Theme.text : (root.app.running ? Theme.accent : (touch.has-hover ? Theme.accent.transparentize(0.5) : Theme.border));
     animate border-color { duration: 120ms; }
 
     VerticalLayout {
@@ -240,6 +298,60 @@ export component HostsPage inherits Rectangle {
     callback refresh;
     callback settings;
 
+    // TV remote / arrow keys: the focused card (0…), or a header action
+    // (-2 Refresh, -3 Settings, -4 Add host); -1 before the first key.
+    property <int> nav: -1;
+    // Bumped by the window when a dialog closes: take the focus back.
+    in property <int> refocus;
+    changed refocus => {
+        start.focus();
+        root.nav = -1;
+    }
+    function move(from: int, key: string) -> bool {
+        if (from >= 0) {
+            if (key == Key.RightArrow && from + 1 < root.hosts.length) {
+                root.nav = from + 1;
+            } else if (key == Key.LeftArrow && from > 0) {
+                root.nav = from - 1;
+            } else if (key == Key.DownArrow && from + root.cols < root.hosts.length) {
+                root.nav = from + root.cols;
+            } else if (key == Key.DownArrow && Math.floor(from / root.cols) < Math.floor((root.hosts.length - 1) / root.cols)) {
+                root.nav = root.hosts.length - 1;
+            } else if (key == Key.UpArrow && from >= root.cols) {
+                root.nav = from - root.cols;
+            } else if (key == Key.UpArrow) {
+                root.nav = -2;
+            } else {
+                return false;
+            }
+            return true;
+        }
+        if (key == Key.RightArrow && from > -4) {
+            root.nav = from - 1;
+        } else if (key == Key.LeftArrow && from < -2) {
+            root.nav = from + 1;
+        } else if (key == Key.DownArrow && root.hosts.length > 0) {
+            root.nav = 0;
+        } else {
+            return false;
+        }
+        return true;
+    }
+    start := FocusScope {
+        width: 0;
+        height: 0;
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
+                root.nav = root.hosts.length > 0 ? 0 : -4;
+                return accept;
+            }
+            return reject;
+        }
+    }
+
     property <length> pad: Theme.page-padding;
     property <length> gap: Theme.compact ? 12px : 16px;
     property <length> min-tile: 260px;
@@ -265,6 +377,10 @@ export component HostsPage inherits Rectangle {
                 alignment: center;
                 IconButton {
                     icon: "refresh";
+                    want-focus: root.nav == -2;
+                    nav(key) => {
+                        return root.move(-2, key);
+                    }
                     clicked => {
                         root.refresh();
                     }
@@ -274,6 +390,10 @@ export component HostsPage inherits Rectangle {
                 alignment: center;
                 IconButton {
                     icon: "settings";
+                    want-focus: root.nav == -3;
+                    nav(key) => {
+                        return root.move(-3, key);
+                    }
                     clicked => {
                         root.settings();
                     }
@@ -283,6 +403,10 @@ export component HostsPage inherits Rectangle {
                 alignment: center;
                 PillButton {
                     text: "Refresh";
+                    want-focus: root.nav == -2;
+                    nav(key) => {
+                        return root.move(-2, key);
+                    }
                     clicked => {
                         root.refresh();
                     }
@@ -292,6 +416,10 @@ export component HostsPage inherits Rectangle {
                 alignment: center;
                 PillButton {
                     text: "Settings";
+                    want-focus: root.nav == -3;
+                    nav(key) => {
+                        return root.move(-3, key);
+                    }
                     clicked => {
                         root.settings();
                     }
@@ -302,6 +430,10 @@ export component HostsPage inherits Rectangle {
                 PillButton {
                     text: "Add host";
                     primary: true;
+                    want-focus: root.nav == -4;
+                    nav(key) => {
+                        return root.move(-4, key);
+                    }
                     clicked => {
                         root.add-host();
                     }
@@ -334,6 +466,16 @@ export component HostsPage inherits Rectangle {
             vertical-stretch: 1;
             content-width: self.width;
             content-height: Math.ceil(root.hosts.length / root.cols) * (root.tile-h + root.gap) + root.bottom-space;
+            // Keep the focused card in view.
+            property <int> focused-row: root.nav >= 0 ? Math.floor(root.nav / root.cols) : -1;
+            property <length> row-top: 8px + self.focused-row * (root.tile-h + root.gap);
+            changed focused-row => {
+                if (self.focused-row >= 0 && self.row-top + self.viewport-y < 0) {
+                    self.viewport-y = 8px - self.row-top;
+                } else if (self.focused-row >= 0 && self.row-top + root.tile-h + self.viewport-y > self.height) {
+                    self.viewport-y = self.height - self.row-top - root.tile-h - root.gap;
+                }
+            }
 
             for host[i] in root.hosts: HostTile {
                 x: root.pad + Math.mod(i, root.cols) * (root.tile-w + root.gap);
@@ -341,6 +483,10 @@ export component HostsPage inherits Rectangle {
                 width: root.tile-w;
                 height: root.tile-h;
                 host: host;
+                want-focus: root.nav == i;
+                nav(key) => {
+                    return root.move(i, key);
+                }
                 clicked => {
                     root.open-host(host.id);
                 }
@@ -353,6 +499,10 @@ export component HostsPage inherits Rectangle {
         y: root.height - self.height - 20px;
         icon: "add";
         text: "Add host";
+        want-focus: root.nav == -4;
+        nav(key) => {
+            return root.move(-4, key);
+        }
         clicked => {
             root.add-host();
         }
@@ -381,6 +531,77 @@ export component AppsPage inherits Rectangle {
     property <length> pad: Theme.page-padding;
     property <length> gap: Theme.compact ? 12px : 16px;
     property <length> min-tile: Theme.compact ? 140px : 150px;
+
+    // TV remote / arrow keys: the focused app (0…), or a header action
+    // (-2 Back / "more", -3 Tools, -4 Quit app, -5 Forget); -1 before the
+    // first key.
+    property <int> nav: -1;
+    in property <int> refocus;
+    changed refocus => {
+        start.focus();
+        root.nav = -1;
+    }
+    function header-ok(code: int) -> bool {
+        return Theme.compact
+            ? code == -2
+            : (code == -2 || code == -5 || (code == -3 && root.hermes) || (code == -4 && root.app-running));
+    }
+    function header-step(from: int, dir: int) -> int {
+        if (root.header-ok(from + dir)) {
+            return from + dir;
+        }
+        if (root.header-ok(from + 2 * dir)) {
+            return from + 2 * dir;
+        }
+        if (root.header-ok(from + 3 * dir)) {
+            return from + 3 * dir;
+        }
+        return from;
+    }
+    function move(from: int, key: string) -> bool {
+        if (from >= 0) {
+            if (key == Key.RightArrow && from + 1 < root.apps.length) {
+                root.nav = from + 1;
+            } else if (key == Key.LeftArrow && from > 0) {
+                root.nav = from - 1;
+            } else if (key == Key.DownArrow && from + root.cols < root.apps.length) {
+                root.nav = from + root.cols;
+            } else if (key == Key.DownArrow && Math.floor(from / root.cols) < Math.floor((root.apps.length - 1) / root.cols)) {
+                root.nav = root.apps.length - 1;
+            } else if (key == Key.UpArrow && from >= root.cols) {
+                root.nav = from - root.cols;
+            } else if (key == Key.UpArrow) {
+                root.nav = -2;
+            } else {
+                return false;
+            }
+            return true;
+        }
+        if (key == Key.RightArrow && root.header-step(from, -1) != from) {
+            root.nav = root.header-step(from, -1);
+        } else if (key == Key.LeftArrow && root.header-step(from, 1) != from) {
+            root.nav = root.header-step(from, 1);
+        } else if (key == Key.DownArrow && root.apps.length > 0) {
+            root.nav = 0;
+        } else {
+            return false;
+        }
+        return true;
+    }
+    start := FocusScope {
+        width: 0;
+        height: 0;
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
+                root.nav = root.apps.length > 0 ? 0 : -2;
+                return accept;
+            }
+            return reject;
+        }
+    }
     property <int> cols: Math.max(2, Math.floor((root.width - 2 * root.pad + root.gap) / (root.min-tile + root.gap)));
     property <length> tile-w: (root.width - 2 * root.pad - (root.cols - 1) * root.gap) / root.cols;
     property <length> tile-h: root.tile-w * 4 / 3 + 44px;
@@ -397,6 +618,10 @@ export component AppsPage inherits Rectangle {
                 alignment: center;
                 IconButton {
                     icon: "more";
+                    want-focus: root.nav == -2;
+                    nav(key) => {
+                        return root.move(-2, key);
+                    }
                     clicked => {
                         root.menu-open = !root.menu-open;
                     }
@@ -406,6 +631,10 @@ export component AppsPage inherits Rectangle {
                 alignment: center;
                 PillButton {
                     text: "Back";
+                    want-focus: root.nav == -2;
+                    nav(key) => {
+                        return root.move(-2, key);
+                    }
                     clicked => {
                         root.back();
                     }
@@ -415,6 +644,10 @@ export component AppsPage inherits Rectangle {
                 alignment: center;
                 PillButton {
                     text: "Tools";
+                    want-focus: root.nav == -3;
+                    nav(key) => {
+                        return root.move(-3, key);
+                    }
                     clicked => {
                         root.tools();
                     }
@@ -425,6 +658,10 @@ export component AppsPage inherits Rectangle {
                 PillButton {
                     text: "Quit app";
                     danger: true;
+                    want-focus: root.nav == -4;
+                    nav(key) => {
+                        return root.move(-4, key);
+                    }
                     clicked => {
                         root.quit-app();
                     }
@@ -434,6 +671,10 @@ export component AppsPage inherits Rectangle {
                 alignment: center;
                 PillButton {
                     text: "Forget";
+                    want-focus: root.nav == -5;
+                    nav(key) => {
+                        return root.move(-5, key);
+                    }
                     clicked => {
                         root.forget();
                     }
@@ -551,6 +792,16 @@ export component AppsPage inherits Rectangle {
             vertical-stretch: 1;
             content-width: self.width;
             content-height: Math.ceil(root.apps.length / root.cols) * (root.tile-h + root.gap) + root.pad;
+            // Keep the focused app in view.
+            property <int> focused-row: root.nav >= 0 ? Math.floor(root.nav / root.cols) : -1;
+            property <length> row-top: 8px + self.focused-row * (root.tile-h + root.gap);
+            changed focused-row => {
+                if (self.focused-row >= 0 && self.row-top + self.viewport-y < 0) {
+                    self.viewport-y = 8px - self.row-top;
+                } else if (self.focused-row >= 0 && self.row-top + root.tile-h + self.viewport-y > self.height) {
+                    self.viewport-y = self.height - self.row-top - root.tile-h - root.gap;
+                }
+            }
 
             for app[i] in root.apps: AppTile {
                 x: root.pad + Math.mod(i, root.cols) * (root.tile-w + root.gap);
@@ -558,6 +809,10 @@ export component AppsPage inherits Rectangle {
                 width: root.tile-w;
                 height: root.tile-h;
                 app: app;
+                want-focus: root.nav == i;
+                nav(key) => {
+                    return root.move(i, key);
+                }
                 clicked => {
                     root.launch(app.id);
                 }

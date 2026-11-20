@@ -41,6 +41,18 @@ pub fn set_input_hook(
 pub(crate) fn run_input_hook(event: &android_activity::input::InputEvent<'_>) -> bool {
     INPUT_HOOK.get().is_some_and(|hook| hook(event))
 }
+
+static DPAD_FOCUS_NAVIGATION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// D-pad up/down as Shift+Tab/Tab (moving the focus between controls on
+/// form screens, for TV remotes) instead of the arrow keys.
+pub fn set_dpad_focus_navigation(on: bool) {
+    DPAD_FOCUS_NAVIGATION.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn dpad_focus_navigation() -> bool {
+    DPAD_FOCUS_NAVIGATION.load(std::sync::atomic::Ordering::Relaxed)
+}
 use androidwindowadapter::AndroidWindowAdapter;
 use core::ops::ControlFlow;
 use core::time::Duration;

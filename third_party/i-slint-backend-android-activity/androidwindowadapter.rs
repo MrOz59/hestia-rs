@@ -927,6 +927,9 @@ fn map_key_code(code: android_activity::input::Keycode) -> Option<SharedString> 
         Keycode::Keycode9 => Some("9".into()),
         Keycode::Star => Some("*".into()),
         Keycode::Pound => Some("#".into()),
+        // Hestia RS: on form screens the D-pad's up/down move the focus.
+        Keycode::DpadUp if crate::dpad_focus_navigation() => Some(Key::Backtab.into()),
+        Keycode::DpadDown if crate::dpad_focus_navigation() => Some(Key::Tab.into()),
         Keycode::DpadUp => Some(Key::UpArrow.into()),
         Keycode::DpadDown => Some(Key::DownArrow.into()),
         Keycode::DpadLeft => Some(Key::LeftArrow.into()),
@@ -1004,8 +1007,10 @@ fn map_key_code(code: android_activity::input::Keycode) -> Option<SharedString> 
         Keycode::PageDown => Some(Key::PageDown.into()),
         Keycode::Pictsymbols => None,
         Keycode::SwitchCharset => None,
-        Keycode::ButtonA => None,
-        Keycode::ButtonB => None,
+        // Hestia RS: a controller's A/B confirm and go back in the app (the
+        // input hook takes them first while streaming).
+        Keycode::ButtonA => Some(Key::Return.into()),
+        Keycode::ButtonB => Some(Key::Escape.into()),
         Keycode::ButtonC => None,
         Keycode::ButtonX => None,
         Keycode::ButtonY => None,
