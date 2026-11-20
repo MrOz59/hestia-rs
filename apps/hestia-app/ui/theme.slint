@@ -61,14 +61,57 @@ export component IconButton inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked;
 
+    // Keyboard / TV remote: focusable (Tab, or `want-focus`), Return or
+    // Space presses it; arrows and Back go to `nav` (true: handled).
+    in property <bool> want-focus;
+    callback nav(string) -> bool;
+    out property <bool> focused: fs.has-focus;
+    init => {
+        if (self.want-focus) {
+            fs.focus();
+        }
+    }
+    changed want-focus => {
+        if (self.want-focus) {
+            fs.focus();
+        }
+    }
+    fs := FocusScope {
+        width: 0;
+        height: 0;
+        key-pressed(event) => {
+            if (root.enabled && (event.text == Key.Return || event.text == " ")) {
+                root.clicked();
+                return accept;
+            }
+            if (root.nav(event.text)) {
+                root.nav-took-back = event.text == Key.Back;
+                return accept;
+            }
+            return reject;
+        }
+        key-released(event) => {
+            // Android sends Back's release separately; keep it here when
+            // the press was handled.
+            if (event.text == Key.Back && root.nav-took-back) {
+                root.nav-took-back = false;
+                return accept;
+            }
+            return reject;
+        }
+    }
+    property <bool> nav-took-back;
+
     width: Theme.control-height;
     height: Theme.control-height;
     horizontal-stretch: 0;
     border-radius: self.height / 2;
+    border-width: fs.has-focus ? 2px : 0px;
+    border-color: root.primary ? Theme.text : Theme.accent;
     opacity: root.enabled ? 1.0 : 0.45;
     background: root.primary
         ? (touch.pressed || touch.has-hover ? Theme.accent-hover : Theme.accent)
-        : (touch.pressed ? Theme.card-hover : (touch.has-hover ? Theme.card : transparent));
+        : (touch.pressed || fs.has-focus ? Theme.card-hover : (touch.has-hover ? Theme.card : transparent));
     animate background { duration: 120ms; }
 
     Icon {
@@ -93,9 +136,52 @@ export component Fab inherits Rectangle {
     in property <string> text;
     callback clicked;
 
+    // Keyboard / TV remote: focusable (Tab, or `want-focus`), Return or
+    // Space presses it; arrows and Back go to `nav` (true: handled).
+    in property <bool> want-focus;
+    callback nav(string) -> bool;
+    out property <bool> focused: fs.has-focus;
+    init => {
+        if (self.want-focus) {
+            fs.focus();
+        }
+    }
+    changed want-focus => {
+        if (self.want-focus) {
+            fs.focus();
+        }
+    }
+    fs := FocusScope {
+        width: 0;
+        height: 0;
+        key-pressed(event) => {
+            if (true && (event.text == Key.Return || event.text == " ")) {
+                root.clicked();
+                return accept;
+            }
+            if (root.nav(event.text)) {
+                root.nav-took-back = event.text == Key.Back;
+                return accept;
+            }
+            return reject;
+        }
+        key-released(event) => {
+            // Android sends Back's release separately; keep it here when
+            // the press was handled.
+            if (event.text == Key.Back && root.nav-took-back) {
+                root.nav-took-back = false;
+                return accept;
+            }
+            return reject;
+        }
+    }
+    property <bool> nav-took-back;
+
     width: label.preferred-width + 72px;
     height: 56px;
     border-radius: 18px;
+    border-width: fs.has-focus ? 3px : 0px;
+    border-color: Theme.text;
     background: touch.pressed ? Theme.accent-hover : Theme.accent;
     drop-shadow-blur: 16px;
     drop-shadow-offset-y: 4px;
@@ -136,9 +222,52 @@ export component MenuItem inherits Rectangle {
     in property <bool> danger: false;
     callback clicked;
 
+    // Keyboard / TV remote: focusable (Tab, or `want-focus`), Return or
+    // Space presses it; arrows and Back go to `nav` (true: handled).
+    in property <bool> want-focus;
+    callback nav(string) -> bool;
+    out property <bool> focused: fs.has-focus;
+    init => {
+        if (self.want-focus) {
+            fs.focus();
+        }
+    }
+    changed want-focus => {
+        if (self.want-focus) {
+            fs.focus();
+        }
+    }
+    fs := FocusScope {
+        width: 0;
+        height: 0;
+        key-pressed(event) => {
+            if ((event.text == Key.Return || event.text == " ")) {
+                root.clicked();
+                return accept;
+            }
+            if (root.nav(event.text)) {
+                root.nav-took-back = event.text == Key.Back;
+                return accept;
+            }
+            return reject;
+        }
+        key-released(event) => {
+            // Android sends Back's release separately; keep it here when
+            // the press was handled.
+            if (event.text == Key.Back && root.nav-took-back) {
+                root.nav-took-back = false;
+                return accept;
+            }
+            return reject;
+        }
+    }
+    property <bool> nav-took-back;
+
     height: Theme.control-height;
     border-radius: 10px;
-    background: touch.pressed || touch.has-hover ? Theme.card-hover : transparent;
+    border-width: fs.has-focus ? 2px : 0px;
+    border-color: Theme.accent;
+    background: touch.pressed || touch.has-hover || fs.has-focus ? Theme.card-hover : transparent;
 
     HorizontalLayout {
         padding-left: 12px;
@@ -175,14 +304,54 @@ export component PillButton inherits Rectangle {
     in property <bool> danger: false;
     in property <bool> enabled: true;
     callback clicked;
+    // Keyboard / TV remote: focusable (Tab, or `want-focus`), Return or
+    // Space presses it; arrows and Back go to `nav` (true: handled).
+    in property <bool> want-focus;
+    callback nav(string) -> bool;
+    out property <bool> focused: fs.has-focus;
+    init => {
+        if (self.want-focus) {
+            fs.focus();
+        }
+    }
+    changed want-focus => {
+        if (self.want-focus) {
+            fs.focus();
+        }
+    }
+    fs := FocusScope {
+        width: 0;
+        height: 0;
+        key-pressed(event) => {
+            if (root.enabled && (event.text == Key.Return || event.text == " ")) {
+                root.clicked();
+                return accept;
+            }
+            if (root.nav(event.text)) {
+                root.nav-took-back = event.text == Key.Back;
+                return accept;
+            }
+            return reject;
+        }
+        key-released(event) => {
+            // Android sends Back's release separately; keep it here when
+            // the press was handled.
+            if (event.text == Key.Back && root.nav-took-back) {
+                root.nav-took-back = false;
+                return accept;
+            }
+            return reject;
+        }
+    }
+    property <bool> nav-took-back;
 
     min-width: label.preferred-width + 32px;
     preferred-width: label.preferred-width + 32px;
     horizontal-stretch: 0;
     height: Theme.control-height;
     border-radius: self.height / 2;
-    border-width: root.primary ? 0px : 1px;
-    border-color: root.danger ? Theme.danger : Theme.border;
+    border-width: fs.has-focus ? 2px : (root.primary ? 0px : 1px);
+    border-color: fs.has-focus ? (root.primary ? Theme.text : Theme.accent) : (root.danger ? Theme.danger : Theme.border);
     opacity: root.enabled ? 1.0 : 0.45;
     background: root.primary
         ? (touch.has-hover || touch.pressed ? Theme.accent-hover : Theme.accent)

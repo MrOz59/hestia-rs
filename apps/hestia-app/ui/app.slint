@@ -238,20 +238,37 @@ export component AppWindow inherits Window {
     }
 
     // The stream view and text fields take focus; give it back afterwards.
+    // The host and app pages hold it themselves (their remote navigation).
+    property <int> nav-refocus;
+    function take-focus() {
+        if (root.screen == 0 || root.screen == 1) {
+            root.nav-refocus += 1;
+        } else if (root.screen != 4) {
+            keys.focus();
+        }
+    }
     changed screen => {
-        if (root.screen != 4) {
+        if (root.screen != 0 && root.screen != 1 && root.screen != 4) {
             keys.focus();
         }
     }
     changed add-visible => {
         if (!root.add-visible) {
-            keys.focus();
+            root.take-focus();
         }
     }
     changed pair-visible => {
         if (!root.pair-visible) {
-            keys.focus();
+            root.take-focus();
         }
+    }
+
+    // TV remotes: on form screens (and dialogs) the D-pad's up/down move
+    // the focus from control to control (Android).
+    out property <bool> form-navigation: root.screen == 2 || root.screen == 3 || root.screen == 5 || root.screen == 6 || root.add-visible || root.pair-visible;
+    callback form-navigation-changed(bool);
+    changed form-navigation => {
+        root.form-navigation-changed(self.form-navigation);
     }
 
     // Every screen lives inside this scope, so keys nobody else handled
@@ -281,6 +298,7 @@ export component AppWindow inherits Window {
         if root.screen == 0: HostsPage {
             width: 100%;
             height: 100%;
+            refocus: root.nav-refocus;
             hosts: root.hosts;
             scanning: root.scanning;
             open-host(id) => {
@@ -302,6 +320,7 @@ export component AppWindow inherits Window {
         if root.screen == 1: AppsPage {
             width: 100%;
             height: 100%;
+            refocus: root.nav-refocus;
             host-name: root.host-name;
             host-detail: root.host-detail;
             chips: root.host-chips;

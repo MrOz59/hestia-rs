@@ -75,14 +75,27 @@ jobs:
         run: tools/enet-interop/run.sh
 
   android:
-    name: Android (arm64)
+    name: Android (${{ matrix.abi }})
     runs-on: ubuntu-latest
+    # Skia has prebuilt binaries for the 64-bit ABIs only; the 32-bit ones
+    # (Android TV boxes and many TVs run a 32-bit system) build it from
+    # source. Slow, and a failure there must not hold back the 64-bit APKs.
+    continue-on-error: ${{ matrix.skia-from-source }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { abi: arm64-v8a, target: aarch64-linux-android, sysroot: aarch64-linux-android, skia-from-source: false }
+          - { abi: x86_64, target: x86_64-linux-android, sysroot: x86_64-linux-android, skia-from-source: false }
+          - { abi: armeabi-v7a, target: armv7-linux-androideabi, sysroot: arm-linux-androideabi, skia-from-source: true }
+          - { abi: x86, target: i686-linux-android, sysroot: i686-linux-android, skia-from-source: true }
     steps:
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android
+          targets: ${{ matrix.target }}
 
       # Slint's Android backend compiles a small Java helper at build time, so
       # it needs a JDK plus an SDK platform and build-tools.
@@ -99,7 +112,7 @@ jobs:
       # prebuilt libskia.a built with a recent NDK: its libc++ calls
       # std::__hash_memory, which older NDKs' libc++ (r27, r29) lacks, so the
       # app would fail to load ("cannot locate symbol"). Build with the same
-      # NDK, and point every tool (cargo-ndk, cargo-apk, cc) at it.
+      # NDK, and point every tool (cargo-ndk, cc) at it.
       - name: Android environment
         run: |
           ndk="$ANDROID_HOME/ndk/30.0.16248370"
@@ -108,22 +121,28 @@ jobs:
           done
           echo "ANDROID_JAR=$ANDROID_HOME/platforms/android-34/android.jar" >> "$GITHUB_ENV"
 
+      - name: Tools to build Skia from source
+        if: matrix.skia-from-source
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build libclang-dev
+
       - uses: Swatinem/rust-cache@v2
         with:
-          key: android-ndk30
+          key: android-ndk30-${{ matrix.abi }}
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
       - name: Build native library
-        run: cargo ndk -t arm64-v8a --platform 26 build --release -p hestia-app --lib
+        run: cargo ndk -t ${{ matrix.abi }} --platform 26 build --release -p hestia-app --lib
 
       # The .so must not depend on symbols nothing will provide at runtime
       # (dlopen fails with "cannot locate symbol" on the device otherwise).
       - name: Check native library dependencies
         run: |
           tools="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          so=target/aarch64-linux-android/release/libhestia_app.so
+          so=target/${{ matrix.target }}/release/libhestia_app.so
           echo "NEEDED:"; "$tools/llvm-readelf" -d "$so" | grep NEEDED
           if "$tools/llvm-readelf" -d "$so" | grep -q 'libc++_shared'; then
             echo "::error::libhestia_app.so needs libc++_shared.so (expected static libc++)"; exit 1
@@ -132,78 +151,106 @@ jobs:
             | grep -E '__ndk1|__gxx_personality|^__cxa_(allocate_exception|throw|begin_catch|end_catch|rethrow|guard_)|^_ZT[ISV]|^_Zn[wa]|^_Zd[la]' || true)
           if [ -n "$cxx" ]; then
             echo "::error::unresolved C++ runtime symbols in libhestia_app.so"; echo "$cxx" | head -40
-            echo "--- diagnostics"
-            ls "$ANDROID_HOME/ndk" || true
-            "$tools/clang++" --version | head -1
-            libdir="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android"
+            libdir="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ matrix.sysroot }}"
             for lib in libc++_static.a libc++abi.a libc++_shared.so; do
               echo "$lib: $("$tools/llvm-nm" -A "$libdir/$lib" 2>/dev/null | grep -c hash_memory) hash_memory symbols"
             done
-            grep -rln "__hash_memory" "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/c++/v1" | head -5 || true
-            echo "archives referencing __hash_memory:"
-            find target/aarch64-linux-android/release -name '*.rlib' -o -name '*.a' | while read -r f; do
-              if "$tools/llvm-nm" -A "$f" 2>/dev/null | grep -q __hash_memory; then
-                echo "  $f"; "$tools/llvm-nm" -A "$f" 2>/dev/null | grep __hash_memory | head -3
-              fi
-            done
             echo "native/C++ crates for Android:"
-            cargo tree -p hestia-app --target aarch64-linux-android --prefix none -e normal,build 2>/dev/null \
+            cargo tree -p hestia-app --target ${{ matrix.target }} --prefix none -e normal,build 2>/dev/null \
               | grep -iE 'skia|sys|openh264|^cc |cxx|oboe' | sort -u
-            find target -path '*openh264-sys2-*/output' | while read -r out; do
-              echo "== $out"; grep -E "^(CXX|CXXFLAGS|CXXSTDLIB|cargo:rustc-link-lib)" "$out" | grep -v "= None" | head -20
-            done
             exit 1
           fi
           echo "no unresolved C++ runtime symbols"
+          ls -l "$so"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: hestia-rs-android-arm64-lib
-          path: target/aarch64-linux-android/release/libhestia_app.so
+          name: hestia-rs-android-lib-${{ matrix.abi }}
+          path: target/${{ matrix.target }}/release/libhestia_app.so
           if-no-files-found: error
 
-      # Packaging is best effort while the Android shell is a prototype.
-      - name: Package APK (cargo-apk)
-        id: apk
-        continue-on-error: true
-        # Signed with the key in the ANDROID_KEYSTORE_BASE64 /
-        # ANDROID_KEYSTORE_PASSWORD secrets, so nightly APKs install over each
-        # other. Without them a throwaway key is generated per run (then each
-        # build must be uninstalled before installing the next).
+  # One universal APK with every ABI that built, plus one per ABI, all
+  # signed with the persistent key so nightlies install over each other:
+  # the HESTIA_NIGHTLY_* secrets Hestia Android uses (keystore base64, store
+  # password, key alias, key password), or ANDROID_KEYSTORE_BASE64 /
+  # ANDROID_KEYSTORE_PASSWORD. Without them a throwaway key is used
+  # (uninstall before installing).
+  android-package:
+    name: Android APKs
+    needs: android
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-34 build-tools;34.0.0"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hestia-rs-android-lib-*
+          path: libs
+
+      - name: Package APKs
         env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEYSTORE_B64: ${{ secrets.HESTIA_NIGHTLY_KEYSTORE_BASE64 || secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.HESTIA_NIGHTLY_STORE_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.HESTIA_NIGHTLY_KEY_ALIAS || secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.HESTIA_NIGHTLY_KEY_PASSWORD }}
         run: |
-          cargo install cargo-apk --locked
+          mkdir -p jni
+          for dir in libs/hestia-rs-android-lib-*; do
+            abi=${dir#libs/hestia-rs-android-lib-}
+            mkdir -p "jni/$abi" && cp "$dir/libhestia_app.so" "jni/$abi/"
+          done
+          ls -R jni
           keystore="$RUNNER_TEMP/release.keystore"
           if [ -n "$KEYSTORE_B64" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
             echo "$KEYSTORE_B64" | base64 -d > "$keystore"
-            export CARGO_APK_RELEASE_KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
-            echo "signing with the repository key"
+            export ANDROID_KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
+            [ -n "$KEY_ALIAS" ] && export ANDROID_KEY_ALIAS="$KEY_ALIAS"
+            [ -n "$KEY_PASSWORD" ] && export ANDROID_KEY_PASSWORD="$KEY_PASSWORD"
+            echo "signing with the persistent key"
           else
             keytool -genkeypair -keystore "$keystore" -storepass android -keypass android \
               -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Hestia RS CI"
-            export CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android
-            echo "::warning::ANDROID_KEYSTORE_BASE64/PASSWORD not set: APK signed with a throwaway key"
+            export ANDROID_KEYSTORE_PASSWORD=android
+            echo "::warning::no signing secrets (HESTIA_NIGHTLY_* or ANDROID_KEYSTORE_*): APKs signed with a throwaway key"
           fi
-          export CARGO_APK_RELEASE_KEYSTORE="$keystore"
+          export ANDROID_KEYSTORE="$keystore"
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          # Above what cargo-apk gave earlier nightlies, so they upgrade.
+          code=$((1000000 + GITHUB_RUN_NUMBER))
           set +e
-          cargo apk build --release -p hestia-app --lib
+          scripts/android-package.sh jni apks "$code" "$version-nightly.$GITHUB_RUN_NUMBER+${GITHUB_SHA::7}"
           status=$?
           rm -f "$keystore"
-          [ $status -eq 0 ] && "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs target/release/apk/hestia-rs.apk | head -3
           exit $status
 
+      - name: Check the universal APK
+        run: |
+          aapt2="$ANDROID_HOME/build-tools/34.0.0/aapt2"
+          "$aapt2" dump badging apks/hestia-rs-android-universal.apk \
+            | grep -E "^package|native-code|leanback|banner|uses-feature|launchable" || true
+          unzip -l apks/hestia-rs-android-universal.apk | grep -E "lib/|AndroidManifest" 
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs apks/hestia-rs-android-universal.apk | head -3
+
       - uses: actions/upload-artifact@v4
-        if: steps.apk.outcome == 'success'
         with:
-          name: hestia-rs-android-arm64-apk
-          path: target/release/apk/hestia-rs.apk
+          name: hestia-rs-android-apks
+          path: apks/*.apk
+          if-no-files-found: error
 
   # Every push to main replaces the "nightly" pre-release with fresh builds.
   nightly:
     name: Nightly release
-    needs: [linux, android, interop]
+    needs: [linux, android-package, interop]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -224,8 +271,8 @@ jobs:
           install -m 755 "$linux/hestia-app" "$linux/hestia" staging/hestia-rs/
           cp README.md LICENSE staging/hestia-rs/
           tar -C staging -czf dist/hestia-rs-linux-x86_64.tar.gz hestia-rs
-          if [ -f artifacts/hestia-rs-android-arm64-apk/hestia-rs.apk ]; then
-            cp artifacts/hestia-rs-android-arm64-apk/hestia-rs.apk dist/hestia-rs-android-arm64.apk
+          if ls artifacts/hestia-rs-android-apks/*.apk >/dev/null 2>&1; then
+            cp artifacts/hestia-rs-android-apks/*.apk dist/
           else
             echo "::warning::no APK in this run"
           fi
@@ -243,7 +290,7 @@ jobs:
           {
             echo "Automatic build of \`main\` at ${GITHUB_SHA} ($(date -u '+%Y-%m-%d %H:%M UTC'))."
             echo
-            echo "- **Android (arm64):** \`hestia-rs-android-arm64.apk\`"
+            echo "- **Android:** \`hestia-rs-android-universal.apk\` (phones, tablets, Android TV, Chromebooks: every ABI built in this run: $(cd dist && ls hestia-rs-android-*.apk 2>/dev/null | grep -v universal | sed 's/hestia-rs-android-//; s/\.apk//' | paste -sd ' ' -)), or the smaller per-ABI \`hestia-rs-android-<abi>.apk\` (most phones: arm64-v8a)"
             echo "- **Linux (x86_64):** \`hestia-rs-linux-x86_64.tar.gz\` (needs libopus, ALSA and a recent glibc)"
             echo "- **Screenshots:** \`ui-screenshots.zip\` (phone and desktop, rendered headless)"
             echo

@@ -10,6 +10,12 @@
    mouse (Samsung DeX, Bluetooth mice) panicked the app. It now dispatches
    `WindowEvent::PointerScrolled`.
 
+3. **TV remotes and controllers in the UI** (`androidwindowadapter.rs`:
+   `map_key_code`; `lib.rs`: `set_dpad_focus_navigation`). A controller's
+   A and B buttons map to Return and Escape (upstream: nothing), and the
+   application can make the D-pad's up/down send Shift+Tab/Tab so form
+   screens can be navigated with a remote.
+
 Everything else is unchanged. To update: copy the new upstream directory,
-reapply these two changes, and bump the pinned slint version in the root
+reapply these three changes, and bump the pinned slint version in the root
 Cargo.toml together with `version` here.

@@ -3,12 +3,16 @@
 
 mod clipsync;
 mod controller;
+#[cfg(target_os = "linux")]
+mod desktop_pads;
 mod gamepad;
 #[cfg(target_os = "android")]
 mod gpu_render;
 mod hostinfo;
 mod keymap;
 mod netroute;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod padmap;
 mod platform;
 mod touch;
 mod typing;
@@ -71,6 +75,9 @@ pub fn run(data_dir: PathBuf) -> Result<(), slint::PlatformError> {
     gpu_render::install(&ui);
     let controller = controller::Controller::new(&ui);
     controller.wire(&ui);
+    // Desktop: game controllers straight from evdev.
+    #[cfg(target_os = "linux")]
+    desktop_pads::start();
     controller.start(data_dir);
     ui.run()
 }

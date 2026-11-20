@@ -547,6 +547,15 @@ pub fn set_keyboard_visible(visible: bool) {
     let _ = visible;
 }
 
+/// TV remotes: whether the D-pad's up/down move the focus between controls
+/// (form screens) or stay arrow keys (grids, the stream).
+pub fn set_form_navigation(on: bool) {
+    #[cfg(target_os = "android")]
+    i_slint_backend_android_activity::set_dpad_focus_navigation(on);
+    #[cfg(not(target_os = "android"))]
+    let _ = on;
+}
+
 // ---------------------------------------------------------------------------
 // Clipboard (for syncing with the host)
 
@@ -860,20 +869,31 @@ pub fn set_gamepads_streaming(on: bool) {
     }
 }
 
-/// The on-screen controller's state (it takes a controller slot like a
-/// physical one).
-pub fn onscreen_gamepad(buttons: u32, left_stick: (i16, i16), right_stick: (i16, i16), triggers: (u8, u8)) {
+/// A controller's whole state, by its own `device` key: the on-screen
+/// one, or a desktop controller. It takes a slot like a physical one;
+/// nothing is sent unless a stream runs.
+pub fn gamepad_state(device: i32, buttons: u32, left_stick: (i16, i16), right_stick: (i16, i16), triggers: (u8, u8)) {
     if !controllers::active() {
         return;
     }
-    let update = controllers::state().set(crate::gamepad::ON_SCREEN, buttons, left_stick, right_stick, triggers);
+    let update = controllers::state().set(device, buttons, left_stick, right_stick, triggers);
     controllers::send(update);
 }
 
-/// The on-screen controller went away: release everything, free its slot.
+/// Controller `device` went away: release everything, free its slot.
+pub fn gamepad_gone(device: i32) {
+    gamepad_state(device, 0, (0, 0), (0, 0), (0, 0));
+    controllers::state().remove(device);
+}
+
+/// The on-screen controller's state.
+pub fn onscreen_gamepad(buttons: u32, left_stick: (i16, i16), right_stick: (i16, i16), triggers: (u8, u8)) {
+    gamepad_state(crate::gamepad::ON_SCREEN, buttons, left_stick, right_stick, triggers);
+}
+
+/// The on-screen controller went away.
 pub fn onscreen_gamepad_off() {
-    onscreen_gamepad(0, (0, 0), (0, 0), (0, 0));
-    controllers::state().remove(crate::gamepad::ON_SCREEN);
+    gamepad_gone(crate::gamepad::ON_SCREEN);
 }
 
 /// Rumble for controller `index` from the host.
@@ -904,7 +924,9 @@ fn rumble_device(device: i32, low: u16, high: u16) {
             log::debug!("rumble failed: {e}");
         }
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "linux")]
+    crate::desktop_pads::rumble(device, low, high);
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
     let _ = (device, low, high);
 }
 

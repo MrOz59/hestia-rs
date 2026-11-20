@@ -227,6 +227,7 @@ impl Controller {
                 c.push_profiles();
             }
         });
+        ui.on_form_navigation_changed(platform::set_form_navigation);
         let c = self.clone();
         ui.on_settings_save_profile(move |name| c.save_profile(&name));
         let c = self.clone();
