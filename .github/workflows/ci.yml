@@ -170,16 +170,15 @@ jobs:
           if-no-files-found: error
 
   # One universal APK with every ABI that built, plus one per ABI, all
-  # signed with the persistent key so nightlies install over each other:
-  # the HESTIA_NIGHTLY_* secrets Hestia Android uses (keystore base64, store
-  # password, key alias, key password), or ANDROID_KEYSTORE_BASE64 /
-  # ANDROID_KEYSTORE_PASSWORD. Without them a throwaway key is used
-  # (uninstall before installing).
+  # signed with the Hestia RS key from this repository's signing secrets.
+  # Test builds can use a throwaway key when signing secrets are absent.
   android-package:
     name: Android APKs
     needs: android
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    outputs:
+      apk-artifact-id: ${{ steps.upload-apks.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v5
 
@@ -217,6 +216,9 @@ jobs:
             [ -n "$KEY_ALIAS" ] && export ANDROID_KEY_ALIAS="$KEY_ALIAS"
             [ -n "$KEY_PASSWORD" ] && export ANDROID_KEY_PASSWORD="$KEY_PASSWORD"
             echo "signing with the persistent key"
+          elif [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
+            echo "::error::Hestia RS signing secrets are required to publish a nightly APK"
+            exit 1
           else
             keytool -genkeypair -keystore "$keystore" -storepass android -keypass android \
               -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Hestia RS CI"
@@ -242,10 +244,12 @@ jobs:
           "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs apks/hestia-rs-android-universal.apk | head -3
 
       - uses: actions/upload-artifact@v4
+        id: upload-apks
         with:
           name: hestia-rs-android-apks
           path: apks/*.apk
           if-no-files-found: error
+          overwrite: true
 
   # Every push to main replaces the "nightly" pre-release with fresh builds.
   nightly:
@@ -260,9 +264,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
+      - name: Download Linux build and screenshots
+        uses: actions/download-artifact@v4
         with:
+          pattern: 'hestia-rs-{linux-x86_64,screenshots}'
           path: artifacts
+
+      - name: Download APKs from the packaging job
+        if: ${{ needs.android-package.outputs.apk-artifact-id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.android-package.outputs.apk-artifact-id }}
+          path: artifacts/hestia-rs-android-apks
+          merge-multiple: true
 
       - name: Package
         run: |
@@ -271,11 +285,8 @@ jobs:
           install -m 755 "$linux/hestia-app" "$linux/hestia" staging/hestia-rs/
           cp README.md LICENSE staging/hestia-rs/
           tar -C staging -czf dist/hestia-rs-linux-x86_64.tar.gz hestia-rs
-          if ls artifacts/hestia-rs-android-apks/*.apk >/dev/null 2>&1; then
-            cp artifacts/hestia-rs-android-apks/*.apk dist/
-          else
-            echo "::warning::no APK in this run"
-          fi
+          test -f artifacts/hestia-rs-android-apks/hestia-rs-android-universal.apk
+          cp artifacts/hestia-rs-android-apks/*.apk dist/
           if ls artifacts/hestia-rs-screenshots/*.png >/dev/null 2>&1; then
             (cd artifacts/hestia-rs-screenshots && zip -q ../../dist/ui-screenshots.zip *.png)
           fi
