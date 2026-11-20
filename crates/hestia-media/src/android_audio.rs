@@ -1,28 +1,16 @@
-//! Audio on Android: Opus decoded by the system's own MediaCodec decoder
-//! (`audio/opus`, present since Android 5, so no native libopus to build)
-//! and played through AAudio in low-latency mode.
-//!
-//! The network thread feeds each 5 ms packet to the decoder and moves the
-//! PCM it produces into the sample FIFO ([`crate::audio_fifo`]) that the
-//! AAudio callback drains. Surround streams are mixed down to stereo.
+//! Opus decoding via Android MediaCodec.
 
-use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use hestia_stream::{AudioFormat, AudioSink};
+use hestia_stream::AudioFormat;
 use log::{info, warn};
-use ndk::audio::{
-    AudioCallbackResult, AudioDirection, AudioFormat as PcmFormat, AudioPerformanceMode, AudioSharingMode, AudioStream,
-    AudioStreamBuilder,
-};
 use ndk::media::media_codec::{
     DequeuedInputBufferResult, DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection,
 };
 use ndk::media::media_format::MediaFormat;
 
-use crate::audio_fifo::{CHANNELS, Fifo, SAMPLE_RATE, downmix_to_stereo, fill, lock};
+use crate::audio_fifo::{CHANNELS, SAMPLE_RATE};
+use crate::audio_playback::{AudioDecoder, DecodedAudio};
 
 /// How long a packet may wait for a free decoder input buffer.
 const INPUT_WAIT: Duration = Duration::from_millis(5);
@@ -138,110 +126,35 @@ impl Decoder {
     }
 }
 
-/// The AAudio output stream (not `Send` in the ndk crate; it's only
-/// started and stopped from the network thread).
-struct Output(AudioStream);
 
-// SAFETY: AAudio streams may be controlled from any thread.
-unsafe impl Send for Output {}
-
-impl Drop for Output {
-    fn drop(&mut self) {
-        let _ = self.0.request_stop();
-    }
-}
-
-fn open_output(fifo: Arc<Mutex<Fifo>>, lost: Arc<AtomicBool>) -> Result<Output, String> {
-    let stream = AudioStreamBuilder::new()
-        .map_err(|e| format!("AAudio: {e:?}"))?
-        .direction(AudioDirection::Output)
-        .format(PcmFormat::PCM_Float)
-        .channel_count(CHANNELS as i32)
-        .sample_rate(SAMPLE_RATE as i32)
-        .performance_mode(AudioPerformanceMode::LowLatency)
-        .sharing_mode(AudioSharingMode::Shared)
-        .data_callback(Box::new(move |stream: &AudioStream, data: *mut c_void, frames: i32| {
-            let channels = stream.channel_count().max(1) as usize;
-            let len = frames.max(0) as usize * channels;
-            // SAFETY: AAudio hands us `frames` frames of `channels` floats.
-            let out = unsafe { std::slice::from_raw_parts_mut(data.cast::<f32>(), len) };
-            fill(&fifo, out, channels, |s| s.clamp(-1.0, 1.0), 0.0);
-            AudioCallbackResult::Continue
-        }))
-        .error_callback(Box::new(move |_stream: &AudioStream, error| {
-            // Headphones unplugged, Bluetooth switched…: reopen from the
-            // network thread (not allowed from this callback).
-            warn!("audio output lost: {error:?}");
-            lost.store(true, Ordering::Relaxed);
-        }))
-        .open_stream()
-        .map_err(|e| format!("AAudio open: {e:?}"))?;
-    stream.request_start().map_err(|e| format!("AAudio start: {e:?}"))?;
-    info!(
-        "audio output: AAudio {} Hz, {} ch, burst {} frames",
-        stream.sample_rate(),
-        stream.channel_count(),
-        stream.frames_per_burst()
-    );
-    Ok(Output(stream))
-}
-
-pub struct AndroidAudioSink {
+pub struct MediaCodecOpusDecoder {
     decoder: Option<Decoder>,
-    output: Option<Output>,
-    fifo: Arc<Mutex<Fifo>>,
-    output_lost: Arc<AtomicBool>,
     pcm: Vec<f32>,
-    stereo: Vec<f32>,
-    /// Samples per channel in one packet (240 for 5 ms), for lost packets.
     frame_samples: usize,
     pts_us: u64,
     frame_us: u64,
     errors: u32,
 }
 
-impl Default for AndroidAudioSink {
+impl Default for MediaCodecOpusDecoder {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl AndroidAudioSink {
-    pub fn new() -> Self {
         Self {
             decoder: None,
-            output: None,
-            fifo: Arc::new(Mutex::new(Fifo::new())),
-            output_lost: Arc::new(AtomicBool::new(false)),
             pcm: Vec::with_capacity(5760 * 8),
-            stereo: Vec::with_capacity(5760 * 2),
             frame_samples: 240,
             pts_us: 0,
             frame_us: 5_000,
             errors: 0,
         }
     }
-
-    fn reopen_output_if_lost(&mut self) {
-        if self.output_lost.swap(false, Ordering::Relaxed) {
-            self.output = None;
-            match open_output(self.fifo.clone(), self.output_lost.clone()) {
-                Ok(output) => self.output = Some(output),
-                Err(e) => warn!("reopening audio output failed: {e}"),
-            }
-        }
-    }
 }
 
-impl AudioSink for AndroidAudioSink {
-    fn setup(&mut self, format: &AudioFormat) -> Result<(), String> {
-        if format.sample_rate != SAMPLE_RATE {
-            return Err(format!("unexpected audio rate {} Hz", format.sample_rate));
-        }
+impl AudioDecoder for MediaCodecOpusDecoder {
+    fn configure(&mut self, format: &AudioFormat) -> Result<(), String> {
+        self.cleanup();
+        self.decoder = Some(Decoder::new(format)?);
         self.frame_samples = (format.samples_per_frame as usize).clamp(120, 5760);
         self.frame_us = self.frame_samples as u64 * 1_000_000 / u64::from(SAMPLE_RATE);
-        self.decoder = Some(Decoder::new(format)?);
-        self.output = Some(open_output(self.fifo.clone(), self.output_lost.clone())?);
         info!(
             "Opus via MediaCodec: {} ch ({} streams), {} samples per packet",
             format.channels, format.streams, self.frame_samples
@@ -249,18 +162,20 @@ impl AudioSink for AndroidAudioSink {
         Ok(())
     }
 
-    fn submit(&mut self, opus_packet: &[u8]) {
-        self.reopen_output_if_lost();
-        let Some(decoder) = &mut self.decoder else { return };
+    fn decode(&mut self, packet: &[u8]) -> Result<DecodedAudio<'_>, String> {
+        let decoder = self.decoder.as_mut().ok_or("Opus decoder is not configured")?;
         self.pts_us += self.frame_us;
-        if opus_packet.is_empty() {
-            // Lost packet: a packet's worth of silence keeps the timing.
-            lock(&self.fifo).push(&vec![0.0; self.frame_samples * CHANNELS]);
-            return;
-        }
         self.pcm.clear();
+        if packet.is_empty() {
+            // Lost packet: a packet's worth of silence keeps the timing.
+            self.pcm.resize(self.frame_samples * CHANNELS, 0.0);
+            return Ok(DecodedAudio {
+                samples: &self.pcm,
+                channels: CHANNELS,
+            });
+        }
         let result = decoder
-            .feed(opus_packet, self.pts_us)
+            .feed(packet, self.pts_us)
             .and_then(|()| decoder.drain(&mut self.pcm));
         if let Err(e) = result {
             self.errors += 1;
@@ -268,16 +183,16 @@ impl AudioSink for AndroidAudioSink {
                 warn!("audio decode ({} errors): {e}", self.errors);
             }
         }
-        if self.pcm.is_empty() {
-            return;
-        }
-        downmix_to_stereo(&self.pcm, decoder.channels, &mut self.stereo);
-        lock(&self.fifo).push(&self.stereo);
+        Ok(DecodedAudio {
+            samples: &self.pcm,
+            channels: decoder.channels,
+        })
     }
 
     fn cleanup(&mut self) {
-        self.output = None;
         self.decoder = None;
+        self.pts_us = 0;
+        self.errors = 0;
     }
 }
 

@@ -5,27 +5,28 @@
 //!
 //! Available today:
 //! * [`decode`]: [`DecodingSink`], which decodes on its own thread with any
-//!   [`FrameDecoder`] and hands RGBA pictures to a [`FramePresenter`].
+//!   [`FrameDecoder`] and hands decoded frames to a [`FramePresenter`].
 //! * `software_h264` (feature `openh264`, on by default): OpenH264 software
 //!   H.264 decoding, on every platform.
-//! * `audio_out` (feature `audio`): Opus decode + playback through cpal
-//!   (stereo; desktop for now).
+//! * [`audio_playback`]: independently selected Opus decoders and PCM outputs,
+//!   connected by the low-latency playback FIFO.
 //! * [`null`]: counts frames and packets; for exercising the pipeline.
 //! * [`dump`]: writes the elementary video stream to a file (`ffplay out.h264`).
 //!
 //! * `mediacodec` (Android): hardware H.264/HEVC/AV1 through `AMediaCodec`,
 //!   rendered into GPU buffers the UI draws directly (`gpu_video`), or read
 //!   back on the CPU; falls back to OpenH264 for H.264.
-//! * `android_audio` (Android): Opus through the system's MediaCodec
-//!   decoder, played with AAudio (surround mixed down to stereo).
 //!
 //! Planned: `vaapi` (Linux, DMA-BUF into the GL view), surround audio.
 
+#[cfg(target_os = "android")]
+pub mod aaudio;
 #[cfg(target_os = "android")]
 pub mod android_audio;
 pub mod audio_fifo;
 #[cfg(feature = "audio")]
 pub mod audio_out;
+pub mod audio_playback;
 pub mod color;
 pub mod decode;
 pub mod dump;
@@ -34,6 +35,8 @@ pub mod gpu_video;
 #[cfg(target_os = "android")]
 pub mod mediacodec;
 pub mod null;
+#[cfg(feature = "audio")]
+pub mod opus_decode;
 #[cfg(feature = "openh264")]
 pub mod software_h264;
 
@@ -128,11 +131,17 @@ fn software_decoder(colorimetry: Colorimetry) -> Result<DecoderChoice, String> {
 pub fn default_audio_sink() -> Box<dyn AudioSink> {
     #[cfg(target_os = "android")]
     {
-        Box::new(android_audio::AndroidAudioSink::new())
+        Box::new(audio_playback::PlaybackSink::new(
+            android_audio::MediaCodecOpusDecoder::default(),
+            aaudio::AAudioOutput::default(),
+        ))
     }
     #[cfg(all(feature = "audio", not(target_os = "android")))]
     {
-        Box::new(audio_out::OpusPlaybackSink::new())
+        Box::new(audio_playback::PlaybackSink::new(
+            opus_decode::LibOpusDecoder::default(),
+            audio_out::CpalOutput::default(),
+        ))
     }
     #[cfg(not(any(feature = "audio", target_os = "android")))]
     {
