@@ -13,7 +13,9 @@ use hestia_core::stream::{InputEvent, SessionListener, StreamEvent, StreamStats}
 use hestia_core::{LaunchedSession, ManagedStream, StreamHost};
 #[cfg(target_os = "android")]
 use hestia_media::gpu_video::{GpuSessionGuard, GpuVideo, GpuVideoStats};
-use hestia_media::{DecodeStats, DecoderChoice, DecodingSink, FramePresenter, LatencyHistogram, RgbaFrame};
+use hestia_media::{
+    DecodeStats, DecoderChoice, DecodingSink, FramePresenter, LatencyHistogram, RecoveryLatency, RgbaFrame,
+};
 use log::{info, warn};
 use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 
@@ -121,6 +123,7 @@ struct PresentStats {
     closed: AtomicBool,
     handoff: LatencyHistogram,
     receive_to_ui: LatencyHistogram,
+    recovery: RecoveryLatency,
     #[cfg(target_os = "android")]
     gpu: Arc<GpuVideoStats>,
 }
@@ -189,6 +192,7 @@ impl FramePresenter for UiPresenter {
                         SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&frame.data, frame.width, frame.height);
                     ui.set_stream_frame(Image::from_rgba8(buffer));
                     let delivered_at = Instant::now();
+                    stats.recovery.record(frame.idr_requested_at, delivered_at);
                     stats.handoff.record(delivered_at.duration_since(frame.decoded_at));
                     stats
                         .receive_to_ui
@@ -325,6 +329,8 @@ impl Listener {
             rtt_variance_ms: now.stats.rtt_variance_ms,
             fec_recovered: now.stats.recovered_packets,
             lost_frames: now.stats.lost_frames,
+            dropped_waiting_idr: now.stats.dropped_waiting_idr,
+            idr_requests: now.stats.idr_requests,
             decoded_fps: Some(window.decoded_fps),
             decode_ms: Some(window.decode_ms),
             dropped: Some(now.decoder_dropped + now.superseded),
@@ -588,9 +594,18 @@ impl Controller {
                 present,
                 ..
             } = active;
+            let video_counters = session.video_counters();
             session.stop();
             {
                 let mut r = report::lock(&session_report);
+                if let Some(video) = video_counters {
+                    r.video_transport(&video);
+                }
+                r.decoder_totals(
+                    decode.decoded.load(Ordering::Relaxed),
+                    decode.decode_time_us.load(Ordering::Relaxed),
+                    decode.dropped.load(Ordering::Relaxed),
+                );
                 r.field(
                     "Decoder totals",
                     "decoder",
@@ -599,6 +614,7 @@ impl Controller {
                 r.field("Decoder totals", "decoded", decode.decoded.load(Ordering::Relaxed));
                 r.field("Decoder totals", "dropped", decode.dropped.load(Ordering::Relaxed));
                 r.field("Decoder totals", "errors", decode.errors.load(Ordering::Relaxed));
+                r.field("Decoder totals", "resets", decode.resets.load(Ordering::Relaxed));
                 r.field(
                     "Decoder totals",
                     "backlog drops",
@@ -617,6 +633,7 @@ impl Controller {
                 for (stage, histogram) in decode.latency_stages().into_iter().chain([
                     ("RGBA ready to Slint handoff", &present.handoff),
                     ("first packet to Slint handoff", &present.receive_to_ui),
+                    ("IDR request to first Slint handoff", &present.recovery.latency),
                 ]) {
                     if let Some(summary) = histogram.summary() {
                         r.field("Video latency", stage, summary);
@@ -624,6 +641,18 @@ impl Controller {
                 }
                 #[cfg(target_os = "android")]
                 {
+                    for (label, counter) in [
+                        ("frames collected while input idle", &decode.idle_output),
+                        ("frames with codec input pressure", &decode.codec_input_busy),
+                        ("codec input timeouts", &decode.codec_input_timeouts),
+                        ("image reader attempts at buffer limit", &decode.codec_image_reader_full),
+                        (
+                            "codec outputs replaced before presentation",
+                            &decode.codec_output_superseded,
+                        ),
+                    ] {
+                        r.field("MediaCodec", label, counter.load(Ordering::Relaxed));
+                    }
                     let gpu = &present.gpu;
                     r.field(
                         "GPU video",
@@ -639,6 +668,7 @@ impl Controller {
                     for (stage, histogram) in [
                         ("GPU picture ready to draw submission", &gpu.ready_to_draw),
                         ("first packet to GPU draw submission", &gpu.receive_to_draw),
+                        ("IDR request to first GPU draw submission", &gpu.recovery.latency),
                     ] {
                         if let Some(summary) = histogram.summary() {
                             r.field("Video latency", stage, summary);

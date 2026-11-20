@@ -86,6 +86,8 @@ pub struct StreamStats {
     pub bytes: u64,
     pub recovered_packets: u64,
     pub lost_frames: u64,
+    pub dropped_waiting_idr: u64,
+    pub idr_requests: u64,
     pub rtt_ms: u32,
     pub rtt_variance_ms: u32,
     /// Running totals of host-reported frame processing latency.

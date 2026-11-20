@@ -16,7 +16,7 @@ use crate::input::{self, InputEvent};
 use crate::rtsp::{self, HandshakeConfig, Negotiated};
 use crate::sdp;
 use crate::sink::{AudioSink, VideoSink};
-use crate::video::{VideoConfig, VideoFeedback, VideoReceiver};
+use crate::video::{VideoConfig, VideoCounters, VideoFeedback, VideoReceiver};
 use crate::{SessionListener, StreamConfig, StreamError, StreamEvent, StreamStage, StreamStats};
 
 enum SessionFeedback {
@@ -164,6 +164,7 @@ impl StreamSession {
                             // The video loop keeps one IDR request in flight.
                             Ok(SessionFeedback::Video(VideoFeedback::NeedIdr)) => {
                                 if let Err(e) = control.request_idr() {
+                                    counters.recovery.send_errors.fetch_add(1, Ordering::Relaxed);
                                     warn!("could not request a video keyframe: {e}");
                                 }
                                 (None, false)
@@ -224,6 +225,8 @@ impl StreamSession {
                                 bytes: counters.bytes.load(Ordering::Relaxed),
                                 recovered_packets: counters.recovered.load(Ordering::Relaxed),
                                 lost_frames: counters.lost_frames.load(Ordering::Relaxed),
+                                dropped_waiting_idr: counters.dropped_waiting_idr.load(Ordering::Relaxed),
+                                idr_requests: counters.recovery.requests(),
                                 rtt_ms: rtt,
                                 rtt_variance_ms: rtt_var,
                                 host_latency_us: counters.host_latency_us.load(Ordering::Relaxed),
@@ -249,6 +252,10 @@ impl StreamSession {
 
     pub fn negotiated(&self) -> &Negotiated {
         &self.negotiated
+    }
+
+    pub fn video_counters(&self) -> Option<Arc<VideoCounters>> {
+        self.video.as_ref().map(|video| video.counters.clone())
     }
 
     pub fn send_input(&self, event: &InputEvent) {

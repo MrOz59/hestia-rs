@@ -6,7 +6,10 @@
 use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use hestia_stream::video::VideoCounters;
 
 /// Reports kept on disk; older ones are deleted.
 pub const KEEP_REPORTS: usize = 20;
@@ -28,6 +31,8 @@ pub struct StatsSample {
     /// Running totals.
     pub fec_recovered: u64,
     pub lost_frames: u64,
+    pub dropped_waiting_idr: u64,
+    pub idr_requests: u64,
     /// Decoder (when the client decodes).
     pub decoded_fps: Option<f64>,
     pub decode_ms: Option<f64>,
@@ -50,6 +55,7 @@ pub struct StreamReport {
     samples: Vec<(Duration, StatsSample)>,
     first_frame: Option<Duration>,
     outcome: Option<(Duration, String)>,
+    decoder_totals: Option<(u64, u64, u64)>,
 }
 
 /// Days since 1970-01-01 → (year, month, day); Howard Hinnant's algorithm.
@@ -123,14 +129,16 @@ fn stats_row(at: Duration, s: &StatsSample) -> String {
         .map(|v| format!(" | <- {}", v.to_uppercase()))
         .unwrap_or_default();
     format!(
-        "{} | {:5.1} fps | {:6.2} Mbps | rtt {:3}±{:<3} | fec {:5} | lost {:4}{decode}{host}{verdict}",
+        "{} | {:5.1} fps | {:6.2} Mbps | rtt {:3}±{:<3} | fec {:5} | lost {:4} | waiting IDR {:4} | IDR requests {:3}{decode}{host}{verdict}",
         elapsed(at),
         s.fps,
         s.mbps,
         s.rtt_ms,
         s.rtt_variance_ms,
         s.fec_recovered,
-        s.lost_frames
+        s.lost_frames,
+        s.dropped_waiting_idr,
+        s.idr_requests
     )
 }
 
@@ -147,11 +155,46 @@ impl StreamReport {
             samples: Vec::new(),
             first_frame: None,
             outcome: None,
+            decoder_totals: None,
         }
     }
 
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    pub fn decoder_totals(&mut self, decoded: u64, time_us: u64, dropped: u64) {
+        self.decoder_totals = Some((decoded, time_us, dropped));
+    }
+
+    pub fn video_transport(&mut self, video: &VideoCounters) {
+        let recovery = &video.recovery;
+        let values = [
+            ("UDP packets received", &video.packets),
+            ("frames assembled and submitted", &video.frames),
+            ("frames lost during assembly", &video.lost_frames),
+            ("complete frames skipped waiting for IDR", &video.dropped_waiting_idr),
+            ("packets recovered by FEC", &video.recovered),
+            ("IDR requests from assembly loss", &recovery.loss_requests),
+            ("IDR requests from decoder", &recovery.decoder_requests),
+            ("IDR probes after video silence", &recovery.silence_requests),
+            ("IDR retries", &recovery.retries),
+            ("automatic IDR control send errors", &recovery.send_errors),
+            ("automatic recoveries with a keyframe", &recovery.keyframes_received),
+        ];
+        for (label, value) in values {
+            self.field("Video transport and recovery", label, value.load(Ordering::Relaxed));
+        }
+        let recovered = recovery.keyframes_received.load(Ordering::Relaxed);
+        if recovered > 0 {
+            let mean = recovery.request_to_keyframe_us.load(Ordering::Relaxed) as f64 / recovered as f64 / 1000.0;
+            let max = recovery.max_request_to_keyframe_us.load(Ordering::Relaxed) as f64 / 1000.0;
+            self.field(
+                "Video transport and recovery",
+                "IDR request to assembled keyframe",
+                format!("mean {mean:.2} ms / max {max:.2} ms ({recovered} samples)"),
+            );
+        }
     }
 
     /// Adds `key: value` to a section (created on first use).
@@ -209,7 +252,7 @@ impl StreamReport {
             format!("Duration: {}", human(self.duration())),
         ];
         match self.first_frame {
-            Some(at) => out.push(format!("First frame after {}", human(at))),
+            Some(at) => out.push(format!("First assembled video frame after {}", human(at))),
             None => out.push("No video frame was received".into()),
         }
         // Skip the first second (ramp-up) when there is more.
@@ -234,6 +277,18 @@ impl StreamReport {
                 avg(|s| s.rtt_ms as f64),
                 steady.iter().map(|s| s.rtt_ms).max().unwrap_or(0)
             ));
+            let no_video = steady.iter().filter(|s| s.fps == 0.0).count();
+            let no_decode = steady.iter().filter(|s| s.decoded_fps == Some(0.0)).count();
+            let decode_samples = steady.iter().filter(|s| s.decoded_fps.is_some()).count();
+            out.push(format!(
+                "No assembled video: {no_video}/{} sampled windows",
+                steady.len()
+            ));
+            if decode_samples > 0 {
+                out.push(format!(
+                    "No decoder output: {no_decode}/{decode_samples} sampled windows"
+                ));
+            }
             // Seconds the per-second diagnosis flagged, by cause.
             let mut causes: Vec<(&str, usize)> = Vec::new();
             for v in steady.iter().filter_map(|s| s.verdict) {
@@ -244,20 +299,29 @@ impl StreamReport {
             }
             causes.sort_by_key(|c| std::cmp::Reverse(c.1));
             out.push(if causes.is_empty() {
-                "Diagnosis: no bottleneck detected".to_owned()
+                "Diagnosis: no per-window bottleneck flagged".to_owned()
             } else {
                 let parts: Vec<String> = causes.iter().map(|(c, n)| format!("{n} s {c}")).collect();
-                format!("Diagnosis: problems in {} (of {} s)", parts.join(", "), steady.len())
+                format!(
+                    "Diagnosis: flagged {} (of {} s sampled)",
+                    parts.join(", "),
+                    steady.len()
+                )
             });
             if let Some(last) = steady.last() {
                 out.push(format!(
-                    "Losses: {} frames lost, {} packets recovered by FEC",
-                    last.lost_frames, last.fec_recovered
+                    "Losses (last sample): {} frames lost, {} complete frames skipped waiting for IDR, {} packets recovered by FEC",
+                    last.lost_frames, last.dropped_waiting_idr, last.fec_recovered
                 ));
-                if let (Some(ms), Some(dropped)) = (last.decode_ms, last.dropped) {
-                    out.push(format!("Decoder: {ms:.1} ms per frame, {dropped} frames dropped"));
-                }
             }
+        }
+        if let Some((decoded, time_us, dropped)) = self.decoder_totals {
+            out.push(if decoded == 0 {
+                format!("Decoder: no pictures produced, {dropped} frames dropped")
+            } else {
+                let ms = time_us as f64 / decoded as f64 / 1000.0;
+                format!("Decoder: {ms:.1} ms per output on average, {decoded} pictures, {dropped} frames dropped")
+            });
         }
         out
     }
@@ -478,6 +542,8 @@ mod tests {
             rtt_variance_ms: 1,
             fec_recovered: 7,
             lost_frames: lost,
+            dropped_waiting_idr: 0,
+            idr_requests: 0,
             decoded_fps: Some(fps),
             decode_ms: Some(4.0),
             dropped: Some(0),
@@ -497,6 +563,7 @@ mod tests {
         for (fps, rtt) in [(30.0, 9), (60.0, 3), (58.0, 4), (60.0, 5)] {
             r.sample(sample(fps, rtt, 1));
         }
+        r.decoder_totals(10, 100_000, 2);
         r.finish("the app was closed on the host");
         r.finish("ignored: first outcome wins");
         let text = r.render_with_logs(&["05:24:10.000 INFO  hestia_stream: hello".into()]);
@@ -510,8 +577,9 @@ mod tests {
             "ended: the app was closed on the host",
             "Video: 59.3 fps average (lowest 58.0), 20.0 Mbps",
             "Network: RTT 4 ms average, max 5 ms",
-            "Losses: 1 frames lost, 7 packets recovered by FEC",
-            "Diagnosis: no bottleneck detected",
+            "Losses (last sample): 1 frames lost, 0 complete frames skipped waiting for IDR, 7 packets recovered by FEC",
+            "Diagnosis: no per-window bottleneck flagged",
+            "Decoder: 10.0 ms per output on average, 10 pictures, 2 frames dropped",
             "== Log (1 lines, times in UTC)",
             "hestia_stream: hello",
         ] {
@@ -560,7 +628,7 @@ mod tests {
         }
         let summary = r.summary_lines();
         assert!(
-            summary.contains(&"Diagnosis: problems in 2 s network (of 4 s)".to_string()),
+            summary.contains(&"Diagnosis: flagged 2 s network (of 4 s sampled)".to_string()),
             "{summary:?}"
         );
         assert!(r.render_with_logs(&[]).contains("| <- NETWORK"));

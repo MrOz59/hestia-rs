@@ -29,6 +29,8 @@ pub struct EncodedFrame {
     pub data: Vec<u8>,
     /// When the first packet of this frame arrived.
     pub received_at: Instant,
+    /// First request in the last recovery that supplied a complete keyframe.
+    pub idr_requested_at: Option<Instant>,
     /// Host-side capture→send latency, when the host reports it.
     pub host_latency: Option<Duration>,
 }

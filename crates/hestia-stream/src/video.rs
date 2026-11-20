@@ -460,9 +460,56 @@ pub struct VideoCounters {
     pub frames: AtomicU64,
     pub recovered: AtomicU64,
     pub lost_frames: AtomicU64,
+    pub dropped_waiting_idr: AtomicU64,
+    pub recovery: VideoRecoveryCounters,
     /// Sum of host-reported processing latency, and how many frames had it.
     pub host_latency_us: AtomicU64,
     pub host_latency_frames: AtomicU64,
+}
+
+#[derive(Debug, Default)]
+pub struct VideoRecoveryCounters {
+    pub loss_requests: AtomicU64,
+    pub decoder_requests: AtomicU64,
+    pub silence_requests: AtomicU64,
+    pub retries: AtomicU64,
+    pub send_errors: AtomicU64,
+    pub keyframes_received: AtomicU64,
+    pub request_to_keyframe_us: AtomicU64,
+    pub max_request_to_keyframe_us: AtomicU64,
+}
+
+impl VideoRecoveryCounters {
+    pub fn requests(&self) -> u64 {
+        [
+            &self.loss_requests,
+            &self.decoder_requests,
+            &self.silence_requests,
+            &self.retries,
+        ]
+        .into_iter()
+        .map(|n| n.load(Ordering::Relaxed))
+        .sum()
+    }
+
+    fn request(&self, reason: IdrReason, emit: &impl Fn(VideoFeedback)) {
+        match reason {
+            IdrReason::Loss => &self.loss_requests,
+            IdrReason::Decoder => &self.decoder_requests,
+            IdrReason::Silence => &self.silence_requests,
+            IdrReason::Retry => &self.retries,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+        debug!("video keyframe requested ({reason:?})");
+        emit(VideoFeedback::NeedIdr);
+    }
+
+    fn recovered(&self, elapsed: Duration) {
+        let us = elapsed.as_micros() as u64;
+        self.request_to_keyframe_us.fetch_add(us, Ordering::Relaxed);
+        self.max_request_to_keyframe_us.fetch_max(us, Ordering::Relaxed);
+        self.keyframes_received.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 pub struct VideoReceiver {
@@ -682,13 +729,14 @@ fn receive_loop(
     let mut activity = VideoActivity::new(Instant::now());
     let mut first_frame = false;
     let mut idr = IdrRequests::default();
+    let mut recovered_request = None;
 
     while !stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         if decoder_wants_idr.swap(false, Ordering::Relaxed) {
             assembler.wait_for_keyframe();
-            if idr.want(now) {
-                emit(VideoFeedback::NeedIdr);
+            if let Some(reason) = idr.want(now, IdrReason::Decoder) {
+                counters.recovery.request(reason, emit);
             }
         }
         let packet = match socket.recv_from(&mut buf) {
@@ -748,8 +796,8 @@ fn receive_loop(
             }
             Some(VideoInactivity::Probe) => {
                 debug!("video paused; probing with a keyframe request");
-                if idr.want(now) {
-                    emit(VideoFeedback::NeedIdr);
+                if let Some(reason) = idr.want(now, IdrReason::Silence) {
+                    counters.recovery.request(reason, emit);
                 }
             }
             Some(VideoInactivity::Stalled) => {
@@ -759,16 +807,11 @@ fn receive_loop(
             }
             None => {}
         }
-        if idr.retry_due(now) {
-            debug!("no keyframe yet; asking again");
-            emit(VideoFeedback::NeedIdr);
-        }
-
         for output in outputs {
             match output {
                 AssemblerOutput::NeedIdr => {
-                    if idr.want(Instant::now()) {
-                        emit(VideoFeedback::NeedIdr);
+                    if let Some(reason) = idr.want(Instant::now(), IdrReason::Loss) {
+                        counters.recovery.request(reason, emit);
                     }
                 }
                 AssemblerOutput::Frame(frame) => {
@@ -777,8 +820,11 @@ fn receive_loop(
                         emit(VideoFeedback::FirstFrame);
                     }
                     counters.frames.fetch_add(1, Ordering::Relaxed);
-                    if frame.keyframe {
-                        idr.keyframe_arrived();
+                    if frame.keyframe
+                        && let Some(request) = idr.keyframe_arrived()
+                    {
+                        counters.recovery.recovered(request.elapsed());
+                        recovered_request = Some(request);
                     }
                     if frame.host_latency_100us > 0 {
                         counters
@@ -791,18 +837,22 @@ fn receive_loop(
                         keyframe: frame.keyframe,
                         data: frame.data,
                         received_at: frame.received_at,
+                        idr_requested_at: recovered_request,
                         host_latency: Some(Duration::from_micros(frame.host_latency_100us as u64 * 100)),
                     };
                     if sink.submit(encoded) == SubmitResult::NeedKeyframe {
                         debug!("decoder asked for a keyframe");
                         assembler.wait_for_keyframe();
-                        if idr.want(Instant::now()) {
-                            emit(VideoFeedback::NeedIdr);
+                        if let Some(reason) = idr.want(Instant::now(), IdrReason::Decoder) {
+                            counters.recovery.request(reason, emit);
                         }
                         break;
                     }
                 }
             }
+        }
+        if let Some(reason) = idr.retry_due(Instant::now()) {
+            counters.recovery.request(reason, emit);
         }
         counters
             .recovered
@@ -810,9 +860,20 @@ fn receive_loop(
         counters
             .lost_frames
             .store(assembler.stats.lost_frames, Ordering::Relaxed);
+        counters
+            .dropped_waiting_idr
+            .store(assembler.stats.dropped_waiting_idr, Ordering::Relaxed);
     }
     stop.store(true, Ordering::Relaxed);
     sink.cleanup();
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdrReason {
+    Loss,
+    Decoder,
+    Silence,
+    Retry,
 }
 
 /// Keyframe requests: one in flight at a time. Losses while waiting don't
@@ -824,13 +885,14 @@ fn receive_loop(
 #[derive(Debug, Default)]
 struct IdrRequests {
     pending_since: Option<Instant>,
+    first_request: Option<Instant>,
     last_sent: Option<Instant>,
     /// Least time between requests; grows while keyframes don't help.
     gap: Duration,
     /// The gap already grew for the last request.
     grew: bool,
     /// A request held back by the gap, sent once it has passed.
-    deferred: bool,
+    deferred: Option<IdrReason>,
 }
 
 impl IdrRequests {
@@ -840,13 +902,10 @@ impl IdrRequests {
     const MIN_GAP: Duration = Duration::from_millis(250);
     const MAX_GAP: Duration = Duration::from_secs(4);
 
-    /// A keyframe is needed: true if a request should go out now.
-    fn want(&mut self, now: Instant) -> bool {
-        if self
-            .pending_since
-            .is_some_and(|at| now.duration_since(at) < Self::RETRY)
-        {
-            return false;
+    /// A keyframe is needed: return the reason if a request should go out now.
+    fn want(&mut self, now: Instant, reason: IdrReason) -> Option<IdrReason> {
+        if self.pending_since.is_some() {
+            return self.retry_due(now);
         }
         match self.last_sent.map(|at| now.duration_since(at)) {
             Some(since) if since < Self::STORM => {
@@ -855,35 +914,40 @@ impl IdrRequests {
                     self.grew = true;
                 }
                 if since < self.gap {
-                    self.deferred = true;
-                    return false;
+                    self.deferred.get_or_insert(reason);
+                    return None;
                 }
             }
             _ => self.gap = Duration::ZERO,
         }
-        self.send(now)
+        Some(self.send(now, reason))
     }
 
-    fn send(&mut self, now: Instant) -> bool {
+    fn send(&mut self, now: Instant, reason: IdrReason) -> IdrReason {
         self.pending_since = Some(now);
+        self.first_request.get_or_insert(now);
         self.last_sent = Some(now);
         self.grew = false;
-        self.deferred = false;
-        true
+        self.deferred = None;
+        reason
     }
 
     /// A request is due: the pending one went unanswered for too long, or
     /// a held-back one's gap has passed.
-    fn retry_due(&mut self, now: Instant) -> bool {
+    fn retry_due(&mut self, now: Instant) -> Option<IdrReason> {
         match (self.pending_since, self.last_sent) {
-            (Some(at), _) if now.duration_since(at) >= Self::RETRY => self.send(now),
-            (None, Some(last)) if self.deferred && now.duration_since(last) >= self.gap => self.send(now),
-            _ => false,
+            (Some(at), _) if now.duration_since(at) >= Self::RETRY => Some(self.send(now, IdrReason::Retry)),
+            (None, Some(last)) if now.duration_since(last) >= self.gap => {
+                self.deferred.map(|reason| self.send(now, reason))
+            }
+            _ => None,
         }
     }
 
-    fn keyframe_arrived(&mut self) {
+    fn keyframe_arrived(&mut self) -> Option<Instant> {
         self.pending_since = None;
+        self.deferred = None;
+        self.first_request.take()
     }
 }
 
@@ -1080,14 +1144,15 @@ mod tests {
         let t0 = Instant::now();
         let ms = |n| t0 + Duration::from_millis(n);
         let mut idr = IdrRequests::default();
-        assert!(idr.want(t0), "first loss asks");
-        assert!(!idr.want(ms(250)), "more losses while waiting don't");
-        assert!(!idr.retry_due(ms(900)));
-        assert!(idr.retry_due(ms(1000)), "unanswered: ask again");
-        assert!(!idr.retry_due(ms(1500)));
-        idr.keyframe_arrived();
-        assert!(!idr.retry_due(ms(5000)), "nothing pending");
-        assert!(idr.want(ms(5001)), "a new loss asks right away");
+        assert_eq!(idr.want(t0, IdrReason::Loss), Some(IdrReason::Loss));
+        assert_eq!(idr.want(ms(250), IdrReason::Decoder), None);
+        assert_eq!(idr.retry_due(ms(900)), None);
+        assert_eq!(idr.retry_due(ms(1000)), Some(IdrReason::Retry));
+        assert_eq!(idr.retry_due(ms(1500)), None);
+        assert_eq!(idr.keyframe_arrived(), Some(t0), "retries keep the first request time");
+        assert_eq!(idr.keyframe_arrived(), None);
+        assert_eq!(idr.retry_due(ms(5000)), None);
+        assert_eq!(idr.want(ms(5001), IdrReason::Loss), Some(IdrReason::Loss));
     }
 
     #[test]
@@ -1097,7 +1162,7 @@ mod tests {
         let mut idr = IdrRequests::default();
         // The decoder fails 50 ms after every keyframe (40 ms after asking).
         let mut sent = vec![0u64];
-        assert!(idr.want(ms(0)));
+        assert_eq!(idr.want(ms(0), IdrReason::Decoder), Some(IdrReason::Decoder));
         let mut t = 0;
         while t < 20_000 {
             t += 10;
@@ -1106,9 +1171,13 @@ mod tests {
                 idr.keyframe_arrived();
             }
             if t == last + 90 {
-                assert!(!idr.want(ms(t)) || t - last >= 1500, "held back at {t}");
+                assert!(
+                    idr.want(ms(t), IdrReason::Decoder).is_none() || t - last >= 1500,
+                    "held back at {t}"
+                );
             }
-            if idr.retry_due(ms(t)) {
+            if let Some(reason) = idr.retry_due(ms(t)) {
+                assert_eq!(reason, IdrReason::Decoder, "deferred requests keep their cause");
                 sent.push(t);
             }
         }
@@ -1119,7 +1188,7 @@ mod tests {
 
         // Running cleanly for a while: the next loss asks right away.
         let later = 30_000;
-        assert!(idr.want(ms(later)));
+        assert_eq!(idr.want(ms(later), IdrReason::Loss), Some(IdrReason::Loss));
     }
 
     #[test]

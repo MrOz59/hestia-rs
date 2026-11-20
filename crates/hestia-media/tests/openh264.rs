@@ -55,6 +55,7 @@ fn frame(n: u32, data: Vec<u8>, keyframe: bool) -> EncodedFrame {
         keyframe,
         data,
         received_at: Instant::now(),
+        idr_requested_at: None,
         host_latency: None,
     }
 }
