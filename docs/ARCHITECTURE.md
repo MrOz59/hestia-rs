@@ -94,6 +94,12 @@ and decoder errors still use the same keyframe recovery policy. Backends include
 OpenH264, Android MediaCodec, Opus + cpal playback, Android audio, and null and
 dump sinks. Linux VA-API and surround playback are planned.
 
+Audio playback uses a shared `PlaybackSink` to connect an `AudioDecoder`
+to a `PcmOutput`. Desktop composes libopus with cpal, and Android composes
+MediaCodec with AAudio. The sink owns the FIFO, stereo downmix, and session
+lifecycle. Output callbacks only read PCM through a `PcmReader`, which
+keeps the same buffering and underrun behavior with either decoder.
+
 ### hestia-app
 Slint UI (`ui/*.slint`, fluent-dark base style with a custom theme). A
 `Controller` owns the core and pushes view models to the window through
