@@ -8,7 +8,8 @@
 # <libs-dir>/<abi>/libhestia_app.so for any of arm64-v8a, armeabi-v7a,
 # x86_64, x86. Needs ANDROID_HOME (build-tools 34, platform 34) and, to
 # sign, ANDROID_KEYSTORE (path) + ANDROID_KEYSTORE_PASSWORD; the key alias
-# is ANDROID_KEY_ALIAS when the keystore holds more than one.
+# is ANDROID_KEY_ALIAS when the keystore holds more than one, and the key's
+# own password ANDROID_KEY_PASSWORD when it differs from the store's.
 set -euo pipefail
 
 libs=$(realpath "$1")
@@ -50,6 +51,9 @@ sign() {
         local alias_args=()
         if [ -n "${ANDROID_KEY_ALIAS:-}" ]; then
             alias_args=(--ks-key-alias "$ANDROID_KEY_ALIAS")
+        fi
+        if [ -n "${ANDROID_KEY_PASSWORD:-}" ]; then
+            alias_args+=(--key-pass env:ANDROID_KEY_PASSWORD)
         fi
         "$build_tools/apksigner" sign --ks "$ANDROID_KEYSTORE" --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
             "${alias_args[@]}" --out "$signed" "$work/aligned.apk"

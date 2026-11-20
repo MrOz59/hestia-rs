@@ -170,9 +170,11 @@ jobs:
           if-no-files-found: error
 
   # One universal APK with every ABI that built, plus one per ABI, all
-  # signed with the repository key (ANDROID_KEYSTORE_BASE64 /
-  # ANDROID_KEYSTORE_PASSWORD) so nightlies install over each other.
-  # Without it a throwaway key is used (uninstall before installing).
+  # signed with the persistent key so nightlies install over each other:
+  # the HESTIA_NIGHTLY_* secrets Hestia Android uses (keystore base64, store
+  # password, key alias, key password), or ANDROID_KEYSTORE_BASE64 /
+  # ANDROID_KEYSTORE_PASSWORD. Without them a throwaway key is used
+  # (uninstall before installing).
   android-package:
     name: Android APKs
     needs: android
@@ -197,9 +199,10 @@ jobs:
 
       - name: Package APKs
         env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEYSTORE_B64: ${{ secrets.HESTIA_NIGHTLY_KEYSTORE_BASE64 || secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.HESTIA_NIGHTLY_STORE_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.HESTIA_NIGHTLY_KEY_ALIAS || secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.HESTIA_NIGHTLY_KEY_PASSWORD }}
         run: |
           mkdir -p jni
           for dir in libs/hestia-rs-android-lib-*; do
@@ -212,12 +215,13 @@ jobs:
             echo "$KEYSTORE_B64" | base64 -d > "$keystore"
             export ANDROID_KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
             [ -n "$KEY_ALIAS" ] && export ANDROID_KEY_ALIAS="$KEY_ALIAS"
-            echo "signing with the repository key"
+            [ -n "$KEY_PASSWORD" ] && export ANDROID_KEY_PASSWORD="$KEY_PASSWORD"
+            echo "signing with the persistent key"
           else
             keytool -genkeypair -keystore "$keystore" -storepass android -keypass android \
               -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Hestia RS CI"
             export ANDROID_KEYSTORE_PASSWORD=android
-            echo "::warning::ANDROID_KEYSTORE_BASE64/PASSWORD not set: APKs signed with a throwaway key"
+            echo "::warning::no signing secrets (HESTIA_NIGHTLY_* or ANDROID_KEYSTORE_*): APKs signed with a throwaway key"
           fi
           export ANDROID_KEYSTORE="$keystore"
           version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
