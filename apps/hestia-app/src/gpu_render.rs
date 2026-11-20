@@ -663,7 +663,9 @@ impl Renderer {
         let Some(gl) = self.gl.as_mut() else { return };
         let Some(presentation) = self.gpu.active() else { return };
         let Some(frame) = presentation.take_gpu() else { return };
-        let FrameBuffer::Android(picture) = frame.buffer else { return };
+        let FrameBuffer::Android(picture) = frame.buffer else {
+            return;
+        };
         let result = gl.draw(&picture).and_then(|draw| {
             let fence = gl.release_fence()?;
             Ok((draw, fence))

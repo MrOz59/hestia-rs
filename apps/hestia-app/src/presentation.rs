@@ -228,7 +228,9 @@ impl FramePresenter for UiPresenter {
             ui.set_stream_frame(Image::from_rgba8(buffer));
             let delivered_at = Instant::now();
             presentation.recovery.record(frame.idr_requested_at, delivered_at);
-            presentation.handoff.record(delivered_at.duration_since(frame.decoded_at));
+            presentation
+                .handoff
+                .record(delivered_at.duration_since(frame.decoded_at));
             presentation
                 .receive_to_ui
                 .record(delivered_at.duration_since(frame.received_at));
@@ -257,7 +259,10 @@ mod tests {
         assert!(!previous.enqueue(&mut frame), "only one UI callback is scheduled");
         assert_eq!(previous.superseded(), 1);
         assert_eq!(frame.rgba().unwrap().as_ptr(), pixels, "reuse the previous CPU buffer");
-        assert_eq!(previous.pending.lock().unwrap().latest.as_ref().unwrap().frame_number, 2);
+        assert_eq!(
+            previous.pending.lock().unwrap().latest.as_ref().unwrap().frame_number,
+            2
+        );
 
         previous.close();
         frame.frame_number = 3;

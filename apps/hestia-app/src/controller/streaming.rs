@@ -17,8 +17,8 @@ use slint::{ComponentHandle, Image, ModelRc, SharedString, VecModel};
 
 use super::report::{self, SharedReport};
 use super::{Controller, Shared, spawn};
-use crate::presentation::{Presentation, StreamVideo, UiPresenter};
 use crate::keymap::{self, Mapped};
+use crate::presentation::{Presentation, StreamVideo, UiPresenter};
 use crate::touch::{self, Trackpad};
 use crate::typing;
 use crate::virtual_pad::{PadState, VirtualPad};

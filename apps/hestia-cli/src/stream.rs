@@ -15,7 +15,7 @@ use hestia_core::report::{StatsSample, StreamReport};
 use hestia_core::stream::{SessionListener, StreamEvent, VideoCodec, VideoFormat, VideoSink};
 use hestia_core::{DeviceInfo, HestiaClient, logcapture};
 use hestia_media::null::{NullAudioSink, NullVideoSink};
-use hestia_media::{Colorimetry, DecodeStats, DecodingSink, DecodedFrame, dump::DumpVideoSink};
+use hestia_media::{Colorimetry, DecodeStats, DecodedFrame, DecodingSink, dump::DumpVideoSink};
 
 use crate::Result;
 
@@ -64,7 +64,9 @@ fn all_formats() -> Vec<VideoFormat> {
 
 /// Saves one decoded picture as a binary PPM (any image viewer opens it).
 fn write_ppm(path: &Path, frame: &DecodedFrame) -> std::io::Result<()> {
-    let pixels = frame.rgba().ok_or_else(|| std::io::Error::other("snapshot requires a CPU frame"))?;
+    let pixels = frame
+        .rgba()
+        .ok_or_else(|| std::io::Error::other("snapshot requires a CPU frame"))?;
     let mut out = BufWriter::new(File::create(path)?);
     write!(out, "P6\n{} {}\n255\n", frame.width, frame.height)?;
     for px in pixels.chunks_exact(4) {

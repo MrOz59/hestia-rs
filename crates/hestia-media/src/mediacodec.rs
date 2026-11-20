@@ -326,7 +326,10 @@ impl MediaCodecDecoder {
     }
 
     fn fall_back(&mut self, why: &str) -> Result<(), String> {
-        if self.running.as_ref().is_some_and(|running| running.output == Output::Gpu)
+        if self
+            .running
+            .as_ref()
+            .is_some_and(|running| running.output == Output::Gpu)
             && let Some(output) = &self.gpu_output
         {
             output.retire();
@@ -564,7 +567,12 @@ fn record_superseded(stats: Option<&DecodeStats>, count: u64) {
     }
 }
 
-fn convert(image: &Image, colorimetry: Colorimetry, fallback: (i32, i32), out: &mut DecodedFrame) -> Result<(), String> {
+fn convert(
+    image: &Image,
+    colorimetry: Colorimetry,
+    fallback: (i32, i32),
+    out: &mut DecodedFrame,
+) -> Result<(), String> {
     let err = |what: &str, e: ndk::media_error::MediaError| format!("{what}: {e:?}");
     let (width, height) = match image.crop_rect() {
         Ok(r) if r.right > r.left && r.bottom > r.top => (r.right - r.left, r.bottom - r.top),
@@ -767,9 +775,7 @@ impl MediaCodecDecoder {
             loop {
                 // Release output while waiting for input capacity. Some codecs
                 // cannot make progress until the client returns a buffer.
-                picture = running
-                    .poll_picture(out, self.colorimetry, stats)?
-                    .or(picture);
+                picture = running.poll_picture(out, self.colorimetry, stats)?.or(picture);
                 let wait = deadline.saturating_duration_since(Instant::now()).min(INPUT_RETRY);
                 if running.feed(&frame.data, timing, wait)? {
                     break;
@@ -782,9 +788,7 @@ impl MediaCodecDecoder {
                 }
             }
         }
-        Ok(running
-            .poll_picture(out, self.colorimetry, stats)?
-            .or(picture))
+        Ok(running.poll_picture(out, self.colorimetry, stats)?.or(picture))
     }
 }
 

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use hestia_media::software_h264::OpenH264Decoder;
-use hestia_media::{Colorimetry, DecodingSink, FrameDecoder, DecodedFrame};
+use hestia_media::{Colorimetry, DecodedFrame, DecodingSink, FrameDecoder};
 use hestia_stream::{EncodedFrame, VideoSink};
 
 const CLIP: &[u8] = include_bytes!("data/red-blue-64x36-high.h264");

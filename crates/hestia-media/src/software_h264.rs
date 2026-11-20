@@ -10,7 +10,7 @@ use openh264::decoder::Decoder;
 use openh264::formats::YUVSource;
 
 use crate::color::{Colorimetry, I420, i420_to_rgba};
-use crate::decode::{FrameDecoder, FrameTiming, DecodedFrame};
+use crate::decode::{DecodedFrame, FrameDecoder, FrameTiming};
 
 pub struct OpenH264Decoder {
     decoder: Decoder,
