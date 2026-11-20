@@ -241,24 +241,6 @@ jobs:
           code=$((1000000 + GITHUB_RUN_NUMBER))
           scripts/android-package.sh jni apks "$code" "$version-nightly.$GITHUB_RUN_NUMBER+${GITHUB_SHA::7}"
 
-      - name: Check the universal APK
-        run: |
-          aapt2="$ANDROID_HOME/build-tools/34.0.0/aapt2"
-          "$aapt2" dump badging apks/hestia-rs-android-universal.apk \
-            | grep -E "^package|native-code|leanback|banner|uses-feature|launchable" || true
-          unzip -l apks/hestia-rs-android-universal.apk | grep -E "lib/|AndroidManifest" 
-          apksigner="$ANDROID_HOME/build-tools/34.0.0/apksigner"
-          certificate=$("$apksigner" verify --print-certs apks/hestia-rs-android-universal.apk)
-          printf '%s\n' "$certificate" | sed -n '1,3p'
-          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main ]]; then
-            expected=a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
-            fingerprint=$(printf '%s\n' "$certificate" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
-            if [[ "$fingerprint" != "$expected" ]]; then
-              echo "::error::APK signing certificate differs from the published Hestia RS certificate"
-              exit 1
-            fi
-          fi
-
       - uses: actions/upload-artifact@v4
         id: upload-apks
         with:
@@ -267,10 +249,113 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
+  android-install:
+    name: Android APK install and update
+    needs: android-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools build-tools;34.0.0"
+
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.android-package.outputs.apk-artifact-id }}
+          path: apks
+          merge-multiple: true
+
+      - name: Verify the downloaded APKs
+        run: |
+          tools="$ANDROID_HOME/build-tools/34.0.0"
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          code=$((1000000 + GITHUB_RUN_NUMBER))
+          version_name="$version-nightly.$GITHUB_RUN_NUMBER+${GITHUB_SHA::7}"
+          expected_package="package: name='com.mroz59.hestia.rs' versionCode='$code' versionName='$version_name'"
+          expected_cert=
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main ]]; then
+            expected_cert=a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
+          fi
+
+          for variant in universal arm64-v8a x86_64; do
+            if [[ ! -f "apks/hestia-rs-android-$variant.apk" ]]; then
+              echo "::error::Missing required $variant APK"
+              exit 1
+            fi
+          done
+          universal_abis=()
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            if [[ -f "apks/hestia-rs-android-$abi.apk" ]]; then
+              universal_abis+=("$abi")
+            fi
+          done
+
+          for apk in apks/*.apk; do
+            variant=${apk##*/hestia-rs-android-}
+            variant=${variant%.apk}
+            expected_abis=("$variant")
+            if [[ "$variant" == universal ]]; then
+              expected_abis=("${universal_abis[@]}")
+            fi
+            badging=$("$tools/aapt2" dump badging "$apk")
+            package=$(sed -n '/^package: /p' <<< "$badging")
+            actual_abis=$(sed -n 's/^native-code: //p' <<< "$badging" | tr -d "'" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort)
+            if [[ "$package" != "$expected_package"* || "$actual_abis" != "$(printf '%s\n' "${expected_abis[@]}")" ]]; then
+              echo "::error::$apk has unexpected package metadata or native ABIs"
+              printf '%s\n' "$package" "$actual_abis"
+              exit 1
+            fi
+            "$tools/zipalign" -c 4 "$apk"
+            certificate=$("$tools/apksigner" verify --print-certs "$apk")
+            fingerprint=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' <<< "$certificate")
+            expected_cert=${expected_cert:-$fingerprint}
+            if [[ ! "$fingerprint" =~ ^[a-f0-9]{64}$ || "$fingerprint" != "$expected_cert" ]]; then
+              echo "::error::$apk has an unexpected signing certificate: $fingerprint"
+              exit 1
+            fi
+            echo "$apk: $version_name, certificate $fingerprint"
+          done
+
+      - name: Download the previous nightly for the update test
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq '.[] | select(.tag_name == "nightly" and (.draft | not)) | .id')
+          if [[ -z "$release" ]]; then
+            echo '::notice::No published nightly exists yet; checking fresh install.'
+            exit 0
+          fi
+          apk=hestia-rs-android-universal.apk
+          gh release download nightly --repo "$GITHUB_REPOSITORY" --pattern "$apk" --dir previous
+          test -s "previous/$apk"
+          echo "PREVIOUS_NIGHTLY_APK=previous/$apk" >> "$GITHUB_ENV"
+
+      - name: Enable emulator acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install on Android 16
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          script: bash scripts/check-android-install.sh apks/hestia-rs-android-universal.apk
+
   # Every push to main replaces the "nightly" pre-release with fresh builds.
   nightly:
     name: Nightly release
-    needs: [linux, android-package, interop]
+    needs: [linux, android-package, android-install, interop]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
