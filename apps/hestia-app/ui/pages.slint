@@ -4,7 +4,7 @@
 // control reports back through `entered` so Tab and the mouse keep it in
 // step. `refocus` (bumped by the window when a dialog closes) resets it.
 
-import { Theme, Icon, Focusable, ActionButton, IconButton, Chip, Loader, TextField, Modal, DialogTitle, DialogText } from "theme.slint";
+import { Theme, Nav, Icon, Focusable, ActionButton, IconButton, Chip, Loader, TextField, Modal, DialogTitle, DialogText } from "theme.slint";
 import { Group, SwitchRow, ChoiceRow, SliderRow, ActionRow, InfoRow, FieldRow, ProfileRow, OptionSheet, TopBar, EmptyState } from "controls.slint";
 
 export struct HostCard {
@@ -256,6 +256,10 @@ export component HostsPage inherits Rectangle {
         height: 0px;
         init => {
             self.focus();
+            // Arrived with the remote / keyboard: focus right away.
+            if (Nav.keyboard) {
+                root.nav = root.hosts.length > 0 ? 0 : 10;
+            }
         }
         key-pressed(event) => {
             if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
@@ -854,6 +858,10 @@ export component AppsPage inherits Rectangle {
         height: 0px;
         init => {
             self.focus();
+            // Arrived with the remote / keyboard: focus right away.
+            if (Nav.keyboard) {
+                root.nav = root.app-running ? -6 : (root.apps.length > 0 ? 0 : -2);
+            }
         }
         key-pressed(event) => {
             if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
@@ -925,7 +933,7 @@ export component AppsPage inherits Rectangle {
                         root.nav = -5;
                     }
                     clicked => {
-                        root.confirm-choice = 0;
+                        root.confirm-choice = Nav.keyboard ? 0 : -1;
                         root.confirm = 2;
                     }
                 }
@@ -944,7 +952,7 @@ export component AppsPage inherits Rectangle {
                         root.nav = -5;
                     }
                     clicked => {
-                        root.confirm-choice = 0;
+                        root.confirm-choice = Nav.keyboard ? 0 : -1;
                         root.confirm = 2;
                     }
                 }
@@ -1020,7 +1028,7 @@ export component AppsPage inherits Rectangle {
                                 root.launch(app.id);
                             }
                             quit => {
-                                root.confirm-choice = 0;
+                                root.confirm-choice = Nav.keyboard ? 0 : -1;
                                 root.confirm = 1;
                             }
                             resume-nav(k) => {
@@ -1096,6 +1104,14 @@ export component AppsPage inherits Rectangle {
     if root.confirm != 0: Modal {
         width: 100%;
         height: 100%;
+        hold-focus: root.confirm-choice < 0;
+        arrow => {
+            root.confirm-choice = 0;
+        }
+        back => {
+            root.confirm = 0;
+            return true;
+        }
         dismissed => {
             root.confirm = 0;
         }
@@ -1204,6 +1220,10 @@ export component SessionPage inherits Rectangle {
         height: 0px;
         init => {
             self.focus();
+            // Arrived with the remote / keyboard: focus right away.
+            if (Nav.keyboard) {
+                root.nav = 0;
+            }
         }
         key-pressed(event) => {
             if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
@@ -1473,6 +1493,10 @@ export component SettingsPage inherits Rectangle {
         height: 0px;
         init => {
             self.focus();
+            // Arrived with the remote / keyboard: focus right away.
+            if (Nav.keyboard) {
+                root.nav = 0;
+            }
         }
         key-pressed(event) => {
             if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
@@ -2066,6 +2090,10 @@ export component ToolsPage inherits Rectangle {
         height: 0px;
         init => {
             self.focus();
+            // Arrived with the remote / keyboard: focus right away.
+            if (Nav.keyboard) {
+                root.nav = 9;
+            }
         }
         key-pressed(event) => {
             if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
@@ -2483,6 +2511,10 @@ export component ReportPage inherits Rectangle {
         height: 0px;
         init => {
             self.focus();
+            // Arrived with the remote / keyboard: focus right away.
+            if (Nav.keyboard) {
+                root.nav = 1;
+            }
         }
         key-pressed(event) => {
             if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {

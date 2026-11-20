@@ -3,7 +3,7 @@
 // up / down (D-pad) move between rows, left / right change the value, and
 // Return / the D-pad centre opens or toggles it.
 
-import { Theme, Icon, Focusable, ActionButton, IconButton, Toggle, TextField, Modal, DialogTitle } from "theme.slint";
+import { Theme, Nav, Icon, Focusable, ActionButton, IconButton, Toggle, TextField, Modal, DialogTitle } from "theme.slint";
 
 // Title and an optional note, left of a row's control.
 export component RowText inherits VerticalLayout {
@@ -571,12 +571,22 @@ export component OptionSheet inherits Rectangle {
     callback picked(int);
     callback dismissed();
 
-    property <int> hi: root.current;
+    // Opened with a key: on the current value; with a tap: nothing
+    // focused until an arrow key.
+    property <int> hi: Nav.keyboard ? root.current : -1;
 
     Modal {
         width: 100%;
         height: 100%;
         card-width: 420px;
+        hold-focus: root.hi < 0;
+        arrow => {
+            root.hi = root.current;
+        }
+        back => {
+            root.dismissed();
+            return true;
+        }
         dismissed => {
             root.dismissed();
         }

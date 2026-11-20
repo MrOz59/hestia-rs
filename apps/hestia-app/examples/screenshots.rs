@@ -312,16 +312,18 @@ fn main() {
     press(&window, Key::DownArrow, 1);
     save(&window, size, &out.join("tv-hosts.png"));
 
+    // From here on the remote has been used, so pages open with the focus
+    // already placed (Resume on the host's page).
     ui.set_screen(1);
     settle();
-    // Resume on the running app, then the first poster.
-    press(&window, Key::DownArrow, 2);
+    // Down from Resume to the first poster.
+    press(&window, Key::DownArrow, 1);
     save(&window, size, &out.join("tv-apps.png"));
 
     ui.set_screen(3);
     settle();
-    // Down to the bitrate slider.
-    press(&window, Key::DownArrow, 5);
+    // Down from Preset to the bitrate slider.
+    press(&window, Key::DownArrow, 4);
     save(&window, size, &out.join("tv-settings.png"));
     // The option list of the frame rate row.
     press(&window, Key::UpArrow, 1);
@@ -331,7 +333,7 @@ fn main() {
 
     ui.set_screen(5);
     settle();
-    press(&window, Key::DownArrow, 3);
+    press(&window, Key::DownArrow, 2);
     save(&window, size, &out.join("tv-tools.png"));
 
     ui.set_screen(4);

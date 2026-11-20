@@ -12,6 +12,10 @@ import "../fonts/Outfit-Bold.ttf";
 // (Android would otherwise act on the release and close the app).
 export global Nav {
     in-out property <bool> back-taken;
+    // The last interaction was a key (remote, keyboard, controller) rather
+    // than a tap or a click: dialogs and pages then put the focus somewhere
+    // right away, and stay without a focus glow for touch.
+    in-out property <bool> keyboard;
 }
 
 export global Theme {
@@ -181,6 +185,7 @@ export component Focusable inherits Rectangle {
         enabled: root.enabled;
         mouse-cursor: pointer;
         clicked => {
+            Nav.keyboard = false;
             root.clicked();
         }
     }
@@ -435,6 +440,7 @@ export component TextField inherits Rectangle {
     area := TouchArea {
         mouse-cursor: MouseCursor.text;
         clicked => {
+            Nav.keyboard = false;
             root.edit();
         }
     }
@@ -494,6 +500,13 @@ export component TextField inherits Rectangle {
 // It fades and rises in; tapping the scrim calls `dismissed`.
 export component Modal inherits Rectangle {
     in property <length> card-width: 440px;
+    // Keep the focus on the dialog itself (nothing glows) until an arrow
+    // key, which calls `arrow` to focus a control.
+    in property <bool> hold-focus: false;
+    callback arrow();
+    // Back or Escape while it holds the focus: true when handled (dialogs
+    // inside a page close themselves; the window handles its own).
+    callback back() -> bool;
     callback dismissed;
     property <bool> shown;
     property <bool> sheet: Theme.compact;
@@ -511,6 +524,27 @@ export component Modal inherits Rectangle {
     TouchArea {
         clicked => {
             root.dismissed();
+        }
+    }
+
+    if root.hold-focus: FocusScope {
+        width: 0px;
+        height: 0px;
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
+                root.arrow();
+                return accept;
+            }
+            if ((event.text == Key.Back || event.text == Key.Escape) && root.back()) {
+                if (event.text == Key.Back) {
+                    Nav.back-taken = true;
+                }
+                return accept;
+            }
+            return reject;
         }
     }
 
