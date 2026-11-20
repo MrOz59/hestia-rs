@@ -169,13 +169,16 @@ jobs:
           path: target/${{ matrix.target }}/release/libhestia_app.so
           if-no-files-found: error
 
-  # Publishable APKs use the Hestia RS certificate. Other CI builds are
-  # signed with a temporary key for installation testing.
+  # One universal APK with every ABI that built, plus one per ABI, all
+  # signed with the Hestia RS key from this repository's signing secrets.
+  # Test builds can use a throwaway key when signing secrets are absent.
   android-package:
     name: Android APKs
     needs: android
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    outputs:
+      apk-artifact-id: ${{ steps.upload-apks.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v5
 
@@ -257,10 +260,12 @@ jobs:
           fi
 
       - uses: actions/upload-artifact@v4
+        id: upload-apks
         with:
           name: hestia-rs-android-apks
           path: apks/*.apk
           if-no-files-found: error
+          overwrite: true
 
   # Every push to main replaces the "nightly" pre-release with fresh builds.
   nightly:
@@ -275,9 +280,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
+      - name: Download Linux build and screenshots
+        uses: actions/download-artifact@v4
         with:
+          pattern: 'hestia-rs-{linux-x86_64,screenshots}'
           path: artifacts
+
+      - name: Download APKs from the packaging job
+        if: ${{ needs.android-package.outputs.apk-artifact-id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.android-package.outputs.apk-artifact-id }}
+          path: artifacts/hestia-rs-android-apks
+          merge-multiple: true
 
       - name: Package
         run: |
@@ -286,11 +301,8 @@ jobs:
           install -m 755 "$linux/hestia-app" "$linux/hestia" staging/hestia-rs/
           cp README.md LICENSE staging/hestia-rs/
           tar -C staging -czf dist/hestia-rs-linux-x86_64.tar.gz hestia-rs
-          if ls artifacts/hestia-rs-android-apks/*.apk >/dev/null 2>&1; then
-            cp artifacts/hestia-rs-android-apks/*.apk dist/
-          else
-            echo "::warning::no APK in this run"
-          fi
+          test -f artifacts/hestia-rs-android-apks/hestia-rs-android-universal.apk
+          cp artifacts/hestia-rs-android-apks/*.apk dist/
           if ls artifacts/hestia-rs-screenshots/*.png >/dev/null 2>&1; then
             (cd artifacts/hestia-rs-screenshots && zip -q ../../dist/ui-screenshots.zip *.png)
           fi
