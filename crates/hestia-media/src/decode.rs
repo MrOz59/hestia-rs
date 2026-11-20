@@ -28,6 +28,7 @@ pub struct RgbaFrame {
     /// When the first packet of the frame arrived.
     pub received_at: Instant,
     pub decoded_at: Instant,
+    pub idr_requested_at: Option<Instant>,
 }
 
 impl Default for RgbaFrame {
@@ -41,6 +42,7 @@ impl Default for RgbaFrame {
             frame_number: 0,
             received_at: now,
             decoded_at: now,
+            idr_requested_at: None,
         }
     }
 }
@@ -62,7 +64,9 @@ pub struct FrameTiming {
     pub received_at: Instant,
     pub queued_at: Instant,
     pub decode_started_at: Instant,
+    pub codec_input_at: Instant,
     pub codec_output_at: Instant,
+    pub idr_requested_at: Option<Instant>,
 }
 
 impl FrameTiming {
@@ -72,7 +76,9 @@ impl FrameTiming {
             received_at: frame.received_at,
             queued_at,
             decode_started_at: started_at,
+            codec_input_at: started_at,
             codec_output_at: started_at,
+            idr_requested_at: frame.idr_requested_at,
         }
     }
 }
@@ -95,9 +101,19 @@ pub trait FrameDecoder: Send {
         Ok(())
     }
 
-    /// How many frames are queued behind the next one: a pipelined decoder
-    /// can take the next input instead of waiting for this one's picture.
-    fn set_backlog(&mut self, _frames: usize) {}
+    /// Time to wait for input before collecting pending output on the decoder thread.
+    fn output_poll_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn drain_output(&mut self, _out: &mut RgbaFrame) -> Result<Option<FrameTiming>, String> {
+        Ok(None)
+    }
+
+    /// Publish or discard a staged platform picture after checking the queue generation.
+    fn finish_output(&mut self, _publish: bool) {}
+
+    fn attach_stats(&mut self, _stats: Arc<DecodeStats>) {}
 
     /// A failure that requesting a new keyframe cannot recover from.
     fn terminal_error(&self) -> Option<&str> {
@@ -130,10 +146,12 @@ impl<F: FnMut(&RgbaFrame) + Send> FramePresenter for F {
     }
 }
 
-/// Buckets use 0.25 ms resolution up to 64 ms and 4 ms up to 1,024 ms.
+/// Keep fine resolution for normal playback and retain the multi-second tail.
 const FINE_BUCKETS: usize = 256;
 const COARSE_BUCKETS: usize = 240;
-const LATENCY_OVERFLOW: usize = FINE_BUCKETS + COARSE_BUCKETS + 1;
+const TAIL_BUCKETS: usize = 224;
+const COARSE_END: usize = FINE_BUCKETS + COARSE_BUCKETS;
+const LATENCY_OVERFLOW: usize = COARSE_END + TAIL_BUCKETS + 1;
 
 #[derive(Debug)]
 pub struct LatencyHistogram {
@@ -153,8 +171,10 @@ impl LatencyHistogram {
         let us = elapsed.as_micros();
         let bucket = if us <= 64_000 {
             us.div_ceil(250) as usize
+        } else if us <= 1_024_000 {
+            FINE_BUCKETS + (us - 64_000).div_ceil(4_000) as usize
         } else {
-            FINE_BUCKETS + ((us - 64_000).div_ceil(4_000)).min(COARSE_BUCKETS as u128 + 1) as usize
+            COARSE_END + (us - 1_024_000).div_ceil(32_000).min(TAIL_BUCKETS as u128 + 1) as usize
         };
         self.buckets[bucket].fetch_add(1, Ordering::Relaxed);
     }
@@ -177,10 +197,12 @@ impl LatencyHistogram {
                 .unwrap_or(LATENCY_OVERFLOW);
             if bucket <= FINE_BUCKETS {
                 format!("{:.2}", bucket as f64 * 0.25)
-            } else if bucket < LATENCY_OVERFLOW {
+            } else if bucket <= COARSE_END {
                 format!("{}.00", 64 + (bucket - FINE_BUCKETS) * 4)
+            } else if bucket < LATENCY_OVERFLOW {
+                format!("{}.00", 1024 + (bucket - COARSE_END) * 32)
             } else {
-                ">1024".to_owned()
+                ">8192".to_owned()
             }
         };
         Some(format!(
@@ -202,19 +224,29 @@ pub struct DecodeStats {
     /// Sum of decode + conversion time, microseconds.
     pub decode_time_us: AtomicU64,
     pub dropped_backlog: AtomicU64,
+    pub resets: AtomicU64,
+    pub idle_output: AtomicU64,
+    pub codec_input_busy: AtomicU64,
+    pub codec_input_timeouts: AtomicU64,
+    pub codec_image_reader_full: AtomicU64,
+    pub codec_output_superseded: AtomicU64,
     pub receive_to_queue: LatencyHistogram,
     pub queue_wait: LatencyHistogram,
+    pub codec_feed: LatencyHistogram,
     pub codec: LatencyHistogram,
     pub frame_conversion: LatencyHistogram,
+    pub recovery: RecoveryLatency,
 }
 
 impl DecodeStats {
-    pub fn latency_stages(&self) -> [(&'static str, &LatencyHistogram); 4] {
+    pub fn latency_stages(&self) -> [(&'static str, &LatencyHistogram); 6] {
         [
             ("first packet to decode queue", &self.receive_to_queue),
             ("decoder queue", &self.queue_wait),
-            ("decoder output", &self.codec),
+            ("decoder worker to codec input", &self.codec_feed),
+            ("codec input to output", &self.codec),
             ("codec output to frame ready", &self.frame_conversion),
+            ("IDR request to first decoded picture", &self.recovery.latency),
         ]
     }
 
@@ -225,6 +257,26 @@ impl DecodeStats {
             return 0.0;
         }
         self.decode_time_us.load(Ordering::Relaxed) as f64 / n as f64 / 1000.0
+    }
+}
+
+/// Count the first picture delivered for each recovery, even if a newer
+/// picture replaces its keyframe at presentation time.
+#[derive(Debug, Default)]
+pub struct RecoveryLatency {
+    last: Mutex<Option<Instant>>,
+    pub latency: LatencyHistogram,
+}
+
+impl RecoveryLatency {
+    pub fn record(&self, request: Option<Instant>, delivered_at: Instant) {
+        if let Some(request) = request {
+            let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+            if last.is_none_or(|previous| request > previous) {
+                *last = Some(request);
+                self.latency.record(delivered_at.saturating_duration_since(request));
+            }
+        }
     }
 }
 
@@ -321,6 +373,7 @@ impl VideoSink for DecodingSink {
         if !decoder.supports(format) {
             return Err(format!("{} cannot decode {format:?}", decoder.name()));
         }
+        decoder.attach_stats(self.shared.stats.clone());
         decoder.configure(format, width, height, fps)?;
         info!(
             "video decoder: {} for {format:?} {width}x{height}@{fps}",
@@ -420,49 +473,70 @@ fn decode_loop(
     let mut logged_size = (0, 0);
     let mut decoder_generation = 0;
     loop {
-        let mut queue = shared
-            .ready
-            .wait_while(shared.queue(), |q| q.frames.is_empty() && !q.closed)
-            .unwrap_or_else(|e| e.into_inner());
-        let Some(QueuedFrame {
+        let queue = shared.queue();
+        let wait_for_input = |q: &mut Queue| q.frames.is_empty() && !q.closed;
+        let poll = (queue.frames.is_empty() && queue.generation == decoder_generation)
+            .then(|| decoder.output_poll_interval())
+            .flatten();
+        let mut queue = if let Some(interval) = poll {
+            shared
+                .ready
+                .wait_timeout_while(queue, interval, wait_for_input)
+                .unwrap_or_else(|e| e.into_inner())
+                .0
+        } else {
+            shared
+                .ready
+                .wait_while(queue, wait_for_input)
+                .unwrap_or_else(|e| e.into_inner())
+        };
+        let (result, generation, input_number) = if let Some(QueuedFrame {
             frame,
             queued_at,
             generation,
         }) = queue.frames.pop_front()
-        else {
-            break;
-        };
-        let started = Instant::now();
-        let queue_age = started.duration_since(queued_at);
-        shared.stats.queue_wait.record(queue_age);
-        if queue_age > queue.max_age {
-            let dropped = queue.invalidate();
+        {
+            let started = Instant::now();
+            let queue_age = started.duration_since(queued_at);
+            shared.stats.queue_wait.record(queue_age);
+            if queue_age > queue.max_age {
+                let dropped = queue.invalidate();
+                drop(queue);
+                warn!(
+                    "decoder {} ms behind: dropping {} frames for a keyframe",
+                    queue_age.as_millis(),
+                    dropped + 1
+                );
+                shared.dropped_backlog(dropped + 1);
+                if let Some(r) = &requester {
+                    r.request();
+                }
+                continue;
+            }
             drop(queue);
-            warn!(
-                "decoder {} ms behind: dropping {} frames for a keyframe",
-                queue_age.as_millis(),
-                dropped + 1
-            );
-            shared.dropped_backlog(dropped + 1);
-            if let Some(r) = &requester {
-                r.request();
-            }
-            continue;
-        }
-        let backlog = queue.frames.len();
-        drop(queue);
-        decoder.set_backlog(backlog);
-        let timing = FrameTiming::new(&frame, queued_at, started);
-        let result = if decoder_generation != generation {
-            let reset = decoder.reset();
-            if reset.is_ok() {
-                decoder_generation = generation;
-            }
-            reset.and_then(|()| decoder.decode_timed(&frame, &mut picture, timing))
+            let timing = FrameTiming::new(&frame, queued_at, started);
+            let result = if decoder_generation != generation {
+                shared.stats.resets.fetch_add(1, Ordering::Relaxed);
+                decoder.reset().and_then(|()| {
+                    decoder_generation = generation;
+                    decoder.decode_timed(&frame, &mut picture, timing)
+                })
+            } else {
+                decoder.decode_timed(&frame, &mut picture, timing)
+            };
+            (result, generation, Some(frame.frame_number))
+        } else if queue.closed {
+            break;
+        } else if queue.generation == decoder_generation {
+            drop(queue);
+            (decoder.drain_output(&mut picture), decoder_generation, None)
         } else {
-            decoder.decode_timed(&frame, &mut picture, timing)
+            continue;
         };
 
+        if input_number.is_none() && matches!(&result, Ok(None)) && decoder.terminal_error().is_none() {
+            continue;
+        }
         let name = decoder.name();
         let mut current = shared.stats.decoder.lock().unwrap_or_else(|p| p.into_inner());
         if *current != name {
@@ -486,23 +560,36 @@ fn decode_loop(
         }
         if queue.generation != generation {
             // A newer keyframe may already be queued. Its generation owns recovery.
-            shared.dropped_backlog(1);
+            drop(queue);
+            decoder.finish_output(false);
+            if input_number.is_some() {
+                shared.dropped_backlog(1);
+            }
             continue;
         }
         match result {
             Ok(Some(timing)) => {
                 drop(queue);
+                decoder.finish_output(true);
                 picture.frame_number = timing.frame_number;
                 picture.received_at = timing.received_at;
                 picture.decoded_at = Instant::now();
+                picture.idr_requested_at = timing.idr_requested_at;
                 let stats = &shared.stats;
+                stats.recovery.record(timing.idr_requested_at, picture.decoded_at);
+                if input_number.is_none() {
+                    stats.idle_output.fetch_add(1, Ordering::Relaxed);
+                }
                 let decode_time = picture.decoded_at.duration_since(timing.decode_started_at);
                 stats
                     .decode_time_us
                     .fetch_add(decode_time.as_micros() as u64, Ordering::Relaxed);
                 stats
+                    .codec_feed
+                    .record(timing.codec_input_at.duration_since(timing.decode_started_at));
+                stats
                     .codec
-                    .record(timing.codec_output_at.duration_since(timing.decode_started_at));
+                    .record(timing.codec_output_at.duration_since(timing.codec_input_at));
                 stats
                     .frame_conversion
                     .record(picture.decoded_at.duration_since(timing.codec_output_at));
@@ -517,11 +604,16 @@ fn decode_loop(
             Err(e) => {
                 let dropped = queue.invalidate();
                 drop(queue);
+                decoder.finish_output(false);
                 // The first few in full, then a reminder now and then: a
                 // decoder failing every frame would bury the log.
                 let errors = shared.stats.errors.fetch_add(1, Ordering::Relaxed) + 1;
                 if errors <= 5 || errors % 100 == 0 {
-                    warn!("decode error on frame {} ({errors} so far): {e}", frame.frame_number);
+                    if let Some(frame) = input_number {
+                        warn!("decode error on frame {frame} ({errors} so far): {e}");
+                    } else {
+                        warn!("decode output error ({errors} so far): {e}");
+                    }
                 }
                 shared.stats.dropped.fetch_add(dropped, Ordering::Relaxed);
                 if let Some(r) = &requester {
@@ -567,6 +659,7 @@ mod tests {
             keyframe,
             data: vec![0, 0, 0, 1],
             received_at: Instant::now(),
+            idr_requested_at: None,
             host_latency: None,
         }
     }
@@ -576,6 +669,62 @@ mod tests {
         ten_bit: false,
         yuv444: false,
     };
+
+    #[test]
+    fn collects_delayed_output_without_another_input_frame() {
+        #[derive(Default)]
+        struct Delayed(Option<FrameTiming>);
+
+        impl FrameDecoder for Delayed {
+            fn name(&self) -> &'static str {
+                "delayed"
+            }
+            fn supports(&self, _: VideoFormat) -> bool {
+                true
+            }
+            fn decode(&mut self, _: &EncodedFrame, _: &mut RgbaFrame) -> Result<bool, String> {
+                unreachable!("the worker uses the timed API")
+            }
+            fn decode_timed(
+                &mut self,
+                _: &EncodedFrame,
+                _: &mut RgbaFrame,
+                timing: FrameTiming,
+            ) -> Result<Option<FrameTiming>, String> {
+                self.0 = Some(timing);
+                Ok(None)
+            }
+            fn output_poll_interval(&self) -> Option<Duration> {
+                self.0.map(|_| Duration::from_millis(1))
+            }
+            fn drain_output(&mut self, out: &mut RgbaFrame) -> Result<Option<FrameTiming>, String> {
+                out.reshape(2, 1);
+                Ok(self.0.take().map(|mut timing| {
+                    timing.codec_output_at = Instant::now();
+                    timing
+                }))
+            }
+        }
+
+        let (presented, pictures) = mpsc::channel();
+        let mut sink = DecodingSink::new(
+            Box::new(Delayed::default()),
+            Box::new(move |frame: &RgbaFrame| presented.send((frame.frame_number, frame.idr_requested_at)).unwrap()),
+        );
+        let stats = sink.stats();
+        sink.setup(H264, 2, 1, 60).unwrap();
+        let mut keyframe = frame(17, true);
+        let requested = Instant::now();
+        keyframe.idr_requested_at = Some(requested);
+        assert_eq!(sink.submit(keyframe), SubmitResult::Ok);
+        assert_eq!(
+            pictures.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (17, Some(requested))
+        );
+        sink.cleanup();
+        assert_eq!(stats.decoded.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.idle_output.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn decodes_and_recovers_from_errors() {
@@ -661,6 +810,18 @@ mod tests {
         assert_eq!(
             histogram.summary().as_deref(),
             Some("p50 300.00 / p95 300.00 / p99 300.00 ms (1 samples)")
+        );
+    }
+
+    #[test]
+    fn reports_recovery_latency_beyond_one_second_once_per_request() {
+        let recovery = RecoveryLatency::default();
+        let request = Instant::now();
+        recovery.record(Some(request), request + Duration::from_millis(1937));
+        recovery.record(Some(request), request + Duration::from_secs(3));
+        assert_eq!(
+            recovery.latency.summary().unwrap(),
+            "p50 1952.00 / p95 1952.00 / p99 1952.00 ms (1 samples)"
         );
     }
 

@@ -15,7 +15,7 @@ use std::time::Instant;
 use log::warn;
 use ndk::media::image_reader::{Image, ImageReader};
 
-use crate::decode::{FrameTiming, LatencyHistogram};
+use crate::decode::{FrameTiming, LatencyHistogram, RecoveryLatency};
 
 /// An image reader shared by the codec and the pictures acquired from it:
 /// the reader is deleted only after its last picture.
@@ -104,6 +104,7 @@ impl GpuPicture {
         self.stats
             .receive_to_draw
             .record(now.duration_since(self.timing.received_at));
+        self.stats.recovery.record(self.timing.idr_requested_at, now);
         self.stats.drawn.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -121,6 +122,7 @@ pub struct GpuVideoStats {
     pub superseded: AtomicU64,
     pub ready_to_draw: LatencyHistogram,
     pub receive_to_draw: LatencyHistogram,
+    pub recovery: RecoveryLatency,
 }
 
 #[derive(Clone)]

@@ -244,6 +244,8 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
                         rtt_variance_ms: stats.rtt_variance_ms,
                         fec_recovered: stats.recovered_packets,
                         lost_frames: stats.lost_frames,
+                        dropped_waiting_idr: stats.dropped_waiting_idr,
+                        idr_requests: stats.idr_requests,
                         decoded_fps: decode_stats.as_ref().map(|_| window.decoded_fps),
                         decode_ms: decode_stats.as_ref().map(|d| d.mean_decode_ms()),
                         dropped: decode_stats.as_ref().map(|d| d.dropped.load(Ordering::Relaxed)),
@@ -303,8 +305,17 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
             Err(RecvTimeoutError::Disconnected) => break None,
         }
     };
+    let video_counters = session.video_counters();
     session.stop();
+    if let Some(video) = video_counters {
+        report.video_transport(&video);
+    }
     if let Some(d) = &decode_stats {
+        report.decoder_totals(
+            d.decoded.load(Ordering::Relaxed),
+            d.decode_time_us.load(Ordering::Relaxed),
+            d.dropped.load(Ordering::Relaxed),
+        );
         report.field("Decoder totals", "decoded", d.decoded.load(Ordering::Relaxed));
         report.field("Decoder totals", "dropped", d.dropped.load(Ordering::Relaxed));
         report.field("Decoder totals", "errors", d.errors.load(Ordering::Relaxed));
