@@ -56,9 +56,12 @@ jobs:
       - name: Screenshots in the log
         run: |
           for f in screenshots/*.png; do
-            convert "$f" -resize 60% -quality 88 /tmp/shot.jpg
-            echo "BEGIN-SHOT $(basename "$f")"
-            base64 -w 120 /tmp/shot.jpg
+            out="$f"
+            if command -v ffmpeg >/dev/null; then
+              ffmpeg -loglevel error -y -i "$f" -vf "scale=trunc(iw*0.6/2)*2:-2" -q:v 3 /tmp/shot.jpg && out=/tmp/shot.jpg
+            fi
+            echo "BEGIN-SHOT $(basename "$f") ${out##*.}"
+            base64 -w 120 "$out"
             echo "END-SHOT"
           done
 
