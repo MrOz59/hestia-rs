@@ -537,7 +537,11 @@ impl Running {
         let Some(index) = self.rendered.iter().position(|(at, _)| *at == pts as u64) else {
             return Ok(None);
         };
-        let (_, timing) = self.rendered.drain(..=index).last().expect("matched rendered image");
+        let (_, timing) = self
+            .rendered
+            .drain(..=index)
+            .next_back()
+            .expect("matched rendered image");
         record_superseded(stats, index as u64);
         if let Some(session) = &self.gpu_session {
             let picture = GpuPicture::new(image, reader.clone(), session, timing)?;
