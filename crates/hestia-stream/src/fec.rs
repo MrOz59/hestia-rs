@@ -4,7 +4,8 @@
 //! nanors builds a systematic code from a Cauchy matrix: parity shard `j` is
 //! `sum_i C[j][i] * data_i` with `C[j][i] = 1 / ((ps + i) XOR j)` in the field
 //! with polynomial 0x11D. Any `ds` of the `ds + ps` shards recover the data;
-//! we do it by inverting the matrix formed by the rows of the shards we have.
+//! we remove the known data from the parity equations and solve only for the
+//! missing data shards.
 
 /// Maximum data + parity shards per block.
 pub const MAX_SHARDS: usize = 255;
@@ -137,53 +138,76 @@ pub fn reconstruct(
     if shards.len() != data_shards + parity_shards {
         return Err(FecError::BadShape);
     }
-    let missing: Vec<usize> = (0..data_shards).filter(|&i| shards[i].is_none()).collect();
+    let (data, parity) = shards.split_at_mut(data_shards);
+    let missing: Vec<usize> = (0..data_shards).filter(|&i| data[i].is_none()).collect();
     if missing.is_empty() {
         return Ok(());
     }
 
-    // Pick `ds` available shards: every present data shard plus enough parity.
-    let mut rows: Vec<usize> = (0..data_shards).filter(|&i| shards[i].is_some()).collect();
-    rows.extend(
-        (data_shards..data_shards + parity_shards)
-            .filter(|&k| shards[k].is_some())
-            .take(missing.len()),
-    );
-    if rows.len() < data_shards {
+    let available: Vec<_> = parity
+        .iter()
+        .enumerate()
+        .filter_map(|(j, shard)| shard.as_deref().map(|shard| (j, shard)))
+        .take(missing.len())
+        .collect();
+    if available.len() < missing.len() {
         return Err(FecError::NotEnoughShards);
     }
 
-    // Matrix A (ds x ds): row r is the encoding row of shard rows[r].
-    let n = data_shards;
-    let mut a = vec![0u8; n * n];
-    for (r, &k) in rows.iter().enumerate() {
-        if k < data_shards {
-            a[r * n + k] = 1;
-        } else {
-            for i in 0..n {
-                a[r * n + i] = cauchy(parity_shards, k - data_shards, i);
-            }
+    // One erasure needs only one parity equation. Scale the residual in its
+    // own buffer and keep it as the recovered shard.
+    if let ([index], [(j, shard)]) = (missing.as_slice(), available.as_slice()) {
+        let mut recovered = parity_residual(data, parity_shards, *j, shard, shard_len);
+        let scale = gf_inv(cauchy(parity_shards, *j, *index));
+        if scale != 1 {
+            recovered.iter_mut().for_each(|byte| *byte = gf_mul(*byte, scale));
         }
+        data[*index] = Some(recovered);
+        return Ok(());
     }
-    let inv = invert(&mut a, n)?;
 
-    // data_m = sum_r inv[m][r] * shard(rows[r])
-    let mut recovered = Vec::with_capacity(missing.len());
-    for &m in &missing {
-        let mut out = vec![0u8; shard_len];
-        for (r, &k) in rows.iter().enumerate() {
-            let coeff = inv[m * n + r];
-            if let Some(src) = &shards[k] {
-                let take = src.len().min(shard_len);
-                mul_add(&mut out[..take], &src[..take], coeff);
-            }
-        }
-        recovered.push((m, out));
+    // Each available parity shard gives an equation whose coefficients are
+    // the Cauchy columns of the missing data. The matrix is k × k for k
+    // erasures, even when the block contains hundreds of data shards.
+    let n = missing.len();
+    let mut matrix = Vec::with_capacity(n * n);
+    for &(j, _) in &available {
+        matrix.extend(missing.iter().map(|&i| cauchy(parity_shards, j, i)));
     }
-    for (m, out) in recovered {
-        shards[m] = Some(out);
+    let inverse = invert(&mut matrix, n)?;
+    let residuals: Vec<_> = available
+        .into_iter()
+        .map(|(j, shard)| parity_residual(data, parity_shards, j, shard, shard_len))
+        .collect();
+
+    for (&index, coefficients) in missing.iter().zip(inverse.chunks_exact(n)) {
+        let mut recovered = vec![0u8; shard_len];
+        for (residual, &coefficient) in residuals.iter().zip(coefficients) {
+            mul_add(&mut recovered, residual, coefficient);
+        }
+        data[index] = Some(recovered);
     }
     Ok(())
+}
+
+/// Removes known data contributions from a received parity shard. Short
+/// shards have implicit zero padding, as in the wire format.
+fn parity_residual(
+    data: &[Option<Vec<u8>>],
+    parity_shards: usize,
+    j: usize,
+    shard: &[u8],
+    shard_len: usize,
+) -> Vec<u8> {
+    let mut residual = vec![0u8; shard_len];
+    let parity_len = shard.len().min(shard_len);
+    residual[..parity_len].copy_from_slice(&shard[..parity_len]);
+    for (i, src) in data.iter().enumerate() {
+        if let Some(src) = src {
+            mul_add(&mut residual, src, cauchy(parity_shards, j, i));
+        }
+    }
+    residual
 }
 
 /// Gauss–Jordan inversion over GF(256). Consumes `a` as scratch space.
@@ -290,6 +314,31 @@ mod tests {
             for i in 0..ds {
                 assert_eq!(shards[i].as_ref().unwrap(), &original[i], "mask {mask:#b}, shard {i}");
             }
+        }
+    }
+
+    #[test]
+    fn recovers_zero_padded_tails_in_a_large_block() {
+        let (ds, ps, bs) = (192, 63, 1408);
+        let mut original = sample(ds, ps, bs);
+        for shard in &mut original[..ds] {
+            shard[bs - 17..].fill(0);
+        }
+        encode(&mut original, ds, ps).unwrap();
+
+        // The first parity shard is also absent. Recovery must work with
+        // later parity rows, both for one erasure and for several.
+        for missing in [&[ds - 1][..], &[0, 39, ds - 1][..]] {
+            let mut shards: Vec<_> = original.iter().map(|shard| Some(shard[..bs - 17].to_vec())).collect();
+            shards[ds] = None;
+            for &i in missing {
+                shards[i] = None;
+            }
+            reconstruct(&mut shards, ds, ps, bs).unwrap();
+            for &i in missing {
+                assert_eq!(shards[i].as_deref(), Some(original[i].as_slice()));
+            }
+            assert!(shards[ds].is_none());
         }
     }
 
