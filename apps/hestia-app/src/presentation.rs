@@ -1,9 +1,9 @@
 //! Slint and native renderer adapters for a stream's picture mailbox.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(target_os = "android")]
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use hestia_core::StreamSettings;
