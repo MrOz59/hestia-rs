@@ -918,6 +918,7 @@ export component SettingsPage inherits Rectangle {
                     }
                     SettingRow {
                         label: "Clipboard sync";
+                        hint: "Hermes hosts: what you copy on either side can be pasted on the other while streaming";
                         Switch {
                             checked <=> root.clipboard;
                         }

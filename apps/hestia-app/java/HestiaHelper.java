@@ -1,11 +1,15 @@
 package com.mroz59.hestia;
 
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipDescription;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
 import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
 import android.os.Build;
+import android.os.PersistableBundle;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.text.InputType;
@@ -235,5 +239,60 @@ public final class HestiaHelper {
                 }
             };
         }
+    }
+
+    // ---- Clipboard sync -------------------------------------------------
+
+    private static ClipboardManager clipboard(Activity activity) {
+        return (ClipboardManager) activity.getSystemService(Context.CLIPBOARD_SERVICE);
+    }
+
+    /**
+     * When the clipboard last changed (ms), without reading it: reading
+     * another app's clip shows a "pasted from your clipboard" notice on
+     * Android 12+, so the text is read only after this moves. 0: empty or
+     * not readable now (no focus); -1: unknown.
+     */
+    public static long clipboardStamp(Activity activity) {
+        ClipboardManager cm = clipboard(activity);
+        if (cm == null) {
+            return -1;
+        }
+        ClipDescription description = cm.getPrimaryClipDescription();
+        if (description == null) {
+            return 0;
+        }
+        return description.getTimestamp();
+    }
+
+    /** The clipboard as text, or null. */
+    public static String clipboardText(Activity activity) {
+        ClipboardManager cm = clipboard(activity);
+        if (cm == null || !cm.hasPrimaryClip()) {
+            return null;
+        }
+        ClipData clip = cm.getPrimaryClip();
+        if (clip == null || clip.getItemCount() == 0) {
+            return null;
+        }
+        CharSequence text = clip.getItemAt(0).coerceToText(activity);
+        return text == null ? null : text.toString();
+    }
+
+    /**
+     * Puts the host's text on the clipboard, marked as coming from another
+     * device: Android 13+ then skips its "copied" overlay for it.
+     */
+    public static void setClipboardText(Activity activity, String text) {
+        ClipboardManager cm = clipboard(activity);
+        if (cm == null) {
+            return;
+        }
+        ClipData clip = ClipData.newPlainText("Hestia RS", text);
+        PersistableBundle extras = new PersistableBundle();
+        // ClipDescription.EXTRA_IS_REMOTE_DEVICE (API 33), by value.
+        extras.putBoolean("android.content.extra.IS_REMOTE_DEVICE", true);
+        clip.getDescription().setExtras(extras);
+        cm.setPrimaryClip(clip);
     }
 }

@@ -19,6 +19,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use crate::AppWindow;
 use crate::{platform, view};
 
+mod clipboard;
 mod report;
 mod streaming;
 mod tools;
@@ -169,6 +170,10 @@ impl Controller {
         });
         let c = self.clone();
         ui.on_stream_toggle_pad(move || c.toggle_pad());
+        let c = self.clone();
+        ui.on_stream_clipboard_send(move || c.stream_clipboard_send());
+        let c = self.clone();
+        ui.on_stream_clipboard_fetch(move || c.stream_clipboard_fetch());
         let c = self.clone();
         ui.on_stream_toggle_zoom(move || c.toggle_zoom());
         let c = self.clone();

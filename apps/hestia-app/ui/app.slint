@@ -127,6 +127,9 @@ export component AppWindow inherits Window {
     in property <int> stream-touch-mode: 0;
     in-out property <bool> stream-menu-open: false;
     in property <bool> stream-pad-visible: false;
+    in property <bool> stream-clipboard: false;
+    callback stream-clipboard-send();
+    callback stream-clipboard-fetch();
     in property <[PadControl]> stream-pad-controls;
     in property <bool> stream-zoom-mode: false;
     in property <float> stream-zoom: 1;
@@ -341,6 +344,13 @@ export component AppWindow inherits Window {
             touch-mode: root.stream-touch-mode;
             menu-open <=> root.stream-menu-open;
             pad-visible: root.stream-pad-visible;
+            clipboard-actions: root.stream-clipboard;
+            clipboard-send => {
+                root.stream-clipboard-send();
+            }
+            clipboard-fetch => {
+                root.stream-clipboard-fetch();
+            }
             pad-controls: root.stream-pad-controls;
             zoom-mode: root.stream-zoom-mode;
             zoom: root.stream-zoom;
