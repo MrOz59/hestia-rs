@@ -53,7 +53,10 @@ slint = { workspace = true, features = ["renderer-software"] }
 android-build = "0.1.2"
 slint-build.workspace = true
 
-# Used by `cargo apk build -p hestia-app --lib`.
+# Used by `cargo apk build -p hestia-app --lib` for quick local arm64
+# builds. Release APKs (universal and per ABI, Android TV banner and
+# launcher entry) come from scripts/android-package.sh with
+# android/AndroidManifest.xml; keep the two in step.
 [package.metadata.android]
 package = "com.mroz59.hestia.rs"
 apk_name = "hestia-rs"
