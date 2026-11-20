@@ -200,21 +200,25 @@ any device, phones, tablets, Android TV and Chromebooks, or the smaller
 `hestia-rs-android-<abi>.apk`), a Linux tarball and `SHA256SUMS`. The release notes list the commits since the
 previous nightly; Settings → About in the app shows which commit a build is.
 
-So that each nightly APK installs over the previous one, CI signs it with a
-persistent key: the same `HESTIA_NIGHTLY_KEYSTORE_BASE64`,
-`HESTIA_NIGHTLY_STORE_PASSWORD`, `HESTIA_NIGHTLY_KEY_ALIAS` and
-`HESTIA_NIGHTLY_KEY_PASSWORD` secrets Hestia Android uses, or
-`ANDROID_KEYSTORE_BASE64` / `ANDROID_KEYSTORE_PASSWORD` (without either it
-falls back to a throwaway key per build):
+Published nightlies use the dedicated Hestia RS signing certificate. Configure
+`ANDROID_KEYSTORE_BASE64` and `ANDROID_KEYSTORE_PASSWORD` in the
+`MrOz59/hestia-rs` repository. Set `ANDROID_KEY_ALIAS` for a multi-key store
+and `ANDROID_KEY_PASSWORD` if the key password differs from the store password.
+The workflow also recognizes the complete legacy secret set in this repository
+and checks the certificate against the published Hestia RS certificate.
+Pull-request APKs use a temporary key for installation testing.
+
+For a new installation of this workflow in a fork, run these commands in your
+fork's checkout and set its certificate fingerprint in the workflow:
 
 ```sh
 keytool -genkeypair -keystore hestia-nightly.p12 -storetype PKCS12 -alias hestia \
     -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Hestia RS"
-base64 -w0 hestia-nightly.p12 | gh secret set ANDROID_KEYSTORE_BASE64 -R MrOz59/hestia-rs
-gh secret set ANDROID_KEYSTORE_PASSWORD -R MrOz59/hestia-rs   # the password typed above
+base64 -w0 hestia-nightly.p12 | gh secret set ANDROID_KEYSTORE_BASE64
+gh secret set ANDROID_KEYSTORE_PASSWORD   # the password typed above
 ```
 
-Keep the keystore somewhere safe: a different key means uninstalling once.
+Keep the Hestia RS keystore safe. Reuse it when updating the repository secrets.
 
 ## CLI
 

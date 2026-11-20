@@ -169,12 +169,8 @@ jobs:
           path: target/${{ matrix.target }}/release/libhestia_app.so
           if-no-files-found: error
 
-  # One universal APK with every ABI that built, plus one per ABI, all
-  # signed with the persistent key so nightlies install over each other:
-  # the HESTIA_NIGHTLY_* secrets Hestia Android uses (keystore base64, store
-  # password, key alias, key password), or ANDROID_KEYSTORE_BASE64 /
-  # ANDROID_KEYSTORE_PASSWORD. Without them a throwaway key is used
-  # (uninstall before installing).
+  # Publishable APKs use the Hestia RS certificate. Other CI builds are
+  # signed with a temporary key for installation testing.
   android-package:
     name: Android APKs
     needs: android
@@ -199,10 +195,14 @@ jobs:
 
       - name: Package APKs
         env:
-          KEYSTORE_B64: ${{ secrets.HESTIA_NIGHTLY_KEYSTORE_BASE64 || secrets.ANDROID_KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.HESTIA_NIGHTLY_STORE_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.HESTIA_NIGHTLY_KEY_ALIAS || secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.HESTIA_NIGHTLY_KEY_PASSWORD }}
+          RS_KEYSTORE_B64: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.ANDROID_KEYSTORE_BASE64 || '' }}
+          RS_STORE_PASSWORD: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.ANDROID_KEYSTORE_PASSWORD || '' }}
+          RS_KEY_ALIAS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.ANDROID_KEY_ALIAS || '' }}
+          RS_KEY_PASSWORD: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.ANDROID_KEY_PASSWORD || '' }}
+          LEGACY_KEYSTORE_B64: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.HESTIA_NIGHTLY_KEYSTORE_BASE64 || '' }}
+          LEGACY_STORE_PASSWORD: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.HESTIA_NIGHTLY_STORE_PASSWORD || '' }}
+          LEGACY_KEY_ALIAS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.HESTIA_NIGHTLY_KEY_ALIAS || '' }}
+          LEGACY_KEY_PASSWORD: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.HESTIA_NIGHTLY_KEY_PASSWORD || '' }}
         run: |
           mkdir -p jni
           for dir in libs/hestia-rs-android-lib-*; do
@@ -211,27 +211,32 @@ jobs:
           done
           ls -R jni
           keystore="$RUNNER_TEMP/release.keystore"
-          if [ -n "$KEYSTORE_B64" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
-            echo "$KEYSTORE_B64" | base64 -d > "$keystore"
-            export ANDROID_KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
-            [ -n "$KEY_ALIAS" ] && export ANDROID_KEY_ALIAS="$KEY_ALIAS"
-            [ -n "$KEY_PASSWORD" ] && export ANDROID_KEY_PASSWORD="$KEY_PASSWORD"
-            echo "signing with the persistent key"
+          trap 'rm -f "$keystore"' EXIT
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main ]]; then
+            if [[ -n "$RS_KEYSTORE_B64" && -n "$RS_STORE_PASSWORD" ]]; then
+              printf '%s' "$RS_KEYSTORE_B64" | base64 -d > "$keystore"
+              export ANDROID_KEYSTORE_PASSWORD="$RS_STORE_PASSWORD"
+              export ANDROID_KEY_ALIAS="$RS_KEY_ALIAS" ANDROID_KEY_PASSWORD="$RS_KEY_PASSWORD"
+            elif [[ -n "$LEGACY_KEYSTORE_B64" && -n "$LEGACY_STORE_PASSWORD" ]]; then
+              printf '%s' "$LEGACY_KEYSTORE_B64" | base64 -d > "$keystore"
+              export ANDROID_KEYSTORE_PASSWORD="$LEGACY_STORE_PASSWORD"
+              export ANDROID_KEY_ALIAS="$LEGACY_KEY_ALIAS" ANDROID_KEY_PASSWORD="$LEGACY_KEY_PASSWORD"
+            else
+              echo "::error::Configure the Hestia RS nightly signing key in this repository"
+              exit 1
+            fi
+            echo "signing with the persistent Hestia RS key"
           else
             keytool -genkeypair -keystore "$keystore" -storepass android -keypass android \
               -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Hestia RS CI"
             export ANDROID_KEYSTORE_PASSWORD=android
-            echo "::warning::no signing secrets (HESTIA_NIGHTLY_* or ANDROID_KEYSTORE_*): APKs signed with a throwaway key"
+            echo "signing CI artifacts with a temporary key"
           fi
           export ANDROID_KEYSTORE="$keystore"
           version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
           # Above what cargo-apk gave earlier nightlies, so they upgrade.
           code=$((1000000 + GITHUB_RUN_NUMBER))
-          set +e
           scripts/android-package.sh jni apks "$code" "$version-nightly.$GITHUB_RUN_NUMBER+${GITHUB_SHA::7}"
-          status=$?
-          rm -f "$keystore"
-          exit $status
 
       - name: Check the universal APK
         run: |
@@ -239,7 +244,17 @@ jobs:
           "$aapt2" dump badging apks/hestia-rs-android-universal.apk \
             | grep -E "^package|native-code|leanback|banner|uses-feature|launchable" || true
           unzip -l apks/hestia-rs-android-universal.apk | grep -E "lib/|AndroidManifest" 
-          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs apks/hestia-rs-android-universal.apk | head -3
+          apksigner="$ANDROID_HOME/build-tools/34.0.0/apksigner"
+          certificate=$("$apksigner" verify --print-certs apks/hestia-rs-android-universal.apk)
+          printf '%s\n' "$certificate" | sed -n '1,3p'
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main ]]; then
+            expected=a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
+            fingerprint=$(printf '%s\n' "$certificate" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+            if [[ "$fingerprint" != "$expected" ]]; then
+              echo "::error::APK signing certificate differs from the published Hestia RS certificate"
+              exit 1
+            fi
+          fi
 
       - uses: actions/upload-artifact@v4
         with:

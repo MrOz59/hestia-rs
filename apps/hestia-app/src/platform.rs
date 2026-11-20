@@ -841,6 +841,14 @@ mod controllers {
         }
     }
 
+    pub(super) fn dispatch(change: impl FnOnce(&mut Controllers) -> Option<GamepadState>) {
+        let mut controllers = state();
+        if active() {
+            // Queue this update before another device can reuse the slot.
+            send(change(&mut controllers));
+        }
+    }
+
     pub(super) fn active() -> bool {
         ACTIVE.load(Ordering::Relaxed)
     }
@@ -856,16 +864,22 @@ pub fn set_gamepad_sink(sink: impl Fn(hestia_core::stream::input::GamepadState) 
 /// and B button navigate the app as usual. Ending clears them and stops
 /// any rumble.
 pub fn set_gamepads_streaming(on: bool) {
+    let mut controllers = controllers::state();
     controllers::ACTIVE.store(on, std::sync::atomic::Ordering::Relaxed);
     if !on {
         let devices: Vec<i32> = (0..crate::gamepad::MAX_CONTROLLERS as u8)
-            .filter_map(|i| controllers::state().device_of(i))
+            .filter_map(|i| controllers.device_of(i))
             .collect();
-        controllers::state().reset();
+        controllers.reset();
+        drop(controllers);
         for device in devices {
             rumble_device(device, 0, 0);
         }
         rumble_device(-1, 0, 0);
+    }
+    #[cfg(target_os = "linux")]
+    if on {
+        crate::desktop_pads::stream_started();
     }
 }
 
@@ -873,17 +887,12 @@ pub fn set_gamepads_streaming(on: bool) {
 /// one, or a desktop controller. It takes a slot like a physical one;
 /// nothing is sent unless a stream runs.
 pub fn gamepad_state(device: i32, buttons: u32, left_stick: (i16, i16), right_stick: (i16, i16), triggers: (u8, u8)) {
-    if !controllers::active() {
-        return;
-    }
-    let update = controllers::state().set(device, buttons, left_stick, right_stick, triggers);
-    controllers::send(update);
+    controllers::dispatch(|controllers| controllers.set(device, buttons, left_stick, right_stick, triggers));
 }
 
 /// Controller `device` went away: release everything, free its slot.
 pub fn gamepad_gone(device: i32) {
-    gamepad_state(device, 0, (0, 0), (0, 0), (0, 0));
-    controllers::state().remove(device);
+    controllers::dispatch(|controllers| controllers.remove(device));
 }
 
 /// The on-screen controller's state.
@@ -958,8 +967,7 @@ pub fn android_input_hook(event: &i_slint_backend_android_activity::android_acti
             if pressed && key.repeat_count() > 0 {
                 return true;
             }
-            let update = controllers::state().key(key.device_id(), code, pressed);
-            controllers::send(update);
+            controllers::dispatch(|controllers| controllers.key(key.device_id(), code, pressed));
             true
         }
         InputEvent::MotionEvent(motion) => {
@@ -982,8 +990,7 @@ pub fn android_input_hook(event: &i_slint_backend_android_activity::android_acti
                 hat_x: p.axis_value(Axis::HatX),
                 hat_y: p.axis_value(Axis::HatY),
             };
-            let update = controllers::state().motion(motion.device_id(), axes);
-            controllers::send(update);
+            controllers::dispatch(|controllers| controllers.motion(motion.device_id(), axes));
             true
         }
         _ => false,

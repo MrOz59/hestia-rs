@@ -943,7 +943,7 @@ impl Controller {
     /// Touches on the on-screen controller; true when the pad took it.
     fn pad_event(self: &Shared, kind: i32, finger: i32, (x, y): (f32, f32)) -> bool {
         let now = Instant::now();
-        let (state, click) = {
+        let (state, click, generation) = {
             let mut guard = self.active_stream();
             let Some(active) = guard.as_mut() else { return false };
             if !active.pad_visible {
@@ -964,15 +964,20 @@ impl Controller {
             if !took {
                 return false;
             }
-            (active.pad.state(), active.pad.take_click())
+            (active.pad.state(), active.pad.take_click(), active.generation)
         };
         Self::send_pad(state, click);
         if click != 0 {
             // A stick tap clicks it: release shortly after.
             let c = self.clone();
             slint::Timer::single_shot(std::time::Duration::from_millis(60), move || {
-                if let Some(active) = c.active_stream().as_ref() {
-                    Self::send_pad(active.pad.state(), 0);
+                let state = c
+                    .active_stream()
+                    .as_ref()
+                    .filter(|active| active.generation == generation && active.pad_visible)
+                    .map(|active| active.pad.state());
+                if let Some(state) = state {
+                    Self::send_pad(state, 0);
                 }
             });
         }

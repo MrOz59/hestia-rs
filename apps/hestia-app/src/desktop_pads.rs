@@ -6,10 +6,12 @@
 //! kernel's force feedback (`FF_RUMBLE`).
 
 use std::fs::{File, OpenOptions};
-use std::os::fd::AsRawFd;
+use std::io;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use log::{debug, info};
@@ -22,6 +24,7 @@ const EV_KEY: u16 = 0x01;
 const EV_ABS: u16 = 0x03;
 const EV_FF: u16 = 0x15;
 const SYN_REPORT: u16 = 0;
+const SYN_DROPPED: u16 = 3;
 const FF_RUMBLE: u16 = 0x50;
 
 const RESCAN: Duration = Duration::from_secs(2);
@@ -59,6 +62,7 @@ struct Pad {
     layout: Layout,
     ranges: [Option<Range>; 0x20],
     state: PadState,
+    sync_lost: bool,
     sent: Option<(u32, (i16, i16), (i16, i16), (u8, u8))>,
     rumble: Option<i16>,
     can_rumble: bool,
@@ -66,6 +70,11 @@ struct Pad {
 
 /// Rumble requests from the stream, applied by the controller thread.
 static RUMBLE: Mutex<Vec<(i32, u16, u16)>> = Mutex::new(Vec::new());
+static STREAM_SERIAL: AtomicUsize = AtomicUsize::new(0);
+
+pub fn stream_started() {
+    STREAM_SERIAL.fetch_add(1, Ordering::Release);
+}
 
 /// The host asked controller `device` to rumble (-1: every controller).
 pub fn rumble(device: i32, low: u16, high: u16) {
@@ -77,6 +86,16 @@ pub fn rumble(device: i32, low: u16, high: u16) {
 
 fn has_bit(bits: &[u8], n: usize) -> bool {
     bits.get(n / 8).is_some_and(|b| b & (1 << (n % 8)) != 0)
+}
+
+fn abs_info(fd: RawFd, axis: u16) -> io::Result<libc::input_absinfo> {
+    // SAFETY: EVIOCGABS writes one input_absinfo to the provided buffer.
+    let mut info: libc::input_absinfo = unsafe { std::mem::zeroed() };
+    let request = ioc(IOC_READ, 0x40 + u64::from(axis), std::mem::size_of_val(&info));
+    if unsafe { libc::ioctl(fd, request as _, &mut info) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info)
 }
 
 impl Pad {
@@ -125,14 +144,7 @@ impl Pad {
             if !has_bit(&abs, usize::from(axis)) {
                 continue;
             }
-            // SAFETY: input_absinfo is plain old data; EVIOCGABS fills it.
-            let mut info: libc::input_absinfo = unsafe { std::mem::zeroed() };
-            let request = ioc(
-                IOC_READ,
-                0x40 + u64::from(axis),
-                std::mem::size_of::<libc::input_absinfo>(),
-            );
-            if unsafe { libc::ioctl(fd, request as _, &mut info) } == 0 {
+            if let Ok(info) = abs_info(fd, axis) {
                 ranges[usize::from(axis)] = Some((info.minimum, info.maximum));
             }
         }
@@ -148,12 +160,7 @@ impl Pad {
             )
         };
         let can_rumble = can_write && has_bit(&ff, usize::from(FF_RUMBLE));
-        info!(
-            "controller connected: {name} ({}){}",
-            path.display(),
-            if can_rumble { ", rumble" } else { "" }
-        );
-        Some(Self {
+        let mut pad = Self {
             file,
             path,
             name,
@@ -161,17 +168,53 @@ impl Pad {
             layout,
             ranges,
             state: PadState::default(),
+            sync_lost: false,
             sent: None,
             rumble: None,
             can_rumble,
-        })
+        };
+        if let Err(e) = pad.sync_state() {
+            debug!("controller state unavailable on {}: {e}", pad.path.display());
+            return None;
+        }
+        info!(
+            "controller connected: {} ({}){}",
+            pad.name,
+            pad.path.display(),
+            if can_rumble { ", rumble" } else { "" }
+        );
+        Some(pad)
+    }
+
+    /// EVIOCGKEY and EVIOCGABS report the current state, including releases
+    /// that may have been lost when the evdev queue overflowed.
+    fn sync_state(&mut self) -> io::Result<()> {
+        let fd = self.file.as_raw_fd();
+        let mut keys = [0u8; 0x300 / 8];
+        // SAFETY: EVIOCGKEY writes up to keys.len() bytes.
+        if unsafe { libc::ioctl(fd, ioc(IOC_READ, 0x18, keys.len()) as _, keys.as_mut_ptr()) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut state = PadState::default();
+        for code in padmap::BTN_SOUTH..=padmap::BTN_DPAD_RIGHT {
+            if has_bit(&keys, usize::from(code)) {
+                state.key(code, true);
+            }
+        }
+        for axis in padmap::AXES {
+            if let Some(range) = self.ranges[usize::from(axis)] {
+                state.axis(&self.layout, axis, abs_info(fd, axis)?.value, range);
+            }
+        }
+        self.state = state;
+        Ok(())
     }
 
     /// Reads what's pending; false once the device is gone.
     fn read(&mut self) -> bool {
         // SAFETY: input_event is plain old data.
         let mut events: [libc::input_event; 64] = unsafe { std::mem::zeroed() };
-        loop {
+        'read: loop {
             // SAFETY: reads whole input_event structs into the buffer.
             let n = unsafe {
                 libc::read(
@@ -189,6 +232,24 @@ impl Pad {
             }
             let count = n as usize / std::mem::size_of::<libc::input_event>();
             for e in &events[..count] {
+                if self.sync_lost {
+                    if e.type_ == EV_SYN && e.code == SYN_REPORT {
+                        match self.sync_state() {
+                            Ok(()) => {
+                                self.sync_lost = false;
+                                self.report();
+                            }
+                            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                            Err(e) => {
+                                debug!("controller resync failed on {}: {e}", self.path.display());
+                                return false;
+                            }
+                        }
+                        // The snapshot supersedes events already read in this batch.
+                        continue 'read;
+                    }
+                    continue;
+                }
                 match e.type_ {
                     EV_KEY => self.state.key(e.code, e.value != 0),
                     EV_ABS => {
@@ -196,6 +257,7 @@ impl Pad {
                             self.state.axis(&self.layout, e.code, e.value, *range);
                         }
                     }
+                    EV_SYN if e.code == SYN_DROPPED => self.sync_lost = true,
                     EV_SYN if e.code == SYN_REPORT => self.report(),
                     _ => {}
                 }
@@ -290,8 +352,9 @@ fn scan(pads: &mut Vec<Pad>, next_id: &mut i32) {
         if !is_event || pads.iter().any(|p| p.path == path) {
             continue;
         }
-        if let Some(pad) = Pad::open(path, *next_id) {
+        if let Some(mut pad) = Pad::open(path, *next_id) {
             *next_id += 1;
+            pad.report();
             pads.push(pad);
         }
     }
@@ -301,10 +364,19 @@ fn run() {
     let mut pads: Vec<Pad> = Vec::new();
     let mut next_id = 1;
     let mut scanned: Option<Instant> = None;
+    let mut stream_serial = STREAM_SERIAL.load(Ordering::Acquire);
     loop {
         if scanned.is_none_or(|at| at.elapsed() >= RESCAN) {
             scan(&mut pads, &mut next_id);
             scanned = Some(Instant::now());
+        }
+        let current_serial = STREAM_SERIAL.load(Ordering::Acquire);
+        if current_serial != stream_serial {
+            stream_serial = current_serial;
+            for pad in &mut pads {
+                pad.sent = None;
+                pad.report();
+            }
         }
         let requests = std::mem::take(&mut *RUMBLE.lock().unwrap_or_else(|p| p.into_inner()));
         for (device, low, high) in requests {
