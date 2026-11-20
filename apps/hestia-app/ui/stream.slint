@@ -493,7 +493,8 @@ export component StreamView inherits Rectangle {
 
     if root.show-stats && root.stats != "" && !root.keyboard-open: Rectangle {
         x: 12px;
-        y: 12px;
+        // Under the menu button when the controller puts it in the middle.
+        y: root.pad-visible && root.show-menu-button ? Theme.control-height + 20px : 12px;
         // Wraps on narrow screens instead of running under the menu button.
         property <length> max-w: root.width - 84px;
         width: Theme.compact ? self.max-w : Math.min(stats-text.preferred-width + 24px, self.max-w);

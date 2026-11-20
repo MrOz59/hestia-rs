@@ -52,19 +52,6 @@ jobs:
       - name: UI screenshots (headless, software renderer)
         run: cargo run --release -p hestia-app --example screenshots -- screenshots
 
-      # TEMPORARY (UI rework review): screenshots as base64 in the log.
-      - name: Screenshots in the log
-        run: |
-          for f in screenshots/*.png; do
-            out="$f"
-            if command -v ffmpeg >/dev/null; then
-              ffmpeg -loglevel error -y -i "$f" -vf "scale=trunc(iw*0.6/2)*2:-2" -q:v 3 /tmp/shot.jpg && out=/tmp/shot.jpg
-            fi
-            echo "BEGIN-SHOT $(basename "$f") ${out##*.}"
-            base64 -w 120 "$out"
-            echo "END-SHOT"
-          done
-
       - uses: actions/upload-artifact@v4
         with:
           name: hestia-rs-screenshots
