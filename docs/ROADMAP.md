@@ -46,7 +46,8 @@
       permissions, diagnostics (app and CLI)
 - [x] Session reports with every log line (share sheet / file / host clipboard)
 - [ ] Control-stream loss statistics to the host (adaptive bitrate)
-- [ ] Hermes clipboard sync during the stream
+- [x] Hermes clipboard sync during the stream (and one-off send / fetch)
+- [x] Named stream profiles, chosen per host
 
 ## Milestone 3 — polish
 

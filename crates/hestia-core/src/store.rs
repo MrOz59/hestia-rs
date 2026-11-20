@@ -86,6 +86,14 @@ impl Store {
     pub fn save_settings(&self, settings: &StreamSettings) -> io::Result<()> {
         self.write("settings.json", settings)
     }
+
+    pub fn load_profiles(&self) -> io::Result<Vec<crate::profiles::StreamProfile>> {
+        Ok(self.read("profiles.json")?.unwrap_or_default())
+    }
+
+    pub fn save_profiles(&self, profiles: &[crate::profiles::StreamProfile]) -> io::Result<()> {
+        self.write("profiles.json", &profiles)
+    }
 }
 
 #[cfg(unix)]

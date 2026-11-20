@@ -367,6 +367,10 @@ export component AppsPage inherits Rectangle {
     in property <bool> loading;
     in property <bool> app-running;
     in property <bool> hermes;
+    // "Settings" first, then the saved profiles; shown when there are any.
+    in property <[string]> profile-options;
+    in-out property <int> profile-index;
+    callback profile-chosen(int);
     callback back;
     callback launch(int);
     callback quit-app;
@@ -452,6 +456,31 @@ export component AppsPage inherits Rectangle {
                     text: chip;
                     tone: Theme.info;
                 }
+            }
+        }
+
+        // Which stream profile this host launches with.
+        if root.profile-options.length > 1: HorizontalLayout {
+            padding-left: root.pad;
+            padding-right: root.pad;
+            padding-bottom: 8px;
+            spacing: 10px;
+            Text {
+                text: "Stream profile";
+                color: Theme.muted;
+                font-size: 13px;
+                vertical-alignment: center;
+            }
+            ComboBox {
+                width: Math.min(240px, root.width - 2 * root.pad - 120px);
+                model: root.profile-options;
+                current-index <=> root.profile-index;
+                selected(value) => {
+                    root.profile-chosen(self.current-index);
+                }
+            }
+            Rectangle {
+                horizontal-stretch: 1;
             }
         }
 
@@ -733,6 +762,11 @@ export component SettingsPage inherits Rectangle {
     // 0 landscape, 1 portrait, 2 follow the device
     in-out property <int> orientation;
     callback custom-resolution(string);
+    in property <[string]> profile-names;
+    in-out property <int> profile-pick;
+    callback save-profile(string);
+    callback load-profile(int);
+    callback delete-profile(int);
     callback back;
     callback save;
     callback open-last-report;
@@ -783,6 +817,60 @@ export component SettingsPage inherits Rectangle {
                     padding-top: 8px;
                     padding-bottom: 32px;
                     spacing: Theme.compact ? 2px : 6px;
+
+                    SectionTitle {
+                        text: "Profiles";
+                    }
+                    SettingRow {
+                        label: "Save as profile";
+                        hint: "Keeps this page's video, audio and host settings under a name; choose it per host on the host's page";
+                        HorizontalLayout {
+                            spacing: 6px;
+                            width: root.picker-w;
+                            profile-name := LineEdit {
+                                placeholder-text: "Couch TV";
+                                accepted(text) => {
+                                    root.save-profile(text);
+                                    self.text = "";
+                                }
+                            }
+                            PillButton {
+                                text: "Save";
+                                clicked => {
+                                    root.save-profile(profile-name.text);
+                                    profile-name.text = "";
+                                }
+                            }
+                        }
+                    }
+                    if root.profile-names.length > 0: SettingRow {
+                        label: "Saved profiles";
+                        hint: "Load one into this page (then Save), or delete it";
+                        VerticalLayout {
+                            spacing: 6px;
+                            width: root.picker-w;
+                            ComboBox {
+                                model: root.profile-names;
+                                current-index <=> root.profile-pick;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                PillButton {
+                                    text: "Load";
+                                    clicked => {
+                                        root.load-profile(root.profile-pick);
+                                    }
+                                }
+                                PillButton {
+                                    text: "Delete";
+                                    danger: true;
+                                    clicked => {
+                                        root.delete-profile(root.profile-pick);
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     SectionTitle {
                         text: "Video";

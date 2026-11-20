@@ -13,6 +13,7 @@ pub mod address;
 pub mod diagnosis;
 pub mod logcapture;
 pub mod presets;
+pub mod profiles;
 pub mod report;
 pub mod settings;
 pub mod store;
@@ -84,6 +85,9 @@ pub struct HostRecord {
     pub manual: bool,
     /// Unix seconds of the last successful contact.
     pub last_seen: Option<u64>,
+    /// Stream profile this host launches with (by name); the regular
+    /// settings when unset or gone.
+    pub profile: Option<String>,
 }
 
 impl Default for HostRecord {
@@ -98,6 +102,7 @@ impl Default for HostRecord {
             mac: None,
             manual: false,
             last_seen: None,
+            profile: None,
         }
     }
 }
@@ -389,6 +394,7 @@ pub struct HestiaClient {
     identity: Arc<ClientIdentity>,
     hosts: Mutex<Vec<HostRecord>>,
     settings: Mutex<StreamSettings>,
+    profiles: Mutex<Vec<profiles::StreamProfile>>,
 }
 
 fn now_secs() -> u64 {
@@ -421,11 +427,16 @@ impl HestiaClient {
             warn!("ignoring unreadable settings: {e}");
             StreamSettings::default()
         });
+        let profiles = store.load_profiles().unwrap_or_else(|e| {
+            warn!("ignoring unreadable stream profiles: {e}");
+            Vec::new()
+        });
         Ok(Self {
             store,
             identity: Arc::new(identity),
             hosts: Mutex::new(hosts),
             settings: Mutex::new(settings),
+            profiles: Mutex::new(profiles),
         })
     }
 
@@ -449,6 +460,67 @@ impl HestiaClient {
         self.store.save_settings(&settings)?;
         *self.settings.lock().unwrap_or_else(|p| p.into_inner()) = settings;
         Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Stream profiles
+    // ------------------------------------------------------------------
+
+    fn lock_profiles(&self) -> std::sync::MutexGuard<'_, Vec<profiles::StreamProfile>> {
+        self.profiles.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Saved profiles, by name.
+    pub fn profiles(&self) -> Vec<profiles::StreamProfile> {
+        self.lock_profiles().clone()
+    }
+
+    /// Saves `settings`' quality side as profile `name` (replacing one of
+    /// that name). Returns the name as kept.
+    pub fn save_profile(&self, name: &str, settings: &StreamSettings) -> Result<String> {
+        let name = profiles::clean_name(name).ok_or_else(|| CoreError::Invalid("the profile needs a name".into()))?;
+        let mut list = self.lock_profiles();
+        profiles::upsert(&mut list, profiles::StreamProfile::from_settings(&name, settings));
+        self.store.save_profiles(&list)?;
+        Ok(name)
+    }
+
+    /// Deletes profile `name`; hosts set to it go back to the settings.
+    pub fn delete_profile(&self, name: &str) -> Result<()> {
+        {
+            let mut list = self.lock_profiles();
+            list.retain(|p| !p.name.eq_ignore_ascii_case(name));
+            self.store.save_profiles(&list)?;
+        }
+        self.update_hosts(|hosts| {
+            for h in hosts.iter_mut() {
+                if h.profile.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(name)) {
+                    h.profile = None;
+                }
+            }
+        })
+    }
+
+    /// Makes host `id` launch with profile `name` (None: the settings).
+    pub fn set_host_profile(&self, id: &str, name: Option<&str>) -> Result<()> {
+        let name = name.map(str::to_owned);
+        self.update_hosts(|hosts| {
+            if let Some(h) = hosts.iter_mut().find(|h| h.id == id) {
+                h.profile = name;
+            }
+        })
+    }
+
+    /// What host `id` launches with: its profile over the settings, and
+    /// the profile's name.
+    pub fn settings_for_host(&self, id: &str) -> (StreamSettings, Option<String>) {
+        let settings = self.settings();
+        let chosen = self.host(id).ok().and_then(|h| h.profile);
+        let list = self.lock_profiles();
+        match chosen.as_deref().and_then(|name| profiles::find(&list, name)) {
+            Some(profile) => (profile.apply(&settings), Some(profile.name.clone())),
+            None => (settings, None),
+        }
     }
 
     // ------------------------------------------------------------------

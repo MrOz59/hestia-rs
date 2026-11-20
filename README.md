@@ -79,6 +79,14 @@ server commands) when the host offers them.
   (720p30), computed from this device's display (EDID on Linux,
   `Display.Mode` on Android) with Hestia desktop's bitrate table. Editing
   resolution, frame rate or bitrate by hand switches to Custom.
+- **Stream profiles**: the settings page's video, audio and host options
+  saved under a name ("Couch TV", "Phone 720p"), loaded back or deleted;
+  each host can launch with one (its page → Stream profile), while touch,
+  orientation and decoding stay this device's.
+- **Clipboard sync** (Hermes, Settings → Clipboard sync): while streaming,
+  what's copied on either side can be pasted on the other; the stream menu
+  also sends or fetches it once. Android reads the clipboard only when it
+  changed (no repeated "pasted" notices); Linux uses wl-clipboard or xclip.
 - **Picture scale**: fit (bars), fill (crop) or stretch, in Settings and the
   stream menu.
 - **Live diagnosis**: every second the client works out whether the network,
