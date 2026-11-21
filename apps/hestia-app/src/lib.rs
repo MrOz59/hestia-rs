@@ -15,8 +15,10 @@ mod netroute;
 mod padmap;
 mod platform;
 mod presentation;
+mod stream_input;
 mod touch;
 mod typing;
+mod video_backend;
 mod view;
 mod virtual_pad;
 

@@ -19,8 +19,7 @@ use log::{info, warn};
 pub enum FrameBuffer {
     /// RGBA8, row-major, without padding.
     Rgba(Vec<u8>),
-    #[cfg(target_os = "android")]
-    Android(crate::gpu_video::GpuPicture),
+    Native(crate::native_picture::NativePicture),
 }
 
 /// The decoder hands its buffer and its timing to the presenter together.
@@ -54,15 +53,13 @@ impl DecodedFrame {
     pub fn rgba(&self) -> Option<&[u8]> {
         match &self.buffer {
             FrameBuffer::Rgba(data) => Some(data),
-            #[cfg(target_os = "android")]
-            FrameBuffer::Android(_) => None,
+            FrameBuffer::Native(_) => None,
         }
     }
 
     /// Keeps a CPU allocation for reuse without retaining a native buffer.
     pub fn discard_native(&mut self) {
-        #[cfg(target_os = "android")]
-        if matches!(self.buffer, FrameBuffer::Android(_)) {
+        if matches!(self.buffer, FrameBuffer::Native(_)) {
             self.buffer = FrameBuffer::Rgba(Vec::new());
         }
     }
@@ -76,8 +73,7 @@ impl DecodedFrame {
                 data.resize(width as usize * height as usize * 4, 0);
                 data
             }
-            #[cfg(target_os = "android")]
-            FrameBuffer::Android(_) => unreachable!("native output was discarded"),
+            FrameBuffer::Native(_) => unreachable!("native output was discarded"),
         }
     }
 }

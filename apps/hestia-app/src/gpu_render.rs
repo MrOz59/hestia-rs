@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use hestia_media::native_picture::NativePicture;
 use hestia_media::FrameBuffer;
 use hestia_media::gpu_video::GpuPicture;
 use log::{info, warn};
@@ -663,7 +664,7 @@ impl Renderer {
         let Some(gl) = self.gl.as_mut() else { return };
         let Some(presentation) = self.gpu.active() else { return };
         let Some(frame) = presentation.take_gpu() else { return };
-        let FrameBuffer::Android(picture) = frame.buffer else {
+        let FrameBuffer::Native(NativePicture::Android(picture)) = frame.buffer else {
             return;
         };
         let result = gl.draw(&picture).and_then(|draw| {

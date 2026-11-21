@@ -794,7 +794,7 @@ impl Controller {
                     info!("launching with stream profile “{name}”");
                     report::lock(&session_report).field("Settings", "profile", name);
                 }
-                let decoder = crate::presentation::StreamVideo::select(
+                let decoder = crate::video_backend::StreamVideo::select(
                     &settings,
                     #[cfg(target_os = "android")]
                     &c.gpu_window,
