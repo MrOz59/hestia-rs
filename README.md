@@ -34,6 +34,14 @@ Every push to `main` that passes CI replaces the **`nightly`** pre-release
 The release notes list the commits since the previous nightly; Settings →
 About in the app shows which commit a build is.
 
+Nightly APKs are always signed with the same certificate, so each one installs
+over the previous one. Its SHA-256 fingerprint, as `apksigner verify
+--print-certs` shows it:
+
+```
+a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
+```
+
 ## Features
 
 ### Hosts and pairing
@@ -119,7 +127,8 @@ About in the app shows which commit a build is.
 - **Presets**: Fast (≤1080p60), Balanced (native, ≤60 fps), Quality (native
   resolution and refresh, more bitrate) and Battery saver (720p30), computed
   from this device's display (EDID on Linux, `Display.Mode` on Android) with
-  Hestia desktop's bitrate table. Editing resolution, frame rate or bitrate
+  the bitrate table of [Hestia](https://github.com/MrOz59/Hestia), the
+  Moonlight-Qt-based desktop client. Editing resolution, frame rate or bitrate
   by hand switches to Custom; **custom resolution** takes any size (e.g.
   2560x1080).
 - Codec, bitrate, HDR, audio layout, virtual display, Gamescope session,
@@ -131,7 +140,7 @@ About in the app shows which commit a build is.
 ### Diagnostics
 
 - **Live diagnosis**: every second the client works out whether the network,
-  the decoder, the display or the host is the bottleneck (Hestia desktop's
+  the decoder, the display or the host is the bottleneck (Hestia's
   classifier). The overlay says which and how often it happened in the last
   five minutes; the report marks each bad second.
 - **Stream reports**: every session, including one that fails to start,
@@ -263,28 +272,6 @@ which has no prebuilt binaries for them), checks that each library has no
 unresolved C++ runtime symbols, packages them, and installs the universal
 APK on an Android 16 emulator, both fresh and over the previous nightly.
 
-### Signing (maintainers)
-
-Published nightlies use the dedicated Hestia RS signing certificate. Configure
-`ANDROID_KEYSTORE_BASE64` and `ANDROID_KEYSTORE_PASSWORD` in the
-`MrOz59/hestia-rs` repository. Set `ANDROID_KEY_ALIAS` for a multi-key store
-and `ANDROID_KEY_PASSWORD` if the key password differs from the store password.
-The workflow also recognizes the complete legacy secret set in this repository
-and checks the certificate against the published Hestia RS certificate.
-Pull-request APKs use a temporary key for installation testing.
-
-For a new installation of this workflow in a fork, run these commands in your
-fork's checkout and set its certificate fingerprint in the workflow:
-
-```sh
-keytool -genkeypair -keystore hestia-nightly.p12 -storetype PKCS12 -alias hestia \
-    -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Hestia RS"
-base64 -w0 hestia-nightly.p12 | gh secret set ANDROID_KEYSTORE_BASE64
-gh secret set ANDROID_KEYSTORE_PASSWORD   # the password typed above
-```
-
-Keep the Hestia RS keystore safe. Reuse it when updating the repository secrets.
-
 ## CLI
 
 ```sh
@@ -292,26 +279,26 @@ hestia identity                 # data dir, unique id, certificate fingerprint
 hestia discover [--seconds 3] [--save]   # scan the LAN (and remember what's found)
 hestia add 192.168.0.10         # add by address (IP or name, optionally :port)
 hestia list                     # known hosts
-hestia status cachy             # online/paired/codecs + Hermes capabilities
-hestia pair cachy               # prints a PIN; enter it in Hermes → PIN
-hestia pair cachy --otp 1234 --passphrase hunter2   # Hermes/Apollo OTP pairing
-hestia apps cachy
-hestia launch cachy Desktop --width 2560 --height 1440 --fps 120
-hestia stream cachy Desktop --width 1280 --height 720 --bitrate 20000 --audio   # headless stream + stats
-hestia stream cachy Desktop --snapshot frame.ppm --seconds 5     # save a decoded frame
-hestia stream cachy Desktop --dump capture --seconds 10          # raw capture.h264/.h265/.obu
-hestia stream cachy Desktop --count --quit                       # count frames, quit the app after
-hestia quit cachy
-hestia forget cachy             # forget the host locally
+hestia status mypc              # online/paired/codecs + Hermes capabilities
+hestia pair mypc                # prints a PIN; enter it in Hermes → PIN
+hestia pair mypc --otp 1234 --passphrase secret     # Hermes/Apollo OTP pairing
+hestia apps mypc
+hestia launch mypc Desktop --width 2560 --height 1440 --fps 120
+hestia stream mypc Desktop --width 1280 --height 720 --bitrate 20000 --audio    # headless stream + stats
+hestia stream mypc Desktop --snapshot frame.ppm --seconds 5      # save a decoded frame
+hestia stream mypc Desktop --dump capture --seconds 10           # raw capture.h264/.h265/.obu
+hestia stream mypc Desktop --count --quit                        # count frames, quit the app after
+hestia quit mypc
+hestia forget mypc              # forget the host locally
 # Hermes
-hestia diagnostics cachy        # diagnostics JSON
-hestia host-report cachy [-o FILE|-]   # full diagnostic report (default: data dir/reports)
-hestia permissions cachy        # this device's permissions
-hestia commands cachy           # server commands
-hestia run cachy "Restart Steam" [--yes]
-hestia clipboard cachy [--set "text"]
-hestia display cachy [--recover [--force]]
-hestia web cachy                # the web UI's address
+hestia diagnostics mypc         # diagnostics JSON
+hestia host-report mypc [-o FILE|-]    # full diagnostic report (default: data dir/reports)
+hestia permissions mypc         # this device's permissions
+hestia commands mypc            # server commands
+hestia run mypc "Restart Steam" [--yes]
+hestia clipboard mypc [--set "text"]
+hestia display mypc [--recover [--force]]
+hestia web mypc                 # the web UI's address
 ```
 
 The CLI and the GUI share the same data directory (`~/.local/share/hestia-rs`,

@@ -107,15 +107,14 @@ path, for comparison or to work around a driver.
 
 ## 5. Cost per 1080p frame (desktop)
 
-Measured on a 2.1 GHz Xeon (2 cores, AVX2) with an 18 Mbit/s 1080p60
-High-profile stream; a desktop CPU is faster, the proportions hold.
+Measured on a 2-core 2.1 GHz x86-64 CPU (AVX2) with an 18 Mbit/s 1080p60
+High-profile stream; a desktop CPU is faster, but the proportions hold.
 
-| Step | Before | Now |
+| Step | GPU colour (default) | CPU colour |
 | --- | --- | --- |
-| OpenH264 decode | 16 ms (C build, CI had no `nasm`) | 12 ms (SIMD) |
-| YUV → RGBA, decoder thread | 10 ms on one thread (~7 ms on two) | none (GPU colour); 1.6 ms on one thread when on the CPU |
-| Copy into a Slint image, UI thread | 8 MB copy | none (GPU colour) |
-| Texture upload, UI thread | 8 MB into a new texture every frame | 3 MB into persistent textures |
+| OpenH264 decode | 12 ms (16 ms without SIMD) | the same |
+| YUV → RGB | in the shader, while drawing | 1.6 ms on the decoder thread |
+| UI thread | 3 MB of planes into persistent textures | 8 MB copied into a Slint image, then uploaded into a new texture |
 
 At 1440p and 4K everything but decoding scales with the pixel count, so the
 GPU path matters even more there.

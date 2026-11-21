@@ -28,7 +28,8 @@ and video presentation.)
   no toolkit; Slint is a thin shell over it, so the toolkit can be swapped
   without touching the app ([FRONTENDS.md](FRONTENDS.md)).
 - **Optional Hermes.** Every Hermes extension is probed first and falls back to
-  plain GameStream behaviour, like Hestia does.
+  plain GameStream behaviour, like [Hestia](https://github.com/MrOz59/Hestia)
+  (the desktop client) does.
 - **Swappable media.** Streaming produces `EncodedFrame`s and Opus packets into
   `VideoSink` / `AudioSink` traits. Decoding produces a `DecodedFrame` that
   owns its CPU or native GPU buffer until presentation.
