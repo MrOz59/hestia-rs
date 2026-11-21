@@ -390,11 +390,19 @@ mod tests {
         let mut events = absolute_pointer(0, 0, (-5.0, 150.0), (200.0, 100.0), true);
         assert!(matches!(
             events.next(),
-            Some(InputEvent::MousePosition { x: 0, y: 99, width: 200, height: 100 })
+            Some(InputEvent::MousePosition {
+                x: 0,
+                y: 99,
+                width: 200,
+                height: 100
+            })
         ));
         assert!(matches!(
             events.next(),
-            Some(InputEvent::MouseButton { button: MouseButton::Left, pressed: true })
+            Some(InputEvent::MouseButton {
+                button: MouseButton::Left,
+                pressed: true
+            })
         ));
         assert!(events.next().is_none());
         assert!(absolute_pointer(0, 1, (0.0, 0.0), (0.0, 0.0), false).next().is_none());

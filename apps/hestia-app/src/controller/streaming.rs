@@ -600,7 +600,13 @@ impl Controller {
             return self.trackpad_event(kind, x, y, width);
         }
         if let Some(active) = self.active_stream().as_ref() {
-            active.send(stream_input::absolute_pointer(kind, button, (x, y), (width, height), touch));
+            active.send(stream_input::absolute_pointer(
+                kind,
+                button,
+                (x, y),
+                (width, height),
+                touch,
+            ));
         }
     }
 
@@ -610,7 +616,9 @@ impl Controller {
             let Some(ActiveStream { input, session, .. }) = guard.as_mut() else {
                 return false;
             };
-            input.multi_finger(kind, finger, point, picture, Instant::now(), |event| session.send_input(&event))
+            input.multi_finger(kind, finger, point, picture, Instant::now(), |event| {
+                session.send_input(&event)
+            })
         };
         match action {
             GestureAction::Pointer => return false,
@@ -752,7 +760,13 @@ impl Controller {
 
     fn trackpad_event(self: &Shared, kind: i32, x: f32, y: f32, video_width: f32) {
         let mut guard = self.active_stream();
-        let Some(ActiveStream { input, session, generation, .. }) = guard.as_mut() else {
+        let Some(ActiveStream {
+            input,
+            session,
+            generation,
+            ..
+        }) = guard.as_mut()
+        else {
             return;
         };
         if let Some(touch_id) = input.trackpad_event(kind, (x, y), video_width, Instant::now(), |event| {
@@ -760,13 +774,17 @@ impl Controller {
         }) {
             let generation = *generation;
             let c = self.clone();
-            slint::Timer::single_shot(crate::touch::LONG_PRESS, move || c.trackpad_long_press(generation, touch_id));
+            slint::Timer::single_shot(crate::touch::LONG_PRESS, move || {
+                c.trackpad_long_press(generation, touch_id)
+            });
         }
     }
 
     fn trackpad_long_press(&self, generation: u64, touch_id: u64) {
         let mut guard = self.active_stream();
-        let Some(active) = guard.as_mut().filter(|active| active.generation == generation) else { return };
+        let Some(active) = guard.as_mut().filter(|active| active.generation == generation) else {
+            return;
+        };
         let ActiveStream { input, session, .. } = active;
         input.long_press(touch_id, Instant::now(), |event| session.send_input(&event));
     }

@@ -4,11 +4,11 @@
 use std::sync::Arc;
 
 use hestia_core::StreamSettings;
-use hestia_media::{Colorimetry, DecoderChoice};
 #[cfg(target_os = "android")]
 use hestia_media::gpu_video::GpuOutput;
 #[cfg(target_os = "android")]
 use hestia_media::video_decoder::{probe_android_decoder, select_decoder};
+use hestia_media::{Colorimetry, DecoderChoice};
 
 #[cfg(target_os = "android")]
 use crate::presentation::GpuWindow;

@@ -20,9 +20,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use hestia_media::native_picture::NativePicture;
 use hestia_media::FrameBuffer;
 use hestia_media::gpu_video::GpuPicture;
+use hestia_media::native_picture::NativePicture;
 use log::{info, warn};
 use slint::{ComponentHandle, GraphicsAPI, RenderingState};
 
