@@ -1,9 +1,14 @@
-//! Glue between the Slint window and `hestia-core`.
+//! The app's logic between the screen and `hestia-core`, without a toolkit.
 //!
-//! Rules: callbacks run on the UI thread and must never block, so every core
+//! The public methods are the user's intents (open a host, launch an app,
+//! a key in the stream…); a UI shell calls them from its callbacks. Results
+//! reach the screen through the [`UiHandle`] port as closures over a
+//! [`View`].
+//!
+//! Rules: intents run on the UI thread and must never block, so every core
 //! call goes to a worker thread; results come back through
-//! `upgrade_in_event_loop`. Shared state sits behind one mutex that is never
-//! held across network calls.
+//! [`Controller::ui`]. Shared state sits behind one mutex that is never held
+//! across network calls.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -14,9 +19,9 @@ use std::time::Duration;
 use hestia_core::nvhttp::{AppInfo, PairingOutcome, PairingPin};
 use hestia_core::{DeviceInfo, HestiaClient, HostSnapshot, Preset, presets};
 use log::{info, warn};
-use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
-use crate::AppWindow;
+use crate::presentation::GpuWindow;
+use crate::ui::{Art, Screen, UiHandle, View};
 use crate::{platform, view};
 
 mod clipboard;
@@ -46,21 +51,23 @@ struct State {
 }
 
 pub struct Controller {
-    weak: Mutex<slint::Weak<AppWindow>>,
+    /// The UI shell's side of the port.
+    handle: Arc<dyn UiHandle>,
     core: OnceLock<Arc<HestiaClient>>,
     state: Mutex<State>,
     stream: Mutex<Option<streaming::ActiveStream>>,
     stream_generation: AtomicU64,
     /// The window's GPU video renderer (Android zero-copy, desktop colour
     /// conversion) and the stream it draws.
-    gpu_window: Arc<crate::presentation::GpuWindow>,
+    gpu_window: Arc<GpuWindow>,
     /// What a finger does in the stream (`TouchMode` index; persisted).
     touch_mode: AtomicU8,
     /// The report screen's content.
     last_report: Mutex<Option<report::LastReport>>,
 }
 
-type Shared = Arc<Controller>;
+/// The controller is shared by the shell's callbacks and its worker threads.
+pub type Shared = Arc<Controller>;
 
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
     if let Err(e) = std::thread::Builder::new().name(name.into()).spawn(f) {
@@ -69,14 +76,11 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
 }
 
 impl Controller {
-    pub fn new(ui: &AppWindow) -> Shared {
-        let gpu_window = Arc::new(crate::presentation::GpuWindow::default());
-        #[cfg(target_os = "android")]
-        crate::gpu_render::install(ui, gpu_window.clone());
-        #[cfg(not(target_os = "android"))]
-        crate::gl_video::install(ui, gpu_window.clone());
+    /// `handle` reaches the shell's window; `gpu_window` is the window's GPU
+    /// video renderer (the shell installs it, see `presentation`).
+    pub fn new(handle: Arc<dyn UiHandle>, gpu_window: Arc<GpuWindow>) -> Shared {
         Arc::new(Self {
-            weak: Mutex::new(ui.as_weak()),
+            handle,
             core: OnceLock::new(),
             state: Mutex::new(State::default()),
             stream: Mutex::new(None),
@@ -95,169 +99,83 @@ impl Controller {
         self.core.get().cloned()
     }
 
-    /// Runs `f` on the UI thread.
-    fn ui(&self, f: impl FnOnce(AppWindow) + Send + 'static) {
-        let weak = self.weak.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let _ = weak.upgrade_in_event_loop(f);
+    /// Runs `f` on the UI thread, with the window's view.
+    fn ui(&self, f: impl FnOnce(&dyn View) + Send + 'static) {
+        self.handle.run(Box::new(f));
+    }
+
+    /// Like [`Controller::ui`], once `delay` has passed.
+    fn ui_after(&self, delay: Duration, f: impl FnOnce(&dyn View) + Send + 'static) {
+        self.handle.run_after(delay, Box::new(f));
+    }
+
+    /// The UI port, for the video presenter.
+    pub(crate) fn handle(&self) -> Arc<dyn UiHandle> {
+        self.handle.clone()
     }
 
     fn toast(self: &Shared, message: impl Into<String>) {
-        let message: SharedString = message.into().into();
-        self.ui(move |ui| {
-            ui.set_toast(message.clone());
-            let weak = ui.as_weak();
-            slint::Timer::single_shot(Duration::from_secs(4), move || {
-                if let Some(ui) = weak.upgrade() {
-                    if ui.get_toast() == message {
-                        ui.set_toast(SharedString::new());
-                    }
-                }
-            });
+        let message: String = message.into();
+        let shown = message.clone();
+        self.ui(move |ui| ui.set_toast(shown));
+        self.ui_after(Duration::from_secs(4), move |ui| {
+            if ui.toast() == message {
+                ui.set_toast(String::new());
+            }
         });
     }
 
     // ------------------------------------------------------------------
-    // Wiring
+    // Navigation
     // ------------------------------------------------------------------
 
-    pub fn wire(self: &Shared, ui: &AppWindow) {
-        let c = self.clone();
-        ui.on_refresh_hosts(move || c.refresh_all(true));
-        let c = self.clone();
-        ui.on_open_host(move |id| c.open_host(id.to_string()));
-        let c = self.clone();
-        ui.on_add_host(move |address| c.add_host(address.to_string()));
+    /// Back from the apps page to the hosts.
+    pub fn back_to_hosts(self: &Shared) {
+        self.state().current_host = None;
+        self.ui(|ui| ui.set_screen(Screen::Hosts));
+        self.push_hosts();
+    }
 
-        let c = self.clone();
-        ui.on_pair_retry(move || c.restart_pairing());
-        let c = self.clone();
-        ui.on_pair_use_otp(move || c.switch_to_otp());
-        let c = self.clone();
-        ui.on_pair_submit_otp(move |pin, pass| c.submit_otp(pin.to_string(), pass.to_string()));
-        let c = self.clone();
-        ui.on_pair_cancel(move || c.cancel_pairing());
+    /// Back from the launch, stream report or tools pages to the apps.
+    pub fn back_to_apps(self: &Shared) {
+        // While starting, "back" means cancel.
+        if self.cancel_launch() {
+            return;
+        }
+        // The report screen can be opened from Settings with no host open.
+        let screen = if self.state().current_host.is_some() {
+            Screen::Apps
+        } else {
+            Screen::Hosts
+        };
+        self.ui(move |ui| ui.set_screen(screen));
+        self.refresh_current_running();
+    }
 
-        let c = self.clone();
-        ui.on_launch_app(move |app_id| c.launch(app_id.max(0) as u32));
-        let c = self.clone();
-        ui.on_quit_app(move || c.quit_app());
-        let c = self.clone();
-        ui.on_forget_host(move || c.forget_current());
-        let c = self.clone();
-        ui.on_back_to_hosts(move || {
-            c.state().current_host = None;
-            c.ui(|ui| ui.set_screen(0));
-            c.push_hosts();
-        });
-        let c = self.clone();
-        ui.on_back_to_apps(move || {
-            // While starting, "back" means cancel.
-            if c.cancel_launch() {
-                return;
-            }
-            // The report screen can be opened from Settings with no host open.
-            let screen = if c.state().current_host.is_some() { 1 } else { 0 };
-            c.ui(move |ui| ui.set_screen(screen));
-            c.refresh_current_running();
-        });
-        let c = self.clone();
-        ui.on_report_export(move || c.report_export());
-        let c = self.clone();
-        ui.on_report_send_to_host(move || c.report_send_to_host());
-        let c = self.clone();
-        ui.on_open_last_report(move || c.open_last_report());
-        let c = self.clone();
-        ui.on_open_app_log(move || c.open_app_log());
-
-        let c = self.clone();
-        ui.on_stream_key(move |text, pressed, repeat, ctrl, alt, shift, meta| {
-            let modifiers = hestia_core::stream::input::Modifiers { shift, ctrl, alt, meta };
-            c.stream_key(&text, pressed, repeat, modifiers);
-        });
-        let c = self.clone();
-        ui.on_stream_pointer(move |kind, button, x, y, w, h, finger, sx, sy| {
-            c.stream_pointer(kind, button, (x, y), (w, h), finger, (sx, sy))
-        });
-        let c = self.clone();
-        ui.on_stream_toggle_pad(move || c.toggle_pad());
-        let c = self.clone();
-        ui.on_stream_clipboard_send(move || c.stream_clipboard_send());
-        let c = self.clone();
-        ui.on_stream_clipboard_fetch(move || c.stream_clipboard_fetch());
-        let c = self.clone();
-        ui.on_stream_toggle_zoom(move || c.toggle_zoom());
-        let c = self.clone();
-        ui.on_stream_view_size(move |w, h| c.stream_view_size(w, h));
-        let c = self.clone();
-        ui.on_settings_custom_resolution(move |text| c.custom_resolution(&text));
-        let c = self.clone();
-        ui.on_stream_scroll(move |dx, dy| c.stream_scroll(dx, dy));
-        ui.on_stream_keyboard(platform::set_keyboard_visible);
-        ui.set_stream_soft_keyboard(platform::has_soft_keyboard());
-        let c = self.clone();
-        platform::set_ime_sink(move |event| c.stream_ime(event));
-        let c = self.clone();
-        platform::set_gamepad_sink(move |state| c.stream_gamepad(state));
-        let c = self.clone();
-        ui.on_stream_special_key(move |name| c.stream_special_key(&name));
-        let c = self.clone();
-        ui.on_stream_cycle_touch_mode(move || c.cycle_touch_mode());
-        let c = self.clone();
-        ui.on_stream_request_keyframe(move || c.request_keyframe());
-        let c = self.clone();
-        ui.on_stream_toggle_fullscreen(move || c.toggle_fullscreen());
-        let c = self.clone();
-        ui.on_stream_disconnect(move || c.end_stream(None, None, false));
-        let c = self.clone();
-        ui.on_stream_quit(move || c.end_stream(None, None, true));
-
-        let c = self.clone();
-        ui.on_open_tools(move || c.open_tools());
-        let c = self.clone();
-        ui.on_tools_refresh(move || c.tools_refresh());
-        let c = self.clone();
-        ui.on_tools_recover_display(move || c.tools_recover_display());
-        let c = self.clone();
-        ui.on_tools_run_command(move |id| c.tools_run_command(id));
-        let c = self.clone();
-        ui.on_tools_send_clipboard(move |text| c.tools_send_clipboard(text.to_string()));
-        let c = self.clone();
-        ui.on_tools_fetch_clipboard(move || c.tools_fetch_clipboard());
-        let c = self.clone();
-        ui.on_tools_open_web_ui(move || c.tools_open_web_ui());
-        let c = self.clone();
-        ui.on_tools_host_report(move || c.tools_host_report());
-
-        let c = self.clone();
-        ui.on_open_settings(move || {
-            if let Some(core) = c.core() {
-                let settings = core.settings();
-                c.ui(move |ui| view::load_settings_into(&ui, &settings, platform::native_display()));
-                c.push_profiles();
-            }
-        });
-        ui.on_form_navigation_changed(platform::set_form_navigation);
-        let c = self.clone();
-        ui.on_settings_save_profile(move |name| c.save_profile(&name));
-        let c = self.clone();
-        ui.on_settings_load_profile(move |index| c.load_profile(index));
-        let c = self.clone();
-        ui.on_settings_delete_profile(move |index| c.delete_profile(index));
-        let c = self.clone();
-        ui.on_apps_profile_chosen(move |index| c.choose_host_profile(index));
-        let c = self.clone();
-        ui.on_save_settings(move || c.save_settings());
-        let c = self.clone();
-        ui.on_settings_preset_changed(move |index| c.apply_preset(index));
-        let c = self.clone();
-        ui.on_stream_cycle_scale(move || c.cycle_video_scale());
+    /// The settings page opened: load the saved settings into its form.
+    pub fn open_settings(self: &Shared) {
+        if let Some(core) = self.core() {
+            let settings = core.settings();
+            self.ui(move |ui| view::load_settings_into(ui, &settings, platform::native_display()));
+            self.push_profiles();
+        }
     }
 
     // ------------------------------------------------------------------
     // Startup
     // ------------------------------------------------------------------
 
+    /// Opens the core (identity, hosts, settings) from `data_dir` on a worker
+    /// thread, fills the screens and starts host discovery. Call once, after
+    /// the shell is ready to run [`UiHandle`] tasks.
     pub fn start(self: &Shared, data_dir: PathBuf) {
+        // Keyboard text and game controllers reach the stream from the
+        // platform layer, not from the toolkit.
+        let c = self.clone();
+        platform::set_ime_sink(move |event| c.stream_ime(event));
+        let c = self.clone();
+        platform::set_gamepad_sink(move |state| c.stream_gamepad(state));
+        self.ui(|ui| ui.set_stream_soft_keyboard(platform::has_soft_keyboard()));
         let c = self.clone();
         spawn("hestia-init", move || {
             c.ui(|ui| ui.set_starting_text("Loading this device's identity…".into()));
@@ -283,7 +201,7 @@ impl Controller {
             let client_id = core.identity().unique_id().to_owned();
             let dir = core.data_dir().display().to_string();
             c.ui(move |ui| {
-                view::load_settings_into(&ui, &settings, platform::native_display());
+                view::load_settings_into(ui, &settings, platform::native_display());
                 ui.set_stream_touch_mode(settings.touch().index());
                 ui.set_version_text(view::version_text().into());
                 ui.set_client_id(client_id.into());
@@ -350,10 +268,12 @@ impl Controller {
                 .map(|r| view::host_card(r, st.snapshots.get(&r.id), st.checking.contains(&r.id)))
                 .collect()
         };
-        self.ui(move |ui| ui.set_hosts(ModelRc::new(VecModel::from(cards))));
+        self.ui(move |ui| ui.set_hosts(cards));
     }
 
-    fn refresh_all(self: &Shared, scan_indicator: bool) {
+    /// Checks every known host again (`scan_indicator`: show the scanning
+    /// spinner for a moment, as for a pull to refresh).
+    pub fn refresh_all(self: &Shared, scan_indicator: bool) {
         let Some(core) = self.core() else { return };
         if scan_indicator {
             self.set_scanning_for(Duration::from_secs(3));
@@ -389,14 +309,15 @@ impl Controller {
         });
     }
 
-    fn add_host(self: &Shared, address: String) {
+    /// Adds a host by IP address or name.
+    pub fn add_host(self: &Shared, address: String) {
         let address = address.trim().to_owned();
         if address.is_empty() {
             return;
         }
         self.ui(|ui| {
             ui.set_add_busy(true);
-            ui.set_add_error(SharedString::new());
+            ui.set_add_error(String::new());
         });
         let c = self.clone();
         spawn("hestia-add", move || {
@@ -408,7 +329,7 @@ impl Controller {
                     c.ui(|ui| {
                         ui.set_add_busy(false);
                         ui.set_add_visible(false);
-                        ui.set_add_address(SharedString::new());
+                        ui.set_add_address(String::new());
                     });
                     c.toast(format!("Added {name}"));
                 }
@@ -424,7 +345,8 @@ impl Controller {
         });
     }
 
-    fn open_host(self: &Shared, id: String) {
+    /// A host card tapped: its apps, pairing, or Wake-on-LAN.
+    pub fn open_host(self: &Shared, id: String) {
         let Some(core) = self.core() else { return };
         let Ok(record) = core.host(&id) else { return };
         let snapshot = self.state().snapshots.get(&id).cloned();
@@ -468,7 +390,8 @@ impl Controller {
         });
     }
 
-    fn forget_current(self: &Shared) {
+    /// Forgets the open host (its pairing too).
+    pub fn forget_current(self: &Shared) {
         let Some(core) = self.core() else { return };
         let Some(id) = self.state().current_host.take() else {
             return;
@@ -479,7 +402,7 @@ impl Controller {
             return;
         }
         self.state().snapshots.remove(&id);
-        self.ui(|ui| ui.set_screen(0));
+        self.ui(|ui| ui.set_screen(Screen::Hosts));
         self.push_hosts();
         self.toast(format!("Forgot {name}. Remove this device in the host's web UI too."));
     }
@@ -496,7 +419,7 @@ impl Controller {
             st.pair_generation
         };
         let pin = PairingPin::random();
-        let pin_text: SharedString = pin.as_str().into();
+        let pin_text = pin.as_str().to_owned();
         self.ui(move |ui| {
             ui.set_pair_host_name(name.into());
             ui.set_pair_pin(pin_text);
@@ -563,7 +486,8 @@ impl Controller {
         });
     }
 
-    fn restart_pairing(self: &Shared) {
+    /// Pairing failed: try again with a new PIN.
+    pub fn restart_pairing(self: &Shared) {
         let Some(core) = self.core() else { return };
         let Some(id) = self.state().pairing_host.clone() else {
             return;
@@ -572,7 +496,8 @@ impl Controller {
         self.start_pairing(id, name);
     }
 
-    fn switch_to_otp(self: &Shared) {
+    /// Pair with a PIN and passphrase shown by the host (Hermes, Apollo).
+    pub fn switch_to_otp(self: &Shared) {
         let Some(id) = self.state().pairing_host.clone() else {
             return;
         };
@@ -581,7 +506,7 @@ impl Controller {
             ui.set_pair_otp_mode(true);
             ui.set_pair_busy(false);
             ui.set_pair_failed(false);
-            ui.set_pair_status(SharedString::new());
+            ui.set_pair_status(String::new());
         });
         // Drop the pending client-PIN attempt on the host.
         let c = self.clone();
@@ -592,7 +517,8 @@ impl Controller {
         });
     }
 
-    fn submit_otp(self: &Shared, pin: String, passphrase: String) {
+    /// The PIN and passphrase the host showed.
+    pub fn submit_otp(self: &Shared, pin: String, passphrase: String) {
         let Some(pin) = PairingPin::parse(&pin) else {
             self.ui(|ui| {
                 ui.set_pair_failed(true);
@@ -614,7 +540,7 @@ impl Controller {
         self.run_pairing(id, generation, pin, Some(passphrase.trim().to_owned()));
     }
 
-    fn cancel_pairing(self: &Shared) {
+    pub fn cancel_pairing(self: &Shared) {
         let id = {
             let mut st = self.state();
             st.pair_generation += 1;
@@ -622,8 +548,8 @@ impl Controller {
         };
         self.ui(|ui| {
             ui.set_pair_visible(false);
-            ui.set_otp_pin(SharedString::new());
-            ui.set_otp_passphrase(SharedString::new());
+            ui.set_otp_pin(String::new());
+            ui.set_otp_passphrase(String::new());
         });
         if let Some(id) = id {
             let c = self.clone();
@@ -642,7 +568,7 @@ impl Controller {
     fn show_apps(self: &Shared, snapshot: HostSnapshot) {
         let id = snapshot.record.id.clone();
         self.state().current_host = Some(id.clone());
-        let name: SharedString = snapshot.record.name.as_str().into();
+        let name = snapshot.record.name.clone();
         let detail = match &snapshot.info {
             Some(info) => format!("{} · {}", snapshot.record.address, info.app_version),
             None => snapshot.record.address.clone(),
@@ -654,11 +580,11 @@ impl Controller {
             ui.set_host_hermes(hermes);
             ui.set_host_name(name);
             ui.set_host_detail(detail.into());
-            ui.set_host_chips(ModelRc::new(VecModel::from(chips)));
-            ui.set_apps(ModelRc::new(VecModel::from(Vec::new())));
+            ui.set_host_chips(chips);
+            ui.set_apps(Vec::new());
             ui.set_apps_loading(true);
             ui.set_app_running(running);
-            ui.set_screen(1);
+            ui.set_screen(Screen::Apps);
         });
         self.push_profiles();
 
@@ -675,11 +601,9 @@ impl Controller {
                 }
             };
             c.state().apps = apps.clone();
-            let for_ui = apps.clone();
+            let cards: Vec<_> = apps.iter().map(|a| view::app_card(a, running_app)).collect();
             c.ui(move |ui| {
-                // Cards hold a slint::Image (not Send), so build them here.
-                let cards: Vec<_> = for_ui.iter().map(|a| view::app_card(a, running_app)).collect();
-                ui.set_apps(ModelRc::new(VecModel::from(cards)));
+                ui.set_apps(cards);
                 ui.set_apps_loading(false);
             });
 
@@ -692,16 +616,12 @@ impl Controller {
                     continue;
                 };
                 let app_id = app.id as i32;
-                c.ui(move |ui| {
-                    let model = ui.get_apps();
-                    if let Some(mut card) = model.row_data(index) {
-                        if card.id == app_id {
-                            card.art = view::art_image(&raw, w, h);
-                            card.has_art = true;
-                            model.set_row_data(index, card);
-                        }
-                    }
-                });
+                let art = Art {
+                    rgba: raw.into(),
+                    width: w,
+                    height: h,
+                };
+                c.ui(move |ui| ui.set_app_art(index, app_id, art));
             }
         });
     }
@@ -719,22 +639,14 @@ impl Controller {
             c.state().snapshots.insert(snapshot.record.id.clone(), snapshot);
             c.ui(move |ui| {
                 ui.set_app_running(running_app != 0);
-                let model = ui.get_apps();
-                for i in 0..model.row_count() {
-                    if let Some(mut card) = model.row_data(i) {
-                        let running = running_app != 0 && card.id as u32 == running_app;
-                        if card.running != running {
-                            card.running = running;
-                            model.set_row_data(i, card);
-                        }
-                    }
-                }
+                ui.set_running_app(running_app);
             });
             c.push_hosts();
         });
     }
 
-    fn launch(self: &Shared, app_id: u32) {
+    /// Starts (or resumes) an app on the open host and streams it.
+    pub fn launch(self: &Shared, app_id: u32) {
         let Some(id) = self.state().current_host.clone() else {
             return;
         };
@@ -768,21 +680,21 @@ impl Controller {
         };
         let c = self.clone();
         self.ui(move |ui| {
-            ui.set_session_title(title.as_str().into());
-            ui.set_session_subtitle(host_name.as_str().into());
+            ui.set_session_title(title.clone());
+            ui.set_session_subtitle(host_name.clone());
             ui.set_session_lines(lines(&["Starting on the host…"]));
             ui.set_session_busy(true);
-            ui.set_screen(2);
+            ui.set_screen(Screen::Session);
 
             // This display, landscape (streams are), else the window.
             let mut device = DeviceInfo::default();
             if let Some((w, h, hz)) = platform::native_display() {
                 (device.display_width, device.display_height, device.refresh_rate) = (w, h, hz);
             } else {
-                let size = ui.window().size();
-                if size.width > 0 && size.height > 0 {
-                    device.display_width = size.width.max(size.height);
-                    device.display_height = size.width.min(size.height);
+                let (width, height) = ui.window_size();
+                if width > 0 && height > 0 {
+                    device.display_width = width.max(height);
+                    device.display_height = width.min(height);
                 }
             }
             spawn("hestia-launch", move || {
@@ -869,12 +781,11 @@ impl Controller {
                 };
                 c.finish_launch(seq);
                 let show_report = c.finish_report(session_report, &failure, Some(id.clone()));
-                let model_lines: Vec<SharedString> = text.into_iter().map(SharedString::from).collect();
                 c.ui(move |ui| {
-                    ui.set_session_lines(ModelRc::new(VecModel::from(model_lines)));
+                    ui.set_session_lines(text);
                     ui.set_session_busy(false);
-                    if show_report && ui.get_screen() == 2 {
-                        ui.set_screen(6);
+                    if show_report && ui.screen() == Screen::Session {
+                        ui.set_screen(Screen::Report);
                     }
                 });
                 c.refresh_current_running();
@@ -911,13 +822,14 @@ impl Controller {
         info!("launch cancelled by the user");
         self.ui(|ui| {
             ui.set_session_busy(false);
-            ui.set_screen(1);
+            ui.set_screen(Screen::Apps);
         });
         self.toast("Cancelled. If the app already started on the host, quit it from the app list.");
         true
     }
 
-    fn quit_app(self: &Shared) {
+    /// Quits the app running on the open host.
+    pub fn quit_app(self: &Shared) {
         let Some(id) = self.state().current_host.clone() else {
             return;
         };
@@ -931,8 +843,8 @@ impl Controller {
             }
             c.ui(|ui| {
                 ui.set_session_busy(false);
-                if ui.get_screen() == 2 {
-                    ui.set_screen(1);
+                if ui.screen() == Screen::Session {
+                    ui.set_screen(Screen::Apps);
                 }
             });
             c.refresh_current_running();
@@ -943,54 +855,55 @@ impl Controller {
     // Settings
     // ------------------------------------------------------------------
 
-    fn save_settings(self: &Shared) {
+    /// Saves the settings form.
+    pub fn save_settings(self: &Shared) {
         let Some(core) = self.core() else { return };
-        let weak = self.weak.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        // Called from the UI thread, so the window is reachable directly.
-        let Some(ui) = weak.upgrade() else { return };
-        let settings = view::read_settings_from(&ui, &core.settings());
-        match core.set_settings(settings) {
-            Ok(()) => self.toast("Settings saved"),
-            Err(e) => self.toast(format!("Could not save settings: {e}")),
-        }
+        let c = self.clone();
+        self.ui(move |ui| {
+            let settings = view::read_settings_from(ui, &core.settings());
+            match core.set_settings(settings) {
+                Ok(()) => c.toast("Settings saved"),
+                Err(e) => c.toast(format!("Could not save settings: {e}")),
+            }
+        });
     }
 
     /// A preset picked in Settings: fill in resolution, frame rate and
     /// bitrate for this display (saved with the rest on Save).
-    fn apply_preset(self: &Shared, index: i32) {
+    pub fn apply_preset(self: &Shared, index: i32) {
         let Some(core) = self.core() else { return };
         let Some(&preset) = Preset::ALL.get(index.max(0) as usize) else {
             return;
         };
-        let weak = self.weak.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let Some(ui) = weak.upgrade() else { return };
-        let native = platform::native_display();
-        let mut settings = view::read_settings_from(&ui, &core.settings());
-        settings.preset = preset;
-        if let Some((w, h, fps, kbps)) = presets::preset_mode(preset, native.unwrap_or((1920, 1080, 60))) {
-            (settings.width, settings.height, settings.fps, settings.bitrate_kbps) = (w, h, fps, kbps);
-        }
-        view::load_settings_into(&ui, &settings, native);
+        self.ui(move |ui| {
+            let native = platform::native_display();
+            let mut settings = view::read_settings_from(ui, &core.settings());
+            settings.preset = preset;
+            if let Some((w, h, fps, kbps)) = presets::preset_mode(preset, native.unwrap_or((1920, 1080, 60))) {
+                (settings.width, settings.height, settings.fps, settings.bitrate_kbps) = (w, h, fps, kbps);
+            }
+            view::load_settings_into(ui, &settings, native);
+        });
     }
 
     /// Settings → Custom resolution: adds it to the list and selects it.
-    fn custom_resolution(self: &Shared, text: &str) {
+    pub fn custom_resolution(self: &Shared, text: &str) {
         let Some((width, height)) = view::parse_resolution(text) else {
             self.toast("Type a size like 2560x1080 (320x200 to 7680x4320)");
             return;
         };
         let Some(core) = self.core() else { return };
-        let weak = self.weak.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let Some(ui) = weak.upgrade() else { return };
-        let mut settings = view::read_settings_from(&ui, &core.settings());
-        (settings.width, settings.height) = (width, height);
-        settings.preset = Preset::Custom;
-        view::load_settings_into(&ui, &settings, platform::native_display());
+        self.ui(move |ui| {
+            let mut settings = view::read_settings_from(ui, &core.settings());
+            (settings.width, settings.height) = (width, height);
+            settings.preset = Preset::Custom;
+            view::load_settings_into(ui, &settings, platform::native_display());
+        });
         self.toast(format!("Resolution set to {width}×{height}; Save to keep it"));
     }
 
     /// Fit → Fill → Stretch, from the stream menu; remembered for next time.
-    fn cycle_video_scale(self: &Shared) {
+    pub fn cycle_video_scale(self: &Shared) {
         let Some(core) = self.core() else { return };
         let mut settings = core.settings();
         settings.video_scale = settings.video_scale.next();
@@ -1012,8 +925,6 @@ impl Controller {
     }
 }
 
-fn lines(items: &[&str]) -> ModelRc<SharedString> {
-    ModelRc::new(VecModel::from(
-        items.iter().map(|s| SharedString::from(*s)).collect::<Vec<_>>(),
-    ))
+fn lines(items: &[&str]) -> Vec<String> {
+    items.iter().map(|s| (*s).to_owned()).collect()
 }

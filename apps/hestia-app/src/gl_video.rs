@@ -1,5 +1,6 @@
 //! Desktop GPU video: draws OpenH264's YUV planes into the texture the
-//! stream view shows, converting to RGB on the GPU (see `gl_yuv`).
+//! stream view shows, converting to RGB on the GPU (`hestia_frontend::gl_yuv`
+//! does the GL work; this is the Slint glue).
 //!
 //! Runs inside Slint's rendering notifier, with its OpenGL context current
 //! (the default FemtoVG renderer on winit; Skia on OpenGL works too). Each
@@ -17,14 +18,14 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use hestia_frontend::gl_yuv::{Planes, YuvPass};
+use hestia_frontend::presentation::GpuWindow;
 use hestia_media::FrameBuffer;
 use hestia_media::native_picture::NativePicture;
 use log::{info, warn};
 use slint::{ComponentHandle, GraphicsAPI, RenderingState};
 
 use crate::AppWindow;
-use crate::gl_yuv::{Planes, YuvPass};
-use crate::presentation::GpuWindow;
 
 struct Renderer {
     weak: slint::Weak<AppWindow>,

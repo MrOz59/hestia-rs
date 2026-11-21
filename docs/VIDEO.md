@@ -76,12 +76,15 @@ installing `nasm`, rebuild it: `cargo clean -p openh264-sys2`.
 ## 4. Presentation
 
 The decoder thread hands each picture to a presenter (`presentation.rs` in
-the app), which keeps only the newest one in a `PictureMailbox` shared with
-the UI thread. A newer picture replaces one that was not shown yet (counted
-as "replaced before handoff" / "replaced before draw").
+`hestia-frontend`), which keeps only the newest one in a `PictureMailbox`
+shared with the UI thread. A newer picture replaces one that was not shown
+yet (counted as "replaced before handoff" / "replaced before draw"). The
+renderers below belong to the Slint shell (`apps/hestia-app`); another UI
+toolkit would provide its own (see [FRONTENDS.md](FRONTENDS.md)).
 
-* **RGBA pictures** are copied into a Slint image on the event loop. Slint
-  then creates a texture for that image and uploads it, every frame.
+* **RGBA pictures** go to the shell (`View::show_video_frame`); Slint copies
+  them into an image on the event loop, then creates a texture for that image
+  and uploads it, every frame.
 * **Native pictures** only request a redraw. The window's GPU renderer takes
   the newest one inside Slint's rendering notifier, with Slint's GL context
   current, and draws it into one RGBA texture that the stream view keeps
@@ -90,9 +93,9 @@ as "replaced before handoff" / "replaced before draw").
   * Android (`gpu_render.rs`): the hardware buffer becomes an `EGLImage` on
     an external texture; the GPU's sampler does the YUV to RGB conversion.
     The buffer goes back to MediaCodec with a GPU fence.
-  * Desktop (`gl_video.rs` + `gl_yuv.rs`): the planes are uploaded into
-    three persistent single-channel textures and one shader pass applies the
-    colour matrix (`Colorimetry::gpu_conversion`). Chroma is upsampled
+  * Desktop (`gl_video.rs`, running the frontend's `gl_yuv.rs`): the planes
+    are uploaded into three persistent single-channel textures and one
+    shader pass applies the colour matrix (`Colorimetry::gpu_conversion`). Chroma is upsampled
     bilinearly. Needs OpenGL 3.0 or OpenGL ES 3.0; Slint's default FemtoVG
     renderer on winit asks for ES 2.0 and Mesa, NVIDIA and AMD drivers hand
     out 3.x. With the software renderer (`SLINT_BACKEND=winit-software`) or

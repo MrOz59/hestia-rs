@@ -3,7 +3,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use hestia_core::TouchMode;
 use hestia_core::diagnosis::{self, Bottleneck, SpikeHistory};
@@ -13,13 +13,13 @@ use hestia_core::stream::{InputEvent, SessionListener, StreamEvent, StreamStats}
 use hestia_core::{LaunchedSession, ManagedStream, StreamHost};
 use hestia_media::{DecodeStats, DecodingSink};
 use log::{info, warn};
-use slint::{ComponentHandle, Image, ModelRc, SharedString, VecModel};
 
 use super::report::{self, SharedReport};
 use super::{Controller, Shared, spawn};
 use crate::presentation::{Presentation, UiPresenter};
 use crate::stream_input::{self, GestureAction, ImeEvent, Picture, StreamInput};
 use crate::typing;
+use crate::ui::Screen;
 use crate::video_backend::StreamVideo;
 use crate::virtual_pad::PadState;
 use crate::{hostinfo, platform};
@@ -223,11 +223,11 @@ impl SessionListener for Listener {
                     if secs == 3 {
                         warn!("frames arrive but none decode: {}", verdict.key_metric);
                         let status = format!("Video arrives but can't be decoded. {}", verdict.summary);
-                        self.controller.ui(move |ui| ui.set_stream_status(status.into()));
+                        self.controller.ui(move |ui| ui.set_stream_status(status));
                     }
                     let line = self.stats_line(&sample, &verdict);
                     report::lock(&self.report).sample(sample);
-                    self.controller.ui(move |ui| ui.set_stream_stats(line.into()));
+                    self.controller.ui(move |ui| ui.set_stream_stats(line));
                 }
             }
             StreamEvent::FirstFrame => {
@@ -285,13 +285,12 @@ impl Controller {
         let config = launched.stream_config(&formats).map_err(|e| e.to_string())?;
         hestia_core::add_stream_config_to_report(&config, decoder.name(), &mut report::lock(&session_report));
         let generation = self.stream_generation.fetch_add(1, Ordering::Relaxed) + 1;
-        let weak = self.weak.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let present = Arc::new(Presentation::new(generation, video.gpu));
         self.gpu_window.set_active(&present);
         let sink = DecodingSink::new(
             decoder,
             Box::new(UiPresenter {
-                weak,
+                ui: self.handle(),
                 presentation: present.clone(),
             }),
         );
@@ -320,7 +319,7 @@ impl Controller {
             undecoded_secs: AtomicU32::new(0),
         });
         self.ui(|ui| {
-            ui.set_stream_frame(Image::default());
+            ui.clear_video();
             ui.set_stream_status("Waiting for video…".into());
         });
         let session = host
@@ -377,7 +376,7 @@ impl Controller {
             self.start_clipboard_sync(generation, clipboard_host);
         }
         self.ui(move |ui| {
-            ui.set_stream_stats(format!("{size} {codec}").into());
+            ui.set_stream_stats(format!("{size} {codec}"));
             ui.set_stream_pad_visible(pad);
             ui.set_stream_clipboard(clipboard);
             ui.set_stream_menu_open(false);
@@ -385,7 +384,7 @@ impl Controller {
             ui.set_stream_zoom(1.0);
             ui.set_stream_pan_x(0.0);
             ui.set_stream_pan_y(0.0);
-            ui.set_screen(4);
+            ui.set_screen(Screen::Stream);
         });
         // Orientation, no system bars, screen on (Android); controllers on.
         platform::set_stream_mode(true, launched.settings.orientation);
@@ -514,17 +513,17 @@ impl Controller {
             platform::set_stream_mode(false, hestia_core::StreamOrientation::default());
             platform::set_gamepads_streaming(false);
             c.ui(move |ui| {
-                if ui.get_stream_fullscreen() {
-                    ui.window().set_fullscreen(false);
+                if ui.stream_fullscreen() {
+                    ui.set_window_fullscreen(false);
                     ui.set_stream_fullscreen(false);
                 }
-                if ui.get_screen() == 4 {
-                    ui.set_screen(if show_report { 6 } else { 1 });
+                if ui.screen() == Screen::Stream {
+                    ui.set_screen(if show_report { Screen::Report } else { Screen::Apps });
                 }
-                ui.set_stream_frame(Image::default());
-                ui.set_stream_stats(SharedString::new());
+                ui.clear_video();
+                ui.set_stream_stats(String::new());
                 ui.set_stream_keyboard_open(false);
-                ui.set_stream_banner(SharedString::new());
+                ui.set_stream_banner(String::new());
             });
             if let Some(reason) = reason {
                 c.toast(reason);
@@ -537,13 +536,30 @@ impl Controller {
         });
     }
 
+    /// Stream menu → Disconnect: the app keeps running on the host.
+    pub fn stream_disconnect(self: &Shared) {
+        self.end_stream(None, None, false);
+    }
+
+    /// Stream menu → Quit: ends the stream and quits the app on the host.
+    pub fn stream_quit(self: &Shared) {
+        self.end_stream(None, None, true);
+    }
+
+    /// Shows or hides the on-screen keyboard that types into the host.
+    pub fn set_soft_keyboard(&self, visible: bool) {
+        platform::set_keyboard_visible(visible);
+    }
+
     fn send_input(&self, event: InputEvent) {
         if let Some(active) = self.active_stream().as_ref() {
             active.session.send_input(&event);
         }
     }
 
-    pub(super) fn stream_key(self: &Shared, text: &str, pressed: bool, repeat: bool, modifiers: Modifiers) {
+    /// A key in the stream view: `text` is the character or key name the
+    /// toolkit reports (see `keymap`).
+    pub fn stream_key(self: &Shared, text: &str, pressed: bool, repeat: bool, modifiers: Modifiers) {
         // The host repeats held keys itself.
         if repeat {
             return;
@@ -551,7 +567,7 @@ impl Controller {
         if pressed && modifiers.ctrl && modifiers.alt && modifiers.shift {
             match text.to_ascii_lowercase().as_str() {
                 "q" => return self.end_stream(None, None, false),
-                "s" => return self.ui(|ui| ui.set_stream_show_stats(!ui.get_stream_show_stats())),
+                "s" => return self.ui(|ui| ui.set_stream_show_stats(!ui.stream_show_stats())),
                 _ => {}
             }
         }
@@ -565,7 +581,7 @@ impl Controller {
     /// goes to the on-screen controller when it lands on it; otherwise it
     /// follows the touch mode (trackpad, mouse or real touches). Mice
     /// position the host cursor absolutely inside the video.
-    pub(super) fn stream_pointer(
+    pub fn stream_pointer(
         self: &Shared,
         kind: i32,
         button: i32,
@@ -625,14 +641,14 @@ impl Controller {
                 ui.set_stream_pan_y(py);
             }),
             GestureAction::ToggleKeyboard => self.ui(|ui| {
-                ui.set_stream_keyboard_open(!ui.get_stream_keyboard_open());
+                ui.set_stream_keyboard_open(!ui.stream_keyboard_open());
             }),
         }
         true
     }
 
     /// Menu → Zoom: two fingers pinch and pan; turning it off resets.
-    pub(super) fn toggle_zoom(self: &Shared) {
+    pub fn toggle_zoom(self: &Shared) {
         let on = {
             let mut guard = self.active_stream();
             let Some(active) = guard.as_mut() else { return };
@@ -671,7 +687,7 @@ impl Controller {
         if click != 0 {
             // A stick tap clicks it: release shortly after.
             let c = self.clone();
-            slint::Timer::single_shot(std::time::Duration::from_millis(60), move || {
+            self.ui_after(Duration::from_millis(60), move |_| {
                 let state = c
                     .active_stream()
                     .as_ref()
@@ -702,11 +718,11 @@ impl Controller {
             let Some(active) = guard.as_ref() else { return };
             crate::pad_controls(active.input.pad())
         };
-        self.ui(move |ui| ui.set_stream_pad_controls(ModelRc::new(VecModel::from(controls))));
+        self.ui(move |ui| ui.set_stream_pad_controls(controls));
     }
 
     /// Menu → On-screen controller (remembered for next time).
-    pub(super) fn toggle_pad(self: &Shared) {
+    pub fn toggle_pad(self: &Shared) {
         let on = {
             let mut guard = self.active_stream();
             let Some(active) = guard.as_mut() else { return };
@@ -729,7 +745,7 @@ impl Controller {
     }
 
     /// The stream view was laid out (or resized): re-lay the controller.
-    pub(super) fn stream_view_size(self: &Shared, width: f32, height: f32) {
+    pub fn stream_view_size(self: &Shared, width: f32, height: f32) {
         let visible = {
             let mut guard = self.active_stream();
             let Some(active) = guard.as_mut() else { return };
@@ -770,7 +786,7 @@ impl Controller {
         }) {
             let generation = *generation;
             let c = self.clone();
-            slint::Timer::single_shot(crate::touch::LONG_PRESS, move || {
+            self.ui_after(crate::touch::LONG_PRESS, move |_| {
                 c.trackpad_long_press(generation, touch_id)
             });
         }
@@ -786,7 +802,7 @@ impl Controller {
     }
 
     /// Menu → Touch: trackpad → mouse → touchscreen (remembered).
-    pub(super) fn cycle_touch_mode(self: &Shared) {
+    pub fn cycle_touch_mode(self: &Shared) {
         let mode = self.touch_mode().next();
         self.touch_mode.store(mode.index() as u8, Ordering::Relaxed);
         if let Some(ActiveStream { input, session, .. }) = self.active_stream().as_mut() {
@@ -808,29 +824,31 @@ impl Controller {
         });
     }
 
-    pub(super) fn stream_special_key(&self, name: &str) {
+    /// A key from the stream menu's keyboard bar (Esc, Tab, Win, Alt+Tab…).
+    pub fn stream_special_key(&self, name: &str) {
         if let Some(active) = self.active_stream().as_ref() {
             active.send(typing::special_key_events(name));
         }
     }
 
-    pub(super) fn request_keyframe(self: &Shared) {
+    /// Stream menu → "Fix picture".
+    pub fn request_keyframe(self: &Shared) {
         if let Some(active) = self.active_stream().as_ref() {
             active.session.request_keyframe();
         }
         self.toast("Asked the host for a fresh frame");
     }
 
-    pub(super) fn stream_scroll(&self, dx: f32, dy: f32) {
+    pub fn stream_scroll(&self, dx: f32, dy: f32) {
         if let Some(event) = stream_input::scroll(dx, dy) {
             self.send_input(event);
         }
     }
 
-    pub(super) fn toggle_fullscreen(self: &Shared) {
+    pub fn toggle_fullscreen(self: &Shared) {
         self.ui(|ui| {
-            let on = !ui.get_stream_fullscreen();
-            ui.window().set_fullscreen(on);
+            let on = !ui.stream_fullscreen();
+            ui.set_window_fullscreen(on);
             ui.set_stream_fullscreen(on);
         });
     }
@@ -840,17 +858,12 @@ impl Controller {
         if self.active_stream().as_ref().is_none_or(|a| a.generation != generation) {
             return;
         }
-        self.ui(move |ui| {
-            let shown: SharedString = text.into();
-            ui.set_stream_banner(shown.clone());
-            let weak = ui.as_weak();
-            slint::Timer::single_shot(std::time::Duration::from_secs(8), move || {
-                if let Some(ui) = weak.upgrade() {
-                    if ui.get_stream_banner() == shown {
-                        ui.set_stream_banner(SharedString::new());
-                    }
-                }
-            });
+        let shown = text.clone();
+        self.ui(move |ui| ui.set_stream_banner(shown));
+        self.ui_after(Duration::from_secs(8), move |ui| {
+            if ui.stream_banner() == text {
+                ui.set_stream_banner(String::new());
+            }
         });
     }
 }

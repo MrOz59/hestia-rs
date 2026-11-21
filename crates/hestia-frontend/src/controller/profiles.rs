@@ -2,16 +2,11 @@
 //! it, deleted, and chosen per host on the host's page.
 
 use log::warn;
-use slint::{ModelRc, SharedString, VecModel};
 
 use super::{Controller, Shared};
-use crate::{AppWindow, platform, view};
+use crate::{platform, view};
 
 impl Controller {
-    fn ui_now(&self) -> Option<AppWindow> {
-        self.weak.lock().unwrap_or_else(|p| p.into_inner()).upgrade()
-    }
-
     /// Fills both profile lists: the settings page's, and the current
     /// host's choice ("Settings" first, then the profiles).
     pub(super) fn push_profiles(self: &Shared) {
@@ -27,50 +22,51 @@ impl Controller {
             .and_then(|c| names.iter().position(|n| n.eq_ignore_ascii_case(&c)))
             .map_or(0, |i| i + 1);
         self.ui(move |ui| {
-            let listed: Vec<SharedString> = names.iter().map(|n| n.as_str().into()).collect();
-            let mut options: Vec<SharedString> = vec!["Settings (default)".into()];
-            options.extend(listed.iter().cloned());
-            if ui.get_cfg_profile_pick() >= listed.len() as i32 {
+            let mut options = vec!["Settings (default)".to_owned()];
+            options.extend(names.iter().cloned());
+            if ui.cfg_profile_pick() >= names.len() as i32 {
                 ui.set_cfg_profile_pick(0);
             }
-            ui.set_cfg_profile_names(ModelRc::new(VecModel::from(listed)));
-            ui.set_apps_profile_options(ModelRc::new(VecModel::from(options)));
+            ui.set_cfg_profile_names(names);
+            ui.set_apps_profile_options(options);
             ui.set_apps_profile_index(index as i32);
         });
     }
 
     /// Settings → "Save as profile": the page as it is now, named.
-    pub(super) fn save_profile(self: &Shared, name: &str) {
-        let (Some(core), Some(ui)) = (self.core(), self.ui_now()) else {
-            return;
-        };
-        let settings = view::read_settings_from(&ui, &core.settings());
-        match core.save_profile(name, &settings) {
-            Ok(name) => {
-                let index = core.profiles().iter().position(|p| p.name == name).unwrap_or_default();
-                self.push_profiles();
-                self.ui(move |ui| ui.set_cfg_profile_pick(index as i32));
-                self.toast(format!("Saved profile “{name}”: choose it on a host's page"));
+    pub fn save_profile(self: &Shared, name: &str) {
+        let Some(core) = self.core() else { return };
+        let name = name.to_owned();
+        let c = self.clone();
+        self.ui(move |ui| {
+            let settings = view::read_settings_from(ui, &core.settings());
+            match core.save_profile(&name, &settings) {
+                Ok(name) => {
+                    let index = core.profiles().iter().position(|p| p.name == name).unwrap_or_default();
+                    c.push_profiles();
+                    c.ui(move |ui| ui.set_cfg_profile_pick(index as i32));
+                    c.toast(format!("Saved profile “{name}”: choose it on a host's page"));
+                }
+                Err(e) => c.toast(format!("Profile not saved: {e}")),
             }
-            Err(e) => self.toast(format!("Profile not saved: {e}")),
-        }
+        });
     }
 
     /// Settings → "Load": a profile into the page (Save keeps it).
-    pub(super) fn load_profile(self: &Shared, index: i32) {
-        let (Some(core), Some(ui)) = (self.core(), self.ui_now()) else {
-            return;
-        };
+    pub fn load_profile(self: &Shared, index: i32) {
+        let Some(core) = self.core() else { return };
         let Some(profile) = core.profiles().into_iter().nth(index.max(0) as usize) else {
             return;
         };
-        let settings = profile.apply(&view::read_settings_from(&ui, &core.settings()));
-        view::load_settings_into(&ui, &settings, platform::native_display());
         self.toast(format!("Loaded “{}”; Save to make it the settings", profile.name));
+        self.ui(move |ui| {
+            let settings = profile.apply(&view::read_settings_from(ui, &core.settings()));
+            view::load_settings_into(ui, &settings, platform::native_display());
+        });
     }
 
     /// Settings → "Delete".
-    pub(super) fn delete_profile(self: &Shared, index: i32) {
+    pub fn delete_profile(self: &Shared, index: i32) {
         let Some(core) = self.core() else { return };
         let Some(profile) = core.profiles().into_iter().nth(index.max(0) as usize) else {
             return;
@@ -88,7 +84,7 @@ impl Controller {
     }
 
     /// Host page → "Stream profile": what this host launches with.
-    pub(super) fn choose_host_profile(self: &Shared, index: i32) {
+    pub fn choose_host_profile(self: &Shared, index: i32) {
         let Some(core) = self.core() else { return };
         let Some(id) = self.state().current_host.clone() else {
             return;

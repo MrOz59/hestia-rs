@@ -1,0 +1,44 @@
+[package]
+name = "hestia-frontend"
+description = "Hestia RS's graphical client without a UI toolkit: app logic, input, system services and video presentation behind a toolkit-neutral port"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+build = "build.rs"
+
+[features]
+default = ["openh264"]
+# Software H.264 decoding (the fallback; Android decodes with MediaCodec).
+openh264 = ["hestia-media/openh264"]
+
+[dependencies]
+hestia-core.workspace = true
+hestia-media.workspace = true
+serde_json.workspace = true
+image.workspace = true
+log.workspace = true
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+# Audio playback on the desktop (cpal + libopus). Android plays audio with
+# AAudio and decodes Opus with the system's MediaCodec, built in.
+hestia-media = { workspace = true, features = ["audio"] }
+
+# Desktop game controllers read from evdev (ioctl, poll); the GPU colour
+# pass's test loads EGL at run time.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Share sheet, keyboard, codec discovery and network routing go through the
+# app's Java helper (same jni version as Slint's Android backend).
+jni = "0.21"
+# The activity handle every Android backend runs on (Slint's included): the
+# same crate, so the same `AndroidApp` type.
+android-activity = { version = "0.6.1", features = ["native-activity"] }
+
+[build-dependencies]
+# Compiles java/HestiaHelper.java into a dex for Android builds.
+android-build = "0.1.2"

@@ -152,14 +152,18 @@ crates/
   hestia-core        UI-agnostic facade: identity + host store, pairing, apps, launch
   hestia-stream      streaming data plane: RTSP, ENet control, video + FEC, audio, input
   hestia-media       decoders/players behind VideoSink/AudioSink (OpenH264, Opus + cpal)
+  hestia-frontend    the GUI without a toolkit: controller, input, platform, video presentation
 apps/
-  hestia-app         Slint GUI (desktop binary + Android cdylib)
+  hestia-app         Slint shell over hestia-frontend (desktop binary + Android cdylib)
   hestia-cli         `hestia` command-line client
 ```
 
 Each crate has one job and depends only on the layers below it; front-ends only
-talk to `hestia-core`. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and
-[docs/VIDEO.md](docs/VIDEO.md) for the video pipeline.
+talk to `hestia-core`. The GUI's toolkit is a thin shell behind a port, so
+Slint can be swapped for another toolkit (egui, Qt…) without touching the app:
+see [docs/FRONTENDS.md](docs/FRONTENDS.md). More in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and [docs/VIDEO.md](docs/VIDEO.md)
+for the video pipeline.
 
 ## Building
 

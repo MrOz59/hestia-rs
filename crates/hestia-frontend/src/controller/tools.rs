@@ -4,10 +4,10 @@
 use std::time::Duration;
 
 use hestia_core::api::{ApiError, HostDiagnostics, MAX_CLIPBOARD_BYTES, ServerCommand};
-use slint::{ModelRc, SharedString, VecModel};
 
 use super::{Controller, Shared, spawn};
-use crate::{CommandRow, PreflightRow, hostinfo, platform};
+use crate::ui::{CommandRow, PreflightRow, Screen};
+use crate::{hostinfo, platform};
 
 /// How long an armed "Confirm" button waits for the second tap.
 const CONFIRM_WINDOW: Duration = Duration::from_secs(4);
@@ -33,30 +33,31 @@ impl Controller {
                 .iter()
                 .map(|c| CommandRow {
                     id: c.id as i32,
-                    name: c.name.as_str().into(),
+                    name: c.name.clone(),
                     confirm: c.requires_confirmation,
                     armed: armed == Some(c.id),
                 })
                 .collect();
-            ui.set_tools_commands(ModelRc::new(VecModel::from(rows)));
+            ui.set_tools_commands(rows);
         });
     }
 
-    pub(super) fn open_tools(self: &Shared) {
+    /// The open host's Hermes tools page.
+    pub fn open_tools(self: &Shared) {
         self.ui(|ui| {
-            ui.set_tools_message(SharedString::new());
-            ui.set_tools_display_status(SharedString::new());
-            ui.set_tools_permissions(SharedString::new());
-            ui.set_tools_diagnostics(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
-            ui.set_tools_commands(ModelRc::new(VecModel::from(Vec::<CommandRow>::new())));
-            ui.set_tools_status_lines(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
-            ui.set_tools_preflight(ModelRc::new(VecModel::from(Vec::<PreflightRow>::new())));
-            ui.set_screen(5);
+            ui.set_tools_message(String::new());
+            ui.set_tools_display_status(String::new());
+            ui.set_tools_permissions(String::new());
+            ui.set_tools_diagnostics(Vec::new());
+            ui.set_tools_commands(Vec::new());
+            ui.set_tools_status_lines(Vec::new());
+            ui.set_tools_preflight(Vec::new());
+            ui.set_screen(Screen::Tools);
         });
         self.tools_refresh();
     }
 
-    pub(super) fn tools_refresh(self: &Shared) {
+    pub fn tools_refresh(self: &Shared) {
         let Some(id) = self.state().current_host.clone() else {
             return;
         };
@@ -139,10 +140,8 @@ impl Controller {
                 ui.set_tools_display_allowed(display_ok);
                 ui.set_tools_commands_allowed(commands_ok);
                 ui.set_tools_clipboard_allowed(clipboard_ok);
-                let lines: Vec<SharedString> = diag_lines.into_iter().map(SharedString::from).collect();
-                ui.set_tools_diagnostics(ModelRc::new(VecModel::from(lines)));
-                let status: Vec<SharedString> = status.into_iter().map(SharedString::from).collect();
-                ui.set_tools_status_lines(ModelRc::new(VecModel::from(status)));
+                ui.set_tools_diagnostics(diag_lines);
+                ui.set_tools_status_lines(status);
                 let rows: Vec<PreflightRow> = preflight
                     .into_iter()
                     .map(|(level, title, message)| PreflightRow {
@@ -151,7 +150,7 @@ impl Controller {
                         message: message.into(),
                     })
                     .collect();
-                ui.set_tools_preflight(ModelRc::new(VecModel::from(rows)));
+                ui.set_tools_preflight(rows);
             });
         });
     }
@@ -180,14 +179,14 @@ impl Controller {
         });
     }
 
-    pub(super) fn tools_recover_display(self: &Shared) {
+    pub fn tools_recover_display(self: &Shared) {
         self.tools_action("Recover display", |api| {
             api.recover_display(false)
                 .map(|v| format!("Display recovery: {}", hostinfo::json_summary(&v, 3)))
         });
     }
 
-    pub(super) fn tools_run_command(self: &Shared, id: i32) {
+    pub fn tools_run_command(self: &Shared, id: i32) {
         let id = id as u32;
         let command: Option<ServerCommand> = self.state().tools_commands.iter().find(|c| c.id == id).cloned();
         let Some(command) = command else { return };
@@ -197,7 +196,7 @@ impl Controller {
             self.push_commands();
             // Disarm if the second tap doesn't come.
             let c = self.clone();
-            slint::Timer::single_shot(CONFIRM_WINDOW, move || {
+            self.ui_after(CONFIRM_WINDOW, move |_| {
                 let expired = {
                     let mut st = c.state();
                     let expired = st.tools_armed == Some(id);
@@ -220,7 +219,7 @@ impl Controller {
         });
     }
 
-    pub(super) fn tools_send_clipboard(self: &Shared, text: String) {
+    pub fn tools_send_clipboard(self: &Shared, text: String) {
         if text.len() > MAX_CLIPBOARD_BYTES {
             self.toast(format!(
                 "Too long: the host accepts up to {} KiB",
@@ -234,7 +233,7 @@ impl Controller {
         });
     }
 
-    pub(super) fn tools_fetch_clipboard(self: &Shared) {
+    pub fn tools_fetch_clipboard(self: &Shared) {
         let Some(id) = self.state().current_host.clone() else {
             return;
         };
@@ -253,7 +252,7 @@ impl Controller {
         });
     }
 
-    pub(super) fn tools_open_web_ui(self: &Shared) {
+    pub fn tools_open_web_ui(self: &Shared) {
         let Some(id) = self.state().current_host.clone() else {
             return;
         };
@@ -270,7 +269,7 @@ impl Controller {
 
     /// Fetches Hermes' full diagnostic report, saves it next to the stream
     /// reports and opens it on the report screen (to share or keep).
-    pub(super) fn tools_host_report(self: &Shared) {
+    pub fn tools_host_report(self: &Shared) {
         let Some(id) = self.state().current_host.clone() else {
             return;
         };

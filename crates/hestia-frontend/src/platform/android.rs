@@ -5,9 +5,11 @@ use std::sync::OnceLock;
 use super::keyboard::ime_event;
 use crate::stream_input::ImeEvent;
 
-pub(super) static ANDROID_APP: OnceLock<slint::android::AndroidApp> = OnceLock::new();
+pub(super) static ANDROID_APP: OnceLock<android_activity::AndroidApp> = OnceLock::new();
 
-pub fn set_android_app(app: slint::android::AndroidApp) {
+/// The activity every Android service here goes through (JNI, the Java
+/// helper); the shell hands it over before starting the controller.
+pub fn set_android_app(app: android_activity::AndroidApp) {
     let _ = ANDROID_APP.set(app);
 }
 
