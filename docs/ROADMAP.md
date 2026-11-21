@@ -22,7 +22,10 @@
       messages), verified against the C ENet
 - [x] Software H.264 decode (OpenH264) and a video view inside the Slint window
 - [ ] **Validate against a live Hermes host** (and Sunshine/Apollo)
-- [ ] Linux VA-API decode (HEVC/AV1, DMA-BUF into the renderer)
+- [x] Desktop GPU colour conversion: OpenH264's YUV planes converted to RGB
+      in a GL pass inside Slint's context (no CPU conversion or RGBA copy),
+      CPU fallback; OpenH264 built with its SIMD code (nasm) in CI
+- [ ] Linux VA-API decode (HEVC/AV1, DMA-BUF into the same GL pass)
 - [x] Android MediaCodec (H.264/HEVC/AV1) via AImageReader, with output
       buffers (NV12/I420/Qualcomm NV12) and software H.264 as fallbacks
 - [x] Android zero-copy output (MediaCodec into GPU buffers, drawn as an

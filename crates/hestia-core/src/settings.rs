@@ -185,8 +185,10 @@ pub struct StreamSettings {
     pub show_menu_button: bool,
     /// Use the platform's hardware decoder when there is one.
     pub hardware_decoding: bool,
-    /// Android: hardware-decoded pictures go straight to the GPU (no CPU
-    /// copy or conversion); off reads them back on the CPU.
+    /// The window's GPU renderer draws decoded pictures itself. Android:
+    /// hardware-decoded pictures go straight to the GPU (no CPU copy or
+    /// conversion). Desktop: the GPU converts the software decoder's YUV to
+    /// RGB. Off: pictures are converted to RGBA on the CPU.
     pub gpu_video: bool,
     /// Touch mode; unset in settings saved before it existed, which only
     /// had `touch_trackpad` (see [`StreamSettings::touch`]).
@@ -268,8 +270,11 @@ impl StreamSettings {
             "hardware decoding",
             if self.hardware_decoding { "on" } else { "off" },
         );
+        let on = if self.gpu_video { "on" } else { "off" };
         if cfg!(target_os = "android") {
-            r.field("Settings", "zero-copy video", if self.gpu_video { "on" } else { "off" });
+            r.field("Settings", "zero-copy video", on);
+        } else {
+            r.field("Settings", "GPU colour conversion", on);
         }
     }
 

@@ -7,7 +7,9 @@
 //! * [`decode`]: [`DecodingSink`], which decodes on its own thread with any
 //!   [`FrameDecoder`] and hands decoded frames to a [`FramePresenter`].
 //! * `software_h264` (feature `openh264`, on by default): OpenH264 software
-//!   H.264 decoding, on every platform.
+//!   H.264 decoding, on every platform. On the desktop it hands 4:2:0 planes
+//!   to the window's GL renderer, which converts them to RGB on the GPU
+//!   ([`native_picture`]), and converts on the CPU ([`color`]) otherwise.
 //! * [`audio_playback`]: independently selected Opus decoders and PCM outputs,
 //!   connected by the low-latency playback FIFO.
 //! * [`null`]: counts frames and packets; for exercising the pipeline.
@@ -18,6 +20,8 @@
 //!   back on the CPU; falls back to OpenH264 for H.264.
 //!
 //! Planned: `vaapi` (Linux, DMA-BUF into the GL view), surround audio.
+//!
+//! See `docs/VIDEO.md` in the repository for the whole video pipeline.
 
 #[cfg(target_os = "android")]
 pub mod aaudio;
