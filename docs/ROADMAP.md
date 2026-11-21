@@ -38,8 +38,11 @@ not a goal: no item here exists for them.
 - [x] Desktop GPU colour conversion: OpenH264's YUV planes converted to RGB
       in a GL pass inside Slint's context (no CPU conversion or RGBA copy),
       CPU fallback; OpenH264 built with its SIMD code (nasm) in CI
-- [ ] Linux VA-API decode on Wayland (HEVC/AV1, DMA-BUF into the same GL
-      pass)
+- [x] Linux VA-API decode (H.264/HEVC/AV1 through cros-codecs, patched for
+      low delay): DMA-BUFs into the same GL pass on Wayland (EGL), read-back
+      copies otherwise
+- [ ] Try VA-API on Intel and AMD hardware: latency against OpenH264,
+      compressed surfaces
 - [x] Android MediaCodec (H.264/HEVC/AV1) via AImageReader, with output
       buffers (NV12/I420/Qualcomm NV12) and software H.264 as fallbacks
 - [x] Android zero-copy output (MediaCodec into GPU buffers, drawn as an

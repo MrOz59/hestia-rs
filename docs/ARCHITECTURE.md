@@ -107,24 +107,30 @@ Pure-Rust data plane, following moonlight-common-c's Sunshine path:
 Backends for the sink traits. `DecodingSink` runs a `FrameDecoder` on its own
 thread and hands each `DecodedFrame` to a `FramePresenter`. A decoded frame
 owns either reusable RGBA pixels or a `NativePicture`: something the window's
-GPU renderer draws itself, either an Android hardware buffer or 4:2:0 planes
-from a software decoder (`PlanarPicture`, whose storage returns to the
-decoder's pool when dropped). Each keeps its own release rules, so the
+GPU renderer draws itself: an Android hardware buffer, 4:2:0 planes from a
+software decoder (`PlanarPicture`, whose storage returns to the decoder's pool
+when dropped), or a VA-API NV12 picture shared as a DMA-BUF
+(`DmabufPicture`, which keeps the frame away from the decoder while it
+lives). Each keeps its own release rules, so the
 decoder thread and mailbox move pictures without knowing their kind. A
 `GpuOutput` tells a decoder whether that renderer is available right now
-(`GpuRendererStatus`, set by the renderer); decoders check it per frame and
-fall back to RGBA. Queue overflow and decoder errors use the same keyframe
-recovery policy. Backends include OpenH264 (planes for the GPU, or RGBA
-through the SIMD converters in `color`), Android MediaCodec, Opus + cpal
-playback, Android audio, and null and dump sinks. Linux VA-API and surround
-playback are planned.
+and whether it imports DMA-BUFs (`GpuRendererStatus`, set by the renderer,
+which also names its GPU's render node); decoders check it per frame and
+fall back to planes or RGBA. Queue overflow and decoder errors use the same
+keyframe recovery policy. Backends include OpenH264 (planes for the GPU, or
+RGBA through the SIMD converters in `color`), Android MediaCodec, Linux
+VA-API (`vaapi`, feature `vaapi`: cros-codecs' stateless decoders over libva,
+decoding into exported surfaces it shares as DMA-BUFs), Opus + cpal
+playback, Android audio, and null and dump sinks. Surround playback is
+planned.
 
 The GUI and CLI use `video_decoder::select_decoder_for_renderer` (or
 `select_decoder`, without a renderer) to pair a decoder with the formats it
 can advertise. The hardware probe is supplied at session startup. The
 Android GUI matches codecs to the requested size and rate and passes its
-native output; the desktop GUI passes its output to OpenH264; headless
-callers can use the default probe. The selector uses OpenH264 when hardware
+native output; the Linux GUI probes VA-API on the renderer's GPU and passes
+its output to it and to OpenH264; headless callers can use the default probe
+(VA-API with RGBA read-back on Linux). The selector uses OpenH264 when hardware
 is disabled or unavailable. [VIDEO.md](VIDEO.md) follows a frame through all
 of this.
 
@@ -153,7 +159,10 @@ and the shell's GPU renderer takes them from the `Presentation` that
 `GpuWindow` marks active. `gl_yuv.rs` is the toolkit-free GL pass that
 converts the desktop's YUV planes: it loads GL through a
 `get_proc_address`, works with OpenGL 3 and OpenGL ES 3 contexts, restores
-the GL state it touches, and its test runs headless on Mesa. The decoder
+the GL state it touches, and its test runs headless on Mesa. It also draws
+NV12 pictures held in EGL images, which `gl_dmabuf.rs` makes from
+`DmabufPicture`s on the window's EGL display (loaded from `libEGL.so.1` at
+run time). The decoder
 receives renderer availability explicitly at construction by
 `video_backend.rs`.
 
@@ -192,6 +201,10 @@ Hermes tools, and the same stream reports and data directory as the app.
   `[patch.crates-io]`) with three changes listed in its `PATCHES.md`: an
   input hook for game controllers, a mouse-wheel fix, and remote/controller
   keys for the UI.
+- `third_party/cros-codecs`: ChromeOS's codec crate (path dependency of
+  `hestia-media`), its H.264 and H.265 decoders given a low-delay mode, and
+  cros-libva taken from git for libva 2.23; its `PATCHES.md` lists the
+  changes.
 - `tools/enet-interop`: the ENet client against the C ENet hosts use, over a
   clean and a lossy link (CI runs it). `tools/fec-vectors`: reference parity
   from nanors that `fec.rs`'s tests compare against.

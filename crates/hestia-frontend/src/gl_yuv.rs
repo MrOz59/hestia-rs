@@ -7,6 +7,11 @@
 //! upload is 1.5 bytes per pixel instead of 4. The textures persist between
 //! frames (no per-frame allocation, unlike an image handed to the toolkit).
 //!
+//! A hardware decoder's NV12 pictures arrive as EGL images instead (see
+//! `gl_dmabuf`): [`YuvPass::draw_nv12`] binds them to two textures, luma and
+//! interleaved chroma, and the same kind of pass converts them, nothing
+//! uploaded at all.
+//!
 //! Any shell whose toolkit renders with OpenGL can use it: the Slint shell
 //! calls it from its rendering notifier (`apps/hestia-app/src/gl_video.rs`);
 //! an egui shell would call it from a `glow` paint callback.
@@ -48,6 +53,8 @@ const GL_TEXTURE_2D: GLenum = 0x0DE1;
 const GL_UNSIGNED_BYTE: GLenum = 0x1401;
 const GL_FLOAT: GLenum = 0x1406;
 const GL_RED: GLenum = 0x1903;
+const GL_EXTENSIONS: GLenum = 0x1F03;
+const GL_NUM_EXTENSIONS: GLenum = 0x821D;
 const GL_RGBA: GLenum = 0x1908;
 const GL_VERSION: GLenum = 0x1F02;
 const GL_LINEAR: GLint = 0x2601;
@@ -90,6 +97,11 @@ macro_rules! gl_functions {
             /// Sampler objects (GL 3.3, GLES 3.0): their unit bindings
             /// override texture parameters, so they are cleared and restored.
             glBindSampler: Option<unsafe extern "system" fn(GLuint, GLuint)>,
+            /// `GL_OES_EGL_image`: a texture from an EGL image (DMA-BUF
+            /// pictures). Cleared when the extension is missing.
+            glEGLImageTargetTexture2DOES: Option<unsafe extern "system" fn(GLenum, *mut c_void)>,
+            /// Indexed extension strings (OpenGL 3.0, OpenGL ES 3.0).
+            glGetStringi: Option<unsafe extern "system" fn(GLenum, GLuint) -> *const u8>,
         }
 
         impl Gl {
@@ -110,6 +122,14 @@ macro_rules! gl_functions {
                     // SAFETY: as above, for glBindSampler's signature.
                     glBindSampler: find("glBindSampler\0").map(|p| unsafe {
                         std::mem::transmute::<*const c_void, unsafe extern "system" fn(GLuint, GLuint)>(p)
+                    }),
+                    // SAFETY: as above, for glEGLImageTargetTexture2DOES's signature.
+                    glEGLImageTargetTexture2DOES: find("glEGLImageTargetTexture2DOES\0").map(|p| unsafe {
+                        std::mem::transmute::<*const c_void, unsafe extern "system" fn(GLenum, *mut c_void)>(p)
+                    }),
+                    // SAFETY: as above, for glGetStringi's signature.
+                    glGetStringi: find("glGetStringi\0").map(|p| unsafe {
+                        std::mem::transmute::<*const c_void, unsafe extern "system" fn(GLenum, GLuint) -> *const u8>(p)
                     }),
                 })
             }
@@ -156,6 +176,7 @@ gl_functions! {
     glUseProgram: fn(GLuint);
     glGetUniformLocation: fn(GLuint, *const c_char) -> GLint;
     glUniform1i: fn(GLint, GLint);
+    glUniform2f: fn(GLint, GLfloat, GLfloat);
     glUniform3f: fn(GLint, GLfloat, GLfloat, GLfloat);
     glUniformMatrix3fv: fn(GLint, GLsizei, GLboolean, *const GLfloat);
     glGenBuffers: fn(GLsizei, *mut GLuint);
@@ -169,6 +190,20 @@ gl_functions! {
     glEnableVertexAttribArray: fn(GLuint);
     glDrawArrays: fn(GLenum, GLint, GLsizei);
     glFinish: fn();
+}
+
+/// One NV12 picture as EGL images, and the conversion to apply.
+pub struct Nv12Images {
+    /// Luma (`R8`) and interleaved chroma (`GR88`) EGL images.
+    pub images: [*mut c_void; 2],
+    /// The picture's size; the target texture gets this size.
+    pub width: u32,
+    pub height: u32,
+    /// The part of the images the picture covers (the images can be larger:
+    /// 1088 rows for 1080), in texture coordinates.
+    pub scale: [f32; 2],
+    pub matrix: [f32; 9],
+    pub offset: [f32; 3],
 }
 
 /// One 4:2:0 picture: tightly packed planes (chroma rounded up for odd
@@ -209,6 +244,44 @@ void main() {
     vec3 yuv = vec3(texture(u_y, v_uv).r, texture(u_u, v_uv).r, texture(u_v, v_uv).r) - u_offset;
     frag_color = vec4(clamp(u_matrix * yuv, 0.0, 1.0), 1.0);
 }";
+
+// Luma from one texture, both chroma samples from the other (GR88: U in red,
+// V in green). The images can be larger than the picture: `u_scale` keeps
+// the sampling inside it.
+const NV12_FRAGMENT_BODY: &str = "
+uniform sampler2D u_y;
+uniform sampler2D u_uv;
+uniform mat3 u_matrix;
+uniform vec3 u_offset;
+uniform vec2 u_scale;
+in vec2 v_uv;
+out vec4 frag_color;
+void main() {
+    vec2 uv = v_uv * u_scale;
+    vec3 yuv = vec3(texture(u_y, uv).r, texture(u_uv, uv).rg) - u_offset;
+    frag_color = vec4(clamp(u_matrix * yuv, 0.0, 1.0), 1.0);
+}";
+
+/// Whether the context lists `name` (indexed strings on OpenGL 3 and
+/// OpenGL ES 3, the single string otherwise).
+unsafe fn has_gl_extension(gl: &Gl, name: &str) -> bool {
+    unsafe {
+        let matches = |s: *const u8| !s.is_null() && CStr::from_ptr(s.cast()).to_bytes() == name.as_bytes();
+        if let Some(get_stringi) = gl.glGetStringi {
+            let mut count = 0;
+            (gl.glGetIntegerv)(GL_NUM_EXTENSIONS, &mut count);
+            if (gl.glGetError)() == GL_NO_ERROR {
+                return (0..count.max(0) as GLuint).any(|i| matches(get_stringi(GL_EXTENSIONS, i)));
+            }
+        }
+        let all = (gl.glGetString)(GL_EXTENSIONS);
+        !all.is_null()
+            && CStr::from_ptr(all.cast())
+                .to_string_lossy()
+                .split_whitespace()
+                .any(|e| e == name)
+    }
+}
 
 /// Whether `GL_VERSION` names OpenGL ES, and its major and minor version.
 fn parse_version(version: &str) -> Option<(bool, u32, u32)> {
@@ -255,9 +328,23 @@ struct Objects {
     vao: GLuint,
     /// Y, U, V.
     planes: [GLuint; 3],
+    /// The size the plane textures are allocated for.
+    planes_size: (u32, u32),
     fbo: GLuint,
     target: GLuint,
     size: (u32, u32),
+    /// The NV12 program and textures, made for the first NV12 picture.
+    nv12: Option<Nv12Objects>,
+}
+
+#[derive(Default)]
+struct Nv12Objects {
+    program: GLuint,
+    u_matrix: GLint,
+    u_offset: GLint,
+    u_scale: GLint,
+    /// Luma, chroma; their storage comes from EGL images.
+    textures: [GLuint; 2],
 }
 
 /// The conversion pass of one GL context.
@@ -267,6 +354,13 @@ pub struct YuvPass {
     /// The context's `GL_VERSION`.
     pub version: String,
     objects: Option<Objects>,
+}
+
+impl YuvPass {
+    /// The context makes textures from EGL images ([`Self::draw_nv12`]).
+    pub fn draws_egl_images(&self) -> bool {
+        self.gl.glEGLImageTargetTexture2DOES.is_some()
+    }
 }
 
 impl YuvPass {
@@ -285,6 +379,10 @@ impl YuvPass {
         let header = shader_header(&version)?;
         if !has_samplers(&version) {
             gl.glBindSampler = None;
+        }
+        // SAFETY: the context is current.
+        if gl.glEGLImageTargetTexture2DOES.is_some() && !unsafe { has_gl_extension(&gl, "GL_OES_EGL_image") } {
+            gl.glEGLImageTargetTexture2DOES = None;
         }
         Ok(Self {
             gl,
@@ -340,8 +438,8 @@ impl YuvPass {
             ] {
                 (gl.glPixelStorei)(name, value);
             }
-            let resized = o.size != size;
-            if resized {
+            let resized = resize_target(gl, o, size)?;
+            if o.planes_size != size {
                 for (i, (pw, ph)) in [(w, h), (cw, ch), (cw, ch)].into_iter().enumerate() {
                     (gl.glActiveTexture)(GL_TEXTURE0 + i as GLenum);
                     (gl.glBindTexture)(GL_TEXTURE_2D, o.planes[i]);
@@ -357,26 +455,7 @@ impl YuvPass {
                         ptr::null(),
                     );
                 }
-                (gl.glActiveTexture)(GL_TEXTURE0);
-                (gl.glBindTexture)(GL_TEXTURE_2D, o.target);
-                (gl.glTexImage2D)(
-                    GL_TEXTURE_2D,
-                    0,
-                    GL_RGBA8,
-                    w,
-                    h,
-                    0,
-                    GL_RGBA,
-                    GL_UNSIGNED_BYTE,
-                    ptr::null(),
-                );
-                (gl.glBindFramebuffer)(GL_FRAMEBUFFER, o.fbo);
-                (gl.glFramebufferTexture2D)(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, o.target, 0);
-                let status = (gl.glCheckFramebufferStatus)(GL_FRAMEBUFFER);
-                if status != GL_FRAMEBUFFER_COMPLETE {
-                    return Err(format!("video framebuffer incomplete ({status:#x})"));
-                }
-                o.size = size;
+                o.planes_size = size;
             }
             for (i, ((pw, ph), data)) in [(w, h), (cw, ch), (cw, ch)]
                 .into_iter()
@@ -419,6 +498,86 @@ impl YuvPass {
         }
     }
 
+    /// Converts an NV12 picture held in EGL images into the RGBA target
+    /// texture; returns like [`Self::draw`]. The images stay bound to the
+    /// pass's textures until the next NV12 picture. The context must be
+    /// current.
+    pub fn draw_nv12(&mut self, picture: &Nv12Images) -> Result<(GLuint, bool), String> {
+        if picture.width == 0 || picture.height == 0 || picture.images.iter().any(|i| i.is_null()) {
+            return Err("an empty NV12 picture".into());
+        }
+        let Some(bind_image) = self.gl.glEGLImageTargetTexture2DOES else {
+            return Err("the context cannot make textures from EGL images (GL_OES_EGL_image)".into());
+        };
+        // SAFETY: the context is current; the images are live EGL images of
+        // its display (the caller keeps them until this returns).
+        unsafe {
+            let gl = &self.gl;
+            for _ in 0..16 {
+                if (gl.glGetError)() == GL_NO_ERROR {
+                    break;
+                }
+            }
+            let saved = SavedState::save(gl);
+            let result = self.draw_nv12_saved(picture, bind_image);
+            saved.restore(&self.gl);
+            result
+        }
+    }
+
+    unsafe fn draw_nv12_saved(
+        &mut self,
+        picture: &Nv12Images,
+        bind_image: unsafe extern "system" fn(GLenum, *mut c_void),
+    ) -> Result<(GLuint, bool), String> {
+        unsafe {
+            if self.objects.is_none() {
+                self.objects = Some(create_objects(&self.gl, self.header)?);
+            }
+            let (gl, Some(o)) = (&self.gl, self.objects.as_mut()) else {
+                return Err("no GL objects".into());
+            };
+            if o.nv12.is_none() {
+                o.nv12 = Some(create_nv12_objects(gl, self.header)?);
+            }
+            let size = (picture.width, picture.height);
+            let resized = resize_target(gl, o, size)?;
+            let Some(n) = o.nv12.as_ref() else {
+                return Err("no NV12 objects".into());
+            };
+            for (i, image) in picture.images.into_iter().enumerate() {
+                (gl.glActiveTexture)(GL_TEXTURE0 + i as GLenum);
+                if let Some(bind_sampler) = gl.glBindSampler {
+                    bind_sampler(i as GLuint, 0);
+                }
+                (gl.glBindTexture)(GL_TEXTURE_2D, n.textures[i]);
+                bind_image(GL_TEXTURE_2D, image);
+            }
+            let error = (gl.glGetError)();
+            if error != GL_NO_ERROR {
+                return Err(format!("GL error {error:#x} binding the picture's EGL images"));
+            }
+            (gl.glBindFramebuffer)(GL_FRAMEBUFFER, o.fbo);
+            (gl.glViewport)(0, 0, size.0 as GLsizei, size.1 as GLsizei);
+            for cap in DISABLED_CAPS {
+                (gl.glDisable)(cap);
+            }
+            (gl.glColorMask)(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            (gl.glUseProgram)(n.program);
+            (gl.glUniformMatrix3fv)(n.u_matrix, 1, GL_FALSE, picture.matrix.as_ptr());
+            let [y, u, v] = picture.offset;
+            (gl.glUniform3f)(n.u_offset, y, u, v);
+            let [sx, sy] = picture.scale;
+            (gl.glUniform2f)(n.u_scale, sx, sy);
+            (gl.glBindVertexArray)(o.vao);
+            (gl.glDrawArrays)(GL_TRIANGLE_STRIP, 0, 4);
+            match (gl.glGetError)() {
+                GL_NO_ERROR => Ok((o.target, resized)),
+                e => Err(format!("GL error {e:#x} drawing the NV12 video")),
+            }
+        }
+    }
+
     /// Waits for submitted GL work (after a failure, before giving up).
     pub fn finish(&self) {
         // SAFETY: the context is current.
@@ -443,8 +602,43 @@ impl YuvPass {
             (gl.glDeleteTextures)(3, o.planes.as_ptr());
             (gl.glDeleteTextures)(1, &o.target);
             (gl.glDeleteFramebuffers)(1, &o.fbo);
+            if let Some(n) = o.nv12 {
+                (gl.glDeleteProgram)(n.program);
+                (gl.glDeleteTextures)(2, n.textures.as_ptr());
+            }
         }
     }
+}
+
+/// (Re)allocates the RGBA target for `size`; whether it was. The caller's
+/// saved state puts the bindings back.
+unsafe fn resize_target(gl: &Gl, o: &mut Objects, size: (u32, u32)) -> Result<bool, String> {
+    if o.size == size {
+        return Ok(false);
+    }
+    unsafe {
+        (gl.glActiveTexture)(GL_TEXTURE0);
+        (gl.glBindTexture)(GL_TEXTURE_2D, o.target);
+        (gl.glTexImage2D)(
+            GL_TEXTURE_2D,
+            0,
+            GL_RGBA8,
+            size.0 as GLsizei,
+            size.1 as GLsizei,
+            0,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            ptr::null(),
+        );
+        (gl.glBindFramebuffer)(GL_FRAMEBUFFER, o.fbo);
+        (gl.glFramebufferTexture2D)(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, o.target, 0);
+        let status = (gl.glCheckFramebufferStatus)(GL_FRAMEBUFFER);
+        if status != GL_FRAMEBUFFER_COMPLETE {
+            return Err(format!("video framebuffer incomplete ({status:#x})"));
+        }
+    }
+    o.size = size;
+    Ok(true)
 }
 
 const DISABLED_CAPS: [GLenum; 5] = [GL_BLEND, GL_SCISSOR_TEST, GL_DEPTH_TEST, GL_STENCIL_TEST, GL_CULL_FACE];
@@ -471,12 +665,11 @@ unsafe fn compile(gl: &Gl, kind: GLenum, header: &str, body: &str) -> Result<GLu
     }
 }
 
-/// Program, quad and textures; the bindings it changes are restored by the
-/// caller's saved state.
-unsafe fn create_objects(gl: &Gl, header: &str) -> Result<Objects, String> {
+/// Compiles and links the quad's vertex shader with `fragment`.
+unsafe fn link(gl: &Gl, header: &str, fragment: &str) -> Result<GLuint, String> {
     unsafe {
         let vs = compile(gl, GL_VERTEX_SHADER, header, VERTEX_BODY)?;
-        let fs = match compile(gl, GL_FRAGMENT_SHADER, header, FRAGMENT_BODY) {
+        let fs = match compile(gl, GL_FRAGMENT_SHADER, header, fragment) {
             Ok(fs) => fs,
             Err(e) => {
                 (gl.glDeleteShader)(vs);
@@ -501,6 +694,60 @@ unsafe fn create_objects(gl: &Gl, header: &str) -> Result<Objects, String> {
                 CStr::from_ptr(log.as_ptr()).to_string_lossy()
             ));
         }
+        Ok(program)
+    }
+}
+
+/// Sets linear filtering and edge clamping on the bound 2D texture.
+unsafe fn set_texture_parameters(gl: &Gl) {
+    for (name, value) in [
+        (GL_TEXTURE_MIN_FILTER, GL_LINEAR),
+        (GL_TEXTURE_MAG_FILTER, GL_LINEAR),
+        (GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE),
+        (GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE),
+    ] {
+        // SAFETY: the context is current.
+        unsafe { (gl.glTexParameteri)(GL_TEXTURE_2D, name, value) };
+    }
+}
+
+/// The NV12 program and its two textures.
+unsafe fn create_nv12_objects(gl: &Gl, header: &str) -> Result<Nv12Objects, String> {
+    unsafe {
+        let program = link(gl, header, NV12_FRAGMENT_BODY)?;
+        let mut n = Nv12Objects {
+            program,
+            u_matrix: (gl.glGetUniformLocation)(program, c"u_matrix".as_ptr()),
+            u_offset: (gl.glGetUniformLocation)(program, c"u_offset".as_ptr()),
+            u_scale: (gl.glGetUniformLocation)(program, c"u_scale".as_ptr()),
+            ..Nv12Objects::default()
+        };
+        (gl.glUseProgram)(program);
+        for (unit, name) in [c"u_y", c"u_uv"].into_iter().enumerate() {
+            (gl.glUniform1i)((gl.glGetUniformLocation)(program, name.as_ptr()), unit as GLint);
+        }
+        (gl.glGenTextures)(2, n.textures.as_mut_ptr());
+        (gl.glActiveTexture)(GL_TEXTURE0);
+        for texture in n.textures {
+            (gl.glBindTexture)(GL_TEXTURE_2D, texture);
+            set_texture_parameters(gl);
+        }
+        match (gl.glGetError)() {
+            GL_NO_ERROR => Ok(n),
+            e => {
+                (gl.glDeleteProgram)(program);
+                (gl.glDeleteTextures)(2, n.textures.as_ptr());
+                Err(format!("GL error {e:#x} setting up the NV12 video pass"))
+            }
+        }
+    }
+}
+
+/// Program, quad and textures; the bindings it changes are restored by the
+/// caller's saved state.
+unsafe fn create_objects(gl: &Gl, header: &str) -> Result<Objects, String> {
+    unsafe {
+        let program = link(gl, header, FRAGMENT_BODY)?;
         let mut o = Objects {
             program,
             u_matrix: (gl.glGetUniformLocation)(program, c"u_matrix".as_ptr()),
@@ -532,14 +779,7 @@ unsafe fn create_objects(gl: &Gl, header: &str) -> Result<Objects, String> {
         (gl.glActiveTexture)(GL_TEXTURE0);
         for texture in o.planes.into_iter().chain([o.target]) {
             (gl.glBindTexture)(GL_TEXTURE_2D, texture);
-            for (name, value) in [
-                (GL_TEXTURE_MIN_FILTER, GL_LINEAR),
-                (GL_TEXTURE_MAG_FILTER, GL_LINEAR),
-                (GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE),
-                (GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE),
-            ] {
-                (gl.glTexParameteri)(GL_TEXTURE_2D, name, value);
-            }
+            set_texture_parameters(gl);
         }
         (gl.glGenFramebuffers)(1, &mut o.fbo);
         match (gl.glGetError)() {
@@ -694,6 +934,9 @@ mod gl_tests {
     type MakeCurrent = unsafe extern "C" fn(Display, *mut c_void, *mut c_void, *mut c_void) -> u32;
     type DestroyContext = unsafe extern "C" fn(Display, *mut c_void) -> u32;
     type ReadPixels = unsafe extern "system" fn(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, *mut c_void);
+    type QueryString = unsafe extern "C" fn(Display, i32) -> *const c_char;
+    type CreateImage = unsafe extern "C" fn(Display, *mut c_void, u32, *mut c_void, *const i32) -> *mut c_void;
+    type DestroyImage = unsafe extern "C" fn(Display, *mut c_void) -> u32;
 
     const EGL_PLATFORM_SURFACELESS_MESA: GLenum = 0x31DD;
     const EGL_OPENGL_ES_API: u32 = 0x30A0;
@@ -701,6 +944,7 @@ mod gl_tests {
 
     struct Egl {
         get_proc_address: GetProcAddress,
+        query_string: QueryString,
         display: Display,
         make_current: MakeCurrent,
         destroy_context: DestroyContext,
@@ -734,6 +978,7 @@ mod gl_tests {
             }
             Some(Egl {
                 get_proc_address,
+                query_string: symbol(lib, c"eglQueryString")?,
                 display,
                 make_current: symbol(lib, c"eglMakeCurrent")?,
                 destroy_context: symbol(lib, c"eglDestroyContext")?,
@@ -908,6 +1153,128 @@ mod gl_tests {
         unsafe { (gl.glDeleteTextures)(1, &texture) };
     }
 
+    /// Draws an NV12 picture from EGL images (made from GL textures here,
+    /// as no DMA-BUF exists in the test) whose storage is larger than the
+    /// picture, like a decoder's 1088-row buffers for 1080p.
+    fn check_nv12(egl: &Egl, context: *mut c_void, label: &str) {
+        const EGL_EXTENSIONS: i32 = 0x3055;
+        const EGL_GL_TEXTURE_2D_KHR: u32 = 0x30B1;
+        const GL_RG: GLenum = 0x8227;
+        const GL_RG8: GLint = 0x822B;
+        let get = |name: &CStr| unsafe { (egl.get_proc_address)(name.as_ptr()) };
+        let extensions = unsafe { (egl.query_string)(egl.display, EGL_EXTENSIONS) };
+        let has_images = !extensions.is_null()
+            && unsafe { CStr::from_ptr(extensions) }
+                .to_string_lossy()
+                .split_whitespace()
+                .any(|e| e == "EGL_KHR_gl_texture_2D_image");
+        let mut pass = YuvPass::new(&get).unwrap_or_else(|e| panic!("{label}: {e}"));
+        if !has_images || !pass.draws_egl_images() {
+            eprintln!("{label}: no EGL images from GL textures here, NV12 pass not checked");
+            return;
+        }
+        let create_image: CreateImage = unsafe { std::mem::transmute(get(c"eglCreateImageKHR")) };
+        let destroy_image: DestroyImage = unsafe { std::mem::transmute(get(c"eglDestroyImageKHR")) };
+        let read: ReadPixels = unsafe { std::mem::transmute(get(c"glReadPixels")) };
+        let gl = Gl::load(&get).unwrap();
+
+        let (cw, ch) = (70usize, 38usize);
+        let (w, h) = (63usize, 35usize);
+        let y: Vec<u8> = (0..cw * ch).map(|i| (16 + (i * 29) % 220) as u8).collect();
+        let (cu, cv) = (54u8, 200u8);
+        let uv: Vec<u8> = [cu, cv].repeat(cw.div_ceil(2) * ch.div_ceil(2));
+        let mut textures = [0; 2];
+        let images = unsafe {
+            (gl.glGenTextures)(2, textures.as_mut_ptr());
+            (gl.glPixelStorei)(GL_UNPACK_ALIGNMENT, 1);
+            for (texture, (internal, format, (tw, th), data)) in textures.into_iter().zip([
+                (GL_R8, GL_RED, (cw, ch), &y),
+                (GL_RG8, GL_RG, (cw.div_ceil(2), ch.div_ceil(2)), &uv),
+            ]) {
+                (gl.glBindTexture)(GL_TEXTURE_2D, texture);
+                // Complete without mipmaps, as EGL images need.
+                (gl.glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                (gl.glTexImage2D)(
+                    GL_TEXTURE_2D,
+                    0,
+                    internal,
+                    tw as GLsizei,
+                    th as GLsizei,
+                    0,
+                    format,
+                    GL_UNSIGNED_BYTE,
+                    data.as_ptr().cast(),
+                );
+            }
+            (gl.glBindTexture)(GL_TEXTURE_2D, 0);
+            textures.map(|t| {
+                create_image(
+                    egl.display,
+                    context,
+                    EGL_GL_TEXTURE_2D_KHR,
+                    t as usize as *mut c_void,
+                    [0x3038].as_ptr(),
+                )
+            })
+        };
+        if images.iter().any(|i| i.is_null()) {
+            eprintln!("{label}: eglCreateImageKHR refused GL textures, NV12 pass not checked");
+            return;
+        }
+        let (matrix, offset) = hestia_media::Colorimetry::Bt709Limited.gpu_conversion();
+        let picture = Nv12Images {
+            images,
+            width: w as u32,
+            height: h as u32,
+            scale: [w as f32 / cw as f32, h as f32 / ch as f32],
+            matrix,
+            offset,
+        };
+        let (target, resized) = pass.draw_nv12(&picture).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert!(target != 0 && resized, "{label}: target allocated");
+        let mut out = vec![0u8; w * h * 4];
+        unsafe {
+            (gl.glBindFramebuffer)(GL_READ_FRAMEBUFFER, pass.framebuffer().unwrap());
+            read(
+                0,
+                0,
+                w as GLsizei,
+                h as GLsizei,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                out.as_mut_ptr().cast(),
+            );
+            (gl.glBindFramebuffer)(GL_READ_FRAMEBUFFER, 0);
+        }
+        for (i, px) in out.as_chunks::<4>().0.iter().enumerate() {
+            // Pixel (x, y) of the picture is texel (x, y) of the luma image.
+            let luma = y[(i / w) * cw + i % w];
+            let yuv = [
+                f32::from(luma) / 255.0 - offset[0],
+                f32::from(cu) / 255.0 - offset[1],
+                f32::from(cv) / 255.0 - offset[2],
+            ];
+            for c in 0..3 {
+                let want = (matrix[c] * yuv[0] + matrix[3 + c] * yuv[1] + matrix[6 + c] * yuv[2]).clamp(0.0, 1.0);
+                let got = f32::from(px[c]);
+                assert!(
+                    (want * 255.0 - got).abs() <= 1.0,
+                    "{label}: NV12 pixel {i} channel {c}: {got} vs {}",
+                    want * 255.0
+                );
+            }
+        }
+        // The same size again: no reallocation.
+        assert!(!pass.draw_nv12(&picture).unwrap().1, "{label}: target kept");
+        pass.delete();
+        unsafe {
+            for image in images {
+                destroy_image(egl.display, image);
+            }
+            (gl.glDeleteTextures)(2, textures.as_ptr());
+        }
+    }
+
     #[test]
     fn converts_on_mesa_in_every_context_kind() {
         let Some(egl) = egl() else {
@@ -948,6 +1315,7 @@ mod gl_tests {
             };
             if shader_header(&version).is_ok() {
                 check_context(&egl, label);
+                check_nv12(&egl, context, label);
                 tested += 1;
             } else {
                 eprintln!("{label}: {version} is too old for the pass");

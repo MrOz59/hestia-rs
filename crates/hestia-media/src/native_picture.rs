@@ -3,10 +3,15 @@
 //! A decoded frame either carries RGBA pixels, which the UI toolkit uploads
 //! as an image, or a [`NativePicture`], which the window's GPU renderer takes
 //! at draw time: a hardware buffer on Android, 4:2:0 planes from a software
-//! decoder on the desktop (the GPU converts them to RGB). Dropping an unused
-//! picture releases it: the hardware image goes back to its reader, planes
-//! go back to the decoder's pool.
+//! decoder on the desktop, or a hardware decoder's DMA-BUF on Linux (the GPU
+//! converts both to RGB). Dropping an unused picture releases it: the
+//! hardware image goes back to its reader, planes go back to the decoder's
+//! pool, the DMA-BUF back to the hardware decoder.
 
+#[cfg(target_os = "linux")]
+use std::os::fd::RawFd;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -18,6 +23,74 @@ pub enum NativePicture {
     Android(crate::gpu_video::GpuPicture),
     /// 4:2:0 planes in CPU memory, converted to RGB by the renderer.
     Planar(PlanarPicture),
+    /// An NV12 picture in GPU memory, shared as a DMA-BUF (VA-API).
+    #[cfg(target_os = "linux")]
+    Dmabuf(DmabufPicture),
+}
+
+/// One plane of a [`DmabufPicture`].
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DmabufPlane {
+    /// The DMA-BUF holding the plane; valid while the picture lives.
+    pub fd: RawFd,
+    pub offset: u32,
+    pub pitch: u32,
+    /// DRM format modifier (tiling, compression) of the buffer.
+    pub modifier: u64,
+}
+
+/// An NV12 picture decoded into GPU memory, for the renderer to import as
+/// EGL images (`R8` luma, `GR88` chroma) without copying it.
+#[cfg(target_os = "linux")]
+pub struct DmabufPicture {
+    /// Y, then interleaved UV. Compressed buffers (Intel CCS) have their two
+    /// compression planes after these, in the same order (4 planes).
+    pub planes: Vec<DmabufPlane>,
+    /// The buffer's size; the picture is its top-left `width` × `height`.
+    pub coded_width: u32,
+    pub coded_height: u32,
+    pub width: u32,
+    pub height: u32,
+    pub colorimetry: Colorimetry,
+    /// The same for every picture decoded into the same buffer, so a
+    /// renderer can keep its imports.
+    pub buffer_id: u64,
+    /// Keeps the memory out of the decoder's reach while the picture lives.
+    _owner: Arc<dyn std::any::Any + Send + Sync>,
+}
+
+#[cfg(target_os = "linux")]
+impl DmabufPicture {
+    pub fn new(
+        owner: Arc<dyn std::any::Any + Send + Sync>,
+        planes: Vec<DmabufPlane>,
+        (coded_width, coded_height): (u32, u32),
+        (width, height): (u32, u32),
+        colorimetry: Colorimetry,
+        buffer_id: u64,
+    ) -> Self {
+        Self {
+            planes,
+            coded_width,
+            coded_height,
+            width,
+            height,
+            colorimetry,
+            buffer_id,
+            _owner: owner,
+        }
+    }
+
+    /// The luma and chroma planes with their compression planes, if any:
+    /// `(Y, Y-CCS)`, `(UV, UV-CCS)`.
+    pub fn luma_chroma(&self) -> Option<[(DmabufPlane, Option<DmabufPlane>); 2]> {
+        match self.planes[..] {
+            [y, uv] => Some([(y, None), (uv, None)]),
+            [y, uv, y_aux, uv_aux] => Some([(y, Some(y_aux)), (uv, Some(uv_aux))]),
+            _ => None,
+        }
+    }
 }
 
 /// Spare plane buffers kept for reuse: one being decoded into, one pending,
@@ -92,6 +165,34 @@ impl PlanarPicture {
         })
     }
 
+    /// Copies an NV12 picture (interleaved chroma, as hardware decoders
+    /// write it) into pooled I420 storage.
+    pub fn copy_from_nv12(
+        pool: &Arc<PlanePool>,
+        (y, uv): (&[u8], &[u8]),
+        (y_stride, uv_stride): (usize, usize),
+        width: usize,
+        height: usize,
+        colorimetry: Colorimetry,
+    ) -> Result<Self, String> {
+        let (cw, ch) = (width.div_ceil(2), height.div_ceil(2));
+        let mut data = pool.take(width * height + 2 * cw * ch);
+        let (dy, chroma) = data.split_at_mut(width * height);
+        let (du, dv) = chroma.split_at_mut(cw * ch);
+        let copied = copy_plane(y, y_stride, width, dy) && split_chroma(uv, uv_stride, cw, du, dv);
+        if !copied {
+            pool.put(data);
+            return Err(format!("NV12 planes too short for {width}x{height}"));
+        }
+        Ok(Self {
+            data,
+            pool: pool.clone(),
+            width: width as u32,
+            height: height as u32,
+            colorimetry,
+        })
+    }
+
     /// The Y, U and V planes.
     pub fn planes(&self) -> (&[u8], &[u8], &[u8]) {
         let luma = self.width as usize * self.height as usize;
@@ -116,6 +217,29 @@ fn copy_plane(src: &[u8], stride: usize, width: usize, dst: &mut [u8]) -> bool {
     true
 }
 
+/// Splits rows of interleaved UV pairs into separate U and V planes of
+/// `width` samples per row.
+fn split_chroma(src: &[u8], stride: usize, width: usize, u: &mut [u8], v: &mut [u8]) -> bool {
+    if width == 0 {
+        return true;
+    }
+    for (row, (u_row, v_row)) in u.chunks_exact_mut(width).zip(v.chunks_exact_mut(width)).enumerate() {
+        let Some(line) = src.get(row * stride..row * stride + 2 * width) else {
+            return false;
+        };
+        for (&[cb, cr], (u, v)) in line
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(u_row.iter_mut().zip(v_row.iter_mut()))
+        {
+            *u = cb;
+            *v = cr;
+        }
+    }
+    true
+}
+
 impl Drop for PlanarPicture {
     fn drop(&mut self) {
         self.pool.put(std::mem::take(&mut self.data));
@@ -127,9 +251,32 @@ impl Drop for PlanarPicture {
 pub struct GpuRendererStatus {
     ready: AtomicBool,
     failure: Mutex<Option<String>>,
+    /// The renderer imports DMA-BUF pictures (Linux, EGL).
+    #[cfg(target_os = "linux")]
+    dmabuf: AtomicBool,
+    /// The DRM render node of the renderer's GPU, when it knows it.
+    #[cfg(target_os = "linux")]
+    render_node: Mutex<Option<PathBuf>>,
 }
 
 impl GpuRendererStatus {
+    /// The renderer can draw [`DmabufPicture`]s from buffers on its GPU
+    /// (`render_node`, when known: a hardware decoder there shares them).
+    #[cfg(target_os = "linux")]
+    pub fn set_dmabuf(&self, render_node: Option<PathBuf>) {
+        *self.render_node.lock().unwrap_or_else(|p| p.into_inner()) = render_node;
+        self.dmabuf.store(true, Ordering::Release);
+    }
+
+    /// Importing DMA-BUFs failed: decoders read their pictures back instead.
+    /// The rest of the GPU path stays.
+    #[cfg(target_os = "linux")]
+    pub fn dmabuf_failed(&self, why: String) {
+        if self.dmabuf.swap(false, Ordering::AcqRel) {
+            log::warn!("DMA-BUF video import failed, decoded pictures are copied instead: {why}");
+        }
+    }
+
     pub fn ready(&self) {
         *self.failure.lock().unwrap_or_else(|p| p.into_inner()) = None;
         self.ready.store(true, Ordering::Release);
@@ -168,6 +315,22 @@ impl GpuOutput {
         !self.retired.load(Ordering::Acquire) && self.renderer.ready.load(Ordering::Acquire)
     }
 
+    /// The renderer draws [`DmabufPicture`]s now.
+    #[cfg(target_os = "linux")]
+    pub fn dmabuf(&self) -> bool {
+        self.available() && self.renderer.dmabuf.load(Ordering::Acquire)
+    }
+
+    /// The renderer's GPU, as a DRM render node, when it knows it.
+    #[cfg(target_os = "linux")]
+    pub fn render_node(&self) -> Option<PathBuf> {
+        self.renderer
+            .render_node
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub(crate) fn failure(&self) -> Option<String> {
         self.renderer.failure.lock().unwrap_or_else(|p| p.into_inner()).clone()
@@ -199,6 +362,20 @@ mod tests {
         drop(picture);
         let again = PlanarPicture::copy_from(&pool, (&y, &u, &v), (4, 4, 4), 3, 3, Colorimetry::default()).unwrap();
         assert_eq!(again.data.as_ptr(), storage, "the dropped picture's storage is reused");
+    }
+
+    #[test]
+    fn nv12_chroma_is_split_into_planes() {
+        let pool = Arc::new(PlanePool::default());
+        // 3x3 picture: luma stride 4, chroma 2x2 pairs in stride 6.
+        let y: Vec<u8> = (0..12).collect();
+        let uv = [100, 200, 101, 201, 0, 0, 102, 202, 103, 203, 0, 0];
+        let picture = PlanarPicture::copy_from_nv12(&pool, (&y, &uv), (4, 6), 3, 3, Colorimetry::default()).unwrap();
+        let (py, pu, pv) = picture.planes();
+        assert_eq!(py, [0, 1, 2, 4, 5, 6, 8, 9, 10]);
+        assert_eq!(pu, [100, 101, 102, 103]);
+        assert_eq!(pv, [200, 201, 202, 203]);
+        assert!(PlanarPicture::copy_from_nv12(&pool, (&y, &uv[..8]), (4, 6), 3, 3, Colorimetry::default()).is_err());
     }
 
     #[test]

@@ -18,8 +18,11 @@
 //! * `mediacodec` (Android): hardware H.264/HEVC/AV1 through `AMediaCodec`,
 //!   rendered into GPU buffers the UI draws directly (`gpu_video`), or read
 //!   back on the CPU; falls back to OpenH264 for H.264.
+//! * `vaapi` (Linux, feature `vaapi`): hardware H.264/HEVC/AV1 through
+//!   VA-API, its NV12 pictures shared with the window's renderer as
+//!   DMA-BUFs, or read back.
 //!
-//! Planned: `vaapi` (Linux, DMA-BUF into the GL view), surround audio.
+//! Planned: surround audio.
 //!
 //! See `docs/VIDEO.md` in the repository for the whole video pipeline.
 
@@ -45,6 +48,8 @@ pub mod opus_decode;
 pub mod picture_mailbox;
 #[cfg(feature = "openh264")]
 pub mod software_h264;
+#[cfg(all(feature = "vaapi", target_os = "linux"))]
+pub mod vaapi;
 pub mod video_decoder;
 
 pub use color::Colorimetry;
@@ -77,7 +82,7 @@ pub fn video_backends() -> Vec<BackendInfo> {
                 "VA-API"
             },
             hardware: true,
-            available: cfg!(target_os = "android"),
+            available: cfg!(any(target_os = "android", all(feature = "vaapi", target_os = "linux"))),
         },
         BackendInfo {
             name: "OpenH264 (software H.264)",

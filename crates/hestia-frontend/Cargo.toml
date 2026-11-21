@@ -13,6 +13,8 @@ build = "build.rs"
 default = ["openh264"]
 # Software H.264 decoding (the fallback; Android decodes with MediaCodec).
 openh264 = ["hestia-media/openh264"]
+# Hardware decoding through VA-API on Linux (see hestia-media).
+vaapi = ["hestia-media/vaapi"]
 
 [dependencies]
 hestia-core.workspace = true

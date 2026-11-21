@@ -47,7 +47,12 @@ pub fn decoder_with(colorimetry: Colorimetry, hardware: bool) -> Result<DecoderC
         {
             MediaCodecDecoder::probe(colorimetry).map(mediacodec_choice)
         }
-        #[cfg(not(target_os = "android"))]
+        // No window renderer here: pictures are read back as RGBA.
+        #[cfg(all(feature = "vaapi", target_os = "linux"))]
+        {
+            crate::vaapi::probe(colorimetry, None)
+        }
+        #[cfg(not(any(target_os = "android", all(feature = "vaapi", target_os = "linux"))))]
         {
             let _ = colorimetry;
             None

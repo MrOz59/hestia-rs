@@ -28,7 +28,8 @@ jobs:
 
       # nasm: OpenH264's x86 SIMD code (without it the openh264 crate quietly
       # builds the plain C decoder, about a quarter slower). Mesa's EGL lets
-      # the GPU colour-conversion test run headless.
+      # the GPU colour-conversion test run headless. VA-API decoding builds
+      # libva bindings with bindgen (libva-dev, libclang) and links libgbm.
       - name: System packages for Slint
         run: |
           sudo apt-get update
@@ -36,7 +37,8 @@ jobs:
             libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
             libgl1-mesa-dev libegl1-mesa-dev libegl-mesa0 libgl1-mesa-dri \
-            libopus-dev libasound2-dev nasm
+            libopus-dev libasound2-dev nasm \
+            libva-dev libgbm-dev libdrm-dev libclang-dev
 
       # The key changed with nasm: a cached openh264-sys2 built without it
       # would otherwise be reused (its build script doesn't look again).

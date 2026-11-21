@@ -31,7 +31,7 @@ Every push to `main` that passes CI replaces the **`nightly`** pre-release
 | --- | --- |
 | `hestia-rs-android-universal.apk` | any Android device: phones, tablets, Android TV, Chromebooks (all four ABIs) |
 | `hestia-rs-android-<abi>.apk` | a smaller APK for one ABI (most phones: `arm64-v8a`) |
-| `hestia-rs-linux-x86_64.tar.gz` | desktop Linux on Wayland (needs libopus, ALSA and a recent glibc) |
+| `hestia-rs-linux-x86_64.tar.gz` | desktop Linux on Wayland (needs libopus, ALSA, libva, libgbm and a recent glibc) |
 | `ui-screenshots.zip` | the screens, rendered headless (phone and desktop) |
 | `SHA256SUMS` | checksums |
 
@@ -85,9 +85,13 @@ a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
   - *Android*: MediaCodec (H.264, HEVC, AV1) renders into GPU buffers the UI
     draws directly, with no CPU copy (Settings → Zero-copy video). Without
     it, pictures are read back on the CPU; OpenH264 is the last fallback.
-  - *Desktop*: OpenH264 (software H.264, built with its SIMD code), with the
-    GPU converting its YUV planes to RGB while drawing them (Settings → GPU
-    colour conversion), or the CPU when that's off or unavailable.
+  - *Linux desktop*: VA-API (H.264, HEVC, AV1) decodes into GPU memory the
+    window draws in place, shared as DMA-BUFs: no copy at all (Settings →
+    GPU colour conversion). Without EGL DMA-BUF import the pictures are
+    copied out, and without a usable VA-API device (or with Settings →
+    Hardware decoding off) OpenH264 decodes H.264 in software, with the GPU
+    converting its YUV planes to RGB while drawing them, or the CPU when
+    that's off or unavailable.
   - Decoding runs on its own thread and never drops a compressed frame for
     being late (dropping one would cost a keyframe): bursts decode through
     and only the newest picture is shown. Keyframe requests back off when
@@ -178,6 +182,9 @@ a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
   Android backend with an input hook (controllers), a fix for mouse-wheel
   scrolling (it crashed upstream) and remote/controller keys for the UI (see
   its `PATCHES.md`).
+- **cros-codecs patch**: `third_party/cros-codecs` is ChromeOS's VA-API
+  decoders with a low-delay mode (each picture comes out as soon as it is
+  decoded) and a build fix for libva 2.23 (see its `PATCHES.md`).
 - A **`hestia` CLI** for scripting and testing hosts.
 
 ### Known limits
@@ -189,10 +196,14 @@ a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
   that only show up with them aren't a priority.
 - **X11**: not a target. Slint's window backend can still open on X11, but
   nothing is tested or tuned there. Desktop features are built for Wayland:
-  the clipboard today, pointer capture and VA-API/DMA-BUF video next.
-- **Desktop video**: H.264 only, decoded in software (VA-API is next); a 4K or
-  high-frame-rate stream may be more than one CPU core can decode. HEVC and
-  AV1 need Android's hardware decoder.
+  the clipboard and zero-copy video today (on X11 with GLX, hardware-decoded
+  pictures are copied), pointer capture next.
+- **VA-API is new** and hasn't been tried on real hardware yet. It needs a
+  driver that can import its own surfaces back (Intel's media driver and
+  Mesa's for AMD and Intel): NVIDIA's VA-API driver can't, so NVIDIA
+  desktops decode H.264 in software for now, where a 4K or high-frame-rate
+  stream may be more than one CPU core can handle. 8-bit only (no 10-bit
+  HEVC or AV1 yet).
 - No HDR presentation (10-bit) yet; surround audio is mixed down to stereo.
 - Keys are mapped by the character they produce (US layout), not by physical
   scancode; the desktop mouse is absolute only (no pointer capture); no
@@ -208,12 +219,12 @@ crates/
   hestia-discovery   mDNS discovery (legacy-unicast queries, no multicast lock needed)
   hestia-core        UI-agnostic facade: identity, host store, settings, pairing, apps, launch, reports
   hestia-stream      streaming data plane: RTSP, ENet control, video + FEC, audio, input
-  hestia-media       decoders and players behind VideoSink/AudioSink (MediaCodec, OpenH264, Opus)
+  hestia-media       decoders and players behind VideoSink/AudioSink (MediaCodec, VA-API, OpenH264, Opus)
   hestia-frontend    the GUI without a toolkit: controller, input, platform services, video presentation
 apps/
   hestia-app         the Slint shell over hestia-frontend (desktop binary + Android cdylib)
   hestia-cli         `hestia` command-line client
-third_party/         Slint's Android backend, patched
+third_party/         Slint's Android backend and cros-codecs (VA-API decoding), patched
 tools/               ENet interop test, FEC reference vectors
 scripts/             Android packaging and install checks
 ```
@@ -229,18 +240,26 @@ backend in `third_party`, needs 1.95).
 ### Linux
 
 ```sh
-# Debian/Ubuntu: Slint, audio (Opus, ALSA), a C++ compiler and nasm for OpenH264
+# Debian/Ubuntu: Slint, audio (Opus, ALSA), a C++ compiler and nasm for OpenH264,
+# libva, libgbm and libclang for VA-API
 sudo apt install build-essential nasm libfontconfig1-dev libxkbcommon-dev libwayland-dev \
-    libopus-dev libasound2-dev
+    libopus-dev libasound2-dev libva-dev libgbm-dev libdrm-dev libclang-dev
 # Arch/CachyOS
-sudo pacman -S --needed base-devel nasm fontconfig libxkbcommon wayland opus alsa-lib
+sudo pacman -S --needed base-devel nasm fontconfig libxkbcommon wayland opus alsa-lib \
+    libva mesa clang
 # Fedora
 sudo dnf install gcc-c++ nasm fontconfig-devel libxkbcommon-devel wayland-devel \
-    opus-devel alsa-lib-devel
+    opus-devel alsa-lib-devel libva-devel mesa-libgbm-devel libdrm-devel clang-devel
 
 cargo run --release -p hestia-app      # GUI
 cargo run --release -p hestia-cli -- --help
 ```
+
+VA-API decoding (feature `vaapi`, on by default) generates its libva
+bindings at build time, hence libclang, and links libva, libva-drm and libgbm.
+Without them: `cargo build --release -p hestia-app --no-default-features
+--features openh264` (software decoding only). The decoder itself is
+cros-codecs, vendored with low-delay changes in `third_party/cros-codecs`.
 
 `nasm` assembles OpenH264's x86 SIMD code. Without it the build still
 works, but the software decoder is about a quarter slower: the build prints
@@ -325,7 +344,8 @@ not changed.
 - a decode of a real H.264 clip, to RGBA and to planes for the GPU;
 - the colour converters against the reference formula;
 - the desktop GPU colour pass in headless Mesa contexts (OpenGL ES 3, OpenGL
-  core and compatibility; skipped where there is no EGL).
+  core and compatibility; skipped where there is no EGL), for planes and for
+  NV12 pictures in EGL images (VA-API's path, from GL textures there).
 
 `tools/enet-interop/run.sh` checks the ENet client against the C ENet that
 hosts use.

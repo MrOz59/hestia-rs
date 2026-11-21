@@ -1,0 +1,48 @@
+# Vendored from cros-codecs (https://github.com/chromeos/cros-codecs) at
+# a050c6cde530e563197ee9e3e72ab01f48a0c41f (the v0.0.6 code) for Hestia RS,
+# with a low-delay mode for the H.264 and H.265 decoders (see PATCHES.md).
+# Used as a path dependency of hestia-media; the root workspace excludes
+# third_party, so it is not built as a member.
+#
+# Left out of the copy: test data, examples, fuzz targets and ChromeOS/Android
+# build metadata. The crate's own unit tests need the test data and are not
+# run here.
+
+[package]
+name = "cros-codecs"
+version = "0.0.6"
+license = "BSD-3-Clause"
+description = "Hardware-accelerated codecs for Linux (Hestia RS low-delay patches)"
+repository = "https://github.com/chromeos/cros-codecs"
+authors = ["The ChromiumOS Authors"]
+edition = "2021"
+autoexamples = false
+autotests = false
+autobenches = false
+
+[features]
+default = []
+backend = ["anyhow", "byteorder", "thiserror", "crc32fast", "nix", "gbm", "gbm-sys", "drm", "drm-fourcc", "zerocopy"]
+vaapi = ["libva", "backend"]
+v4l2 = ["v4l2r", "backend"]
+
+[dependencies]
+anyhow = { version = "1.0.75", optional = true }
+byteorder = { version = "1.4.3", optional = true }
+# cros-libva from git: no release builds against libva 2.23 (VP9 encoder
+# struct fields, cros-libva #37; Arch, Fedora 41+ and current Ubuntu ship it).
+libva = { git = "https://github.com/chromeos/cros-libva", rev = "59384456ac2ae78c0c3e5515f41ef1efd9b802cf", package = "cros-libva", optional = true }
+v4l2r = { version = "0.0.5", package = "v4l2r", optional = true }
+log = { version = "0" }
+thiserror = { version = "1.0.58", optional = true }
+crc32fast = { version = "1.3.2", optional = true }
+nix = { version = "0.28", features = ["fs", "event", "poll", "mman", "ioctl"], optional = true }
+drm = { version = "0.12.0", optional = true }
+drm-fourcc = { version = "2.2.0", optional = true }
+gbm = { version = "0.15", default-features = false, features = ["drm-support"], optional = true }
+gbm-sys = { version = "0.3.1", optional = true }
+zerocopy = { version = "0.8.14", optional = true, features = ["derive"] }
+
+[lints.rust]
+# Required to allow #[cfg(fuzzing)]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }

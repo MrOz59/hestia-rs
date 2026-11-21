@@ -40,11 +40,54 @@ repeated failures space the requests out instead of flooding the host.
 | --- | --- | --- |
 | Android | MediaCodec (H.264, HEVC, AV1), hardware | `AHardwareBuffer`s drawn by the GPU (zero-copy), or read back on the CPU through an image reader or the codec's output buffers |
 | Android | OpenH264, software (fallback, H.264) | RGBA on the CPU |
-| Linux desktop | OpenH264, software (H.264) | YUV planes converted by the GPU, or RGBA on the CPU |
+| Linux desktop | VA-API (H.264, HEVC, AV1), hardware | NV12 DMA-BUFs drawn by the GPU (zero-copy), or read back as YUV planes for the GPU or RGBA |
+| Linux desktop | OpenH264, software (fallback, H.264) | YUV planes converted by the GPU, or RGBA on the CPU |
 
 `video_decoder::select_decoder_for_renderer` picks the decoder before the
 stream starts and tells the host which formats it can take. "Hardware
 decoding" off forces OpenH264 everywhere.
+
+### VA-API (Linux)
+
+`hestia-media`'s `vaapi` module, built with the `vaapi` feature (on by
+default in the app and the CLI). cros-codecs, ChromeOS's stateless decoders
+(vendored in `third_party/cros-codecs`), parses the bitstream and keeps the
+references; libva runs the GPU's decoder. 8-bit 4:2:0 H.264, HEVC and AV1.
+
+* **Probe**, at stream start: the render node of the window's GPU first (EGL
+  names it; DMA-BUFs import only within one GPU), then every
+  `/dev/dri/renderD*`. A device must decode H.264 Main (cros-codecs starts
+  every decoder with it) and let a surface be exported as a DMA-BUF and
+  imported back, which decoding into shared memory needs; NVIDIA's VA-API
+  driver can't import, so NVIDIA falls back to OpenH264. The formats offered
+  to the host are the codecs the device decodes.
+* **Memory**: once the stream's size is known, the driver allocates the NV12
+  surfaces (the codec's minimum plus four: one being decoded into, one
+  waiting for the window, one drawn, one kept until the next draw), and each
+  is exported once as a DMA-BUF. cros-codecs decodes into frames that import
+  those DMA-BUFs back, so every picture is in memory the window can sample.
+  A frame goes back to the pool when the decoder no longer needs it as a
+  reference and the window has let it go.
+* **Latency**: upstream cros-codecs finishes a picture only when the next
+  one starts and outputs it only when its DPB needs the room (one to
+  sixteen frames late for a game stream). The vendored copy has a
+  low-delay mode, on here: each access unit is finished as soon as it is
+  fed, and each picture leaves as soon as it is decoded (hosts send no
+  B-frames, so decoding order is output order). Decoding is blocking: the
+  picture is complete when `decode` returns.
+* **Output**, per picture:
+  * **zero-copy** (`VA-API (hardware, zero-copy)`): when the window imports
+    DMA-BUFs, the picture goes to it as a `DmabufPicture` (section 4);
+  * **copied, GPU colour**: when the window draws planes but cannot import
+    (X11 with GLX, or an import that failed), the picture is read back
+    (`vaGetImage`) and its chroma split into I420 planes;
+  * **copied, CPU colour**: without a GPU renderer (the CLI, the software
+    renderer, Settings → GPU colour conversion off), read back and converted
+    to RGBA.
+* **Failures**: decode errors go through the usual keyframe recovery; a
+  reset flushes the decoder, which resumes at the next keyframe. If the
+  device cannot be opened mid-stream, or cros-codecs panics, the stream
+  stops with the reason (no switch to software mid-stream).
 
 ### OpenH264
 
@@ -96,7 +139,17 @@ toolkit would provide its own (see [FRONTENDS.md](FRONTENDS.md)).
   * Desktop (`gl_video.rs`, running the frontend's `gl_yuv.rs`): the planes
     are uploaded into three persistent single-channel textures and one
     shader pass applies the colour matrix (`Colorimetry::gpu_conversion`). Chroma is upsampled
-    bilinearly. Needs OpenGL 3.0 or OpenGL ES 3.0; Slint's default FemtoVG
+    bilinearly.
+  * Linux, VA-API pictures (`gl_dmabuf.rs`): the DMA-BUF becomes two EGL
+    images, `R8` for luma and `GR88` for the interleaved chroma (with the
+    buffer's format modifier, and Intel's compression planes when there are
+    any), bound to two textures; the same kind of pass converts them, its
+    sampling kept inside the picture when the buffer is larger (1088 rows
+    for 1080p). Nothing is uploaded. The last picture drawn is kept until
+    the next draw, so its buffer returns to the decoder only after the GPU
+    has read it. EGL is loaded from `libEGL.so.1` at run time; a window that
+    doesn't render through EGL, or an import that fails, turns DMA-BUF
+    import off and VA-API copies its pictures instead. Needs OpenGL 3.0 or OpenGL ES 3.0; Slint's default FemtoVG
     renderer on winit asks for ES 2.0 and Mesa, NVIDIA and AMD drivers hand
     out 3.x. With the software renderer (`SLINT_BACKEND=winit-software`) or
     Qt, or an older context, the desktop converts on the CPU.
@@ -132,8 +185,9 @@ The report's video sections, from the network to the screen:
   * *first packet to decode queue*: network reassembly;
   * *decoder queue*: waiting for the decoder thread;
   * *codec input to output*: the decoder itself;
-  * *codec output to frame ready*: CPU colour conversion, or the plane copy
-    with GPU colour;
+  * *codec output to frame ready*: CPU colour conversion, the plane copy
+    with GPU colour, or VA-API's read-back when it copies (nothing when it
+    hands the DMA-BUF over);
   * *RGBA ready to Slint handoff* / *GPU picture ready to draw submission*:
     waiting for the UI thread or the next frame drawn;
   * *IDR request to first …*: how long a recovery took.
@@ -167,6 +221,7 @@ draws (compositor, vsync, the screen).
 
 ## 7. Next
 
-* Linux VA-API: hardware H.264/HEVC/AV1 decoding, its NV12 surfaces exported
-  as DMA-BUFs and imported into the same GL pass (no CPU copy at all).
+* VA-API on real hardware: latency next to OpenH264, compressed (Intel
+  CCS) surfaces, AMD; then keeping each buffer's EGL images instead of
+  importing per picture.
 * HDR: 10-bit formats and BT.2020/PQ end to end.
