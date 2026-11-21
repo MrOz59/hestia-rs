@@ -270,7 +270,7 @@ impl FramePool {
 /// A frame cros-codecs decodes into. Dropping it (when neither the decoder
 /// nor the renderer holds it any more) returns its memory to the pool.
 #[derive(Debug)]
-pub struct VaFrame {
+struct VaFrame {
     memory: Arc<FrameMemory>,
     visible: Resolution,
     pool: Weak<FramePool>,
@@ -433,9 +433,9 @@ pub fn probe(colorimetry: Colorimetry, output: Option<Arc<GpuOutput>>) -> Option
 
 /// The codec-specific cros-codecs decoder.
 enum Codec {
-    H264(StatelessDecoder<H264, VaapiBackend<VaFrame>>),
-    H265(StatelessDecoder<H265, VaapiBackend<VaFrame>>),
-    Av1(StatelessDecoder<Av1, VaapiBackend<VaFrame>>),
+    H264(Box<StatelessDecoder<H264, VaapiBackend<VaFrame>>>),
+    H265(Box<StatelessDecoder<H265, VaapiBackend<VaFrame>>>),
+    Av1(Box<StatelessDecoder<Av1, VaapiBackend<VaFrame>>>),
 }
 
 macro_rules! with_decoder {
@@ -484,18 +484,18 @@ impl Session {
                 let mut decoder = StatelessDecoder::<H264, VaapiBackend<VaFrame>>::new_vaapi(display.clone(), blocking)
                     .map_err(|e| e.to_string())?;
                 decoder.set_low_delay(true);
-                Codec::H264(decoder)
+                Codec::H264(Box::new(decoder))
             }
             VideoCodec::Hevc => {
                 let mut decoder = StatelessDecoder::<H265, VaapiBackend<VaFrame>>::new_vaapi(display.clone(), blocking)
                     .map_err(|e| e.to_string())?;
                 decoder.set_low_delay(true);
-                Codec::H265(decoder)
+                Codec::H265(Box::new(decoder))
             }
-            VideoCodec::Av1 => Codec::Av1(
+            VideoCodec::Av1 => Codec::Av1(Box::new(
                 StatelessDecoder::<Av1, VaapiBackend<VaFrame>>::new_vaapi(display.clone(), blocking)
                     .map_err(|e| e.to_string())?,
-            ),
+            )),
         };
         Ok(Self {
             thread: std::thread::current().id(),
@@ -545,7 +545,9 @@ impl Session {
         self.drain_events()?;
         // Older pictures still in the queue (none in low-delay mode) are
         // superseded by the newest.
-        Ok(self.ready.drain(..).last())
+        let newest = self.ready.pop();
+        self.ready.clear();
+        Ok(newest)
     }
 
     /// Takes the decoder's pending events: pictures into `ready`, format

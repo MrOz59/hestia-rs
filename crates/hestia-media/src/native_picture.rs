@@ -227,9 +227,14 @@ fn split_chroma(src: &[u8], stride: usize, width: usize, u: &mut [u8], v: &mut [
         let Some(line) = src.get(row * stride..row * stride + 2 * width) else {
             return false;
         };
-        for ((pair, u), v) in line.chunks_exact(2).zip(u_row.iter_mut()).zip(v_row.iter_mut()) {
-            *u = pair[0];
-            *v = pair[1];
+        for (&[cb, cr], (u, v)) in line
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(u_row.iter_mut().zip(v_row.iter_mut()))
+        {
+            *u = cb;
+            *v = cr;
         }
     }
     true
