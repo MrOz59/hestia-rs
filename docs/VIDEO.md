@@ -147,6 +147,25 @@ The live diagnosis (stats overlay, and per second in the report) blames
 time, and **display** when decoded pictures are replaced before being shown
 (more than 2%).
 
+### Chasing lag
+
+Lag with Hermes is the open problem (see the ROADMAP). A report splits the
+picture's way into parts that can be compared:
+
+* **Host**: each per-second line carries the host's capture-to-send time
+  (`host … ms`, from the frame headers) when the host reports it.
+* **Network**: `rtt` and its variance, FEC recoveries and lost frames, and
+  *first packet to decode queue* (how long a frame takes to arrive whole).
+* **Client**: *decoder queue*, *codec input to output* and *codec output to
+  frame ready*, then *… to Slint handoff* or *… to GPU draw submission*.
+  *First packet to Slint handoff* / *first packet to GPU draw submission*
+  add these up, from the frame's first packet to the moment it is handed to
+  the toolkit.
+
+What the report doesn't see: one-way network delay (only the round trip),
+input's way back to the host, and the display's own delay after the toolkit
+draws (compositor, vsync, the screen).
+
 ## 7. Next
 
 * Linux VA-API: hardware H.264/HEVC/AV1 decoding, its NV12 surfaces exported

@@ -1,5 +1,9 @@
 # Roadmap
 
+Where Hestia RS stands, milestone by milestone. **Now:** it streams from
+Hermes hosts on Linux and Android, with noticeable lag; finding where that
+lag comes from is the current priority.
+
 ## Milestone 0 — prototype
 
 - [x] Modular workspace, pure-Rust crypto and TLS
@@ -11,7 +15,8 @@
 - [x] App logic in a toolkit-free crate (`hestia-frontend`) behind a UI port,
       so Slint can be swapped (egui, Qt…) by writing another shell
 - [x] CLI
-- [x] CI: fmt, clippy, tests, Linux build, Android build
+- [x] CI: fmt, clippy, tests, Linux build, Android build (four ABIs),
+      emulator install test
 
 ## Milestone 1 — first frame
 
@@ -23,7 +28,10 @@
 - [x] ENet-compatible control stream (start, pings, IDR, termination, rumble/HDR
       messages), verified against the C ENet
 - [x] Software H.264 decode (OpenH264) and a video view inside the Slint window
-- [ ] **Validate against a live Hermes host** (and Sunshine/Apollo)
+- [x] Streams from a live Hermes host (Linux and Android)
+- [ ] **Find and fix the lag seen with Hermes** (latency study: reports, live
+      diagnosis, per-stage video latency histograms)
+- [ ] Validate with Sunshine and Apollo
 - [x] Desktop GPU colour conversion: OpenH264's YUV planes converted to RGB
       in a GL pass inside Slint's context (no CPU conversion or RGBA copy),
       CPU fallback; OpenH264 built with its SIMD code (nasm) in CI
@@ -69,5 +77,12 @@
 - [x] Live bottleneck diagnosis (network / decode / display / host) in the
       overlay and per second in the report
 - [x] Wake-on-LAN (tap an offline host)
-- [ ] APK signing and release workflow, Arch/CachyOS package
+- [x] Signed nightlies on every push to `main` (universal and per-ABI APKs,
+      Linux tarball, UI screenshots)
+- [ ] Stable releases, Arch/CachyOS package
 - [ ] Android multicast lock / NSD fallback if legacy-unicast mDNS misses hosts
+
+## Later (no timeline)
+
+- [ ] Hestia's own streaming protocol, sturdier and faster over WAN. GameStream
+      stays, for compatibility, until then.
