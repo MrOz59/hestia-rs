@@ -80,7 +80,7 @@ impl Controller {
     }
 
     /// Stream menu → "Send clipboard to host".
-    pub(super) fn stream_clipboard_send(self: &Shared) {
+    pub fn stream_clipboard_send(self: &Shared) {
         let Some(host_id) = self.stream_host() else { return };
         let c = self.clone();
         spawn("hestia-clipboard", move || {
@@ -103,7 +103,7 @@ impl Controller {
     }
 
     /// Stream menu → "Get host's clipboard".
-    pub(super) fn stream_clipboard_fetch(self: &Shared) {
+    pub fn stream_clipboard_fetch(self: &Shared) {
         let Some(host_id) = self.stream_host() else { return };
         let c = self.clone();
         spawn("hestia-clipboard", move || {

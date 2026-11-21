@@ -10,6 +10,7 @@ members = [
     "crates/hestia-core",
     "crates/hestia-stream",
     "crates/hestia-media",
+    "crates/hestia-frontend",
     "apps/hestia-cli",
     "apps/hestia-app",
 ]
@@ -21,6 +22,7 @@ default-members = [
     "crates/hestia-core",
     "crates/hestia-stream",
     "crates/hestia-media",
+    "crates/hestia-frontend",
     "apps/hestia-cli",
     "apps/hestia-app",
 ]
@@ -42,6 +44,7 @@ hestia-discovery = { path = "crates/hestia-discovery" }
 hestia-core = { path = "crates/hestia-core" }
 hestia-stream = { path = "crates/hestia-stream" }
 hestia-media = { path = "crates/hestia-media", default-features = false }
+hestia-frontend = { path = "crates/hestia-frontend", default-features = false }
 
 # Crypto (pure Rust, so Android cross-compiles without OpenSSL)
 rsa = { version = "0.9", features = ["sha2"] }

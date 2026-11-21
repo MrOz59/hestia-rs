@@ -1,6 +1,6 @@
 [package]
 name = "hestia-app"
-description = "Hestia RS graphical client (Slint) for Linux and Android"
+description = "Hestia RS graphical client: the Slint shell over hestia-frontend, for Linux and Android"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,41 +20,35 @@ path = "src/main.rs"
 [features]
 default = ["openh264"]
 # Software H.264 decoding (the fallback; Android decodes with MediaCodec).
-openh264 = ["hestia-media/openh264"]
+openh264 = ["hestia-frontend/openh264", "hestia-media/openh264"]
 
 [dependencies]
+# Everything but the UI toolkit: the controller, input, system services and
+# video presentation. This crate only draws it with Slint.
+hestia-frontend.workspace = true
 hestia-core.workspace = true
 hestia-media.workspace = true
-serde_json.workspace = true
 slint.workspace = true
-image.workspace = true
 log.workspace = true
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
-# Audio playback on the desktop (cpal + libopus). Android plays audio with
-# AAudio and decodes Opus with the system's MediaCodec, built in.
-hestia-media = { workspace = true, features = ["audio"] }
 env_logger.workspace = true
 directories.workspace = true
-
-# Desktop game controllers read from evdev (ioctl, poll).
-[target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
 
 [target.'cfg(target_os = "android")'.dependencies]
 slint = { workspace = true, features = ["backend-android-activity-06"] }
 android_logger.workspace = true
-# Share sheet for stream reports (same jni version Slint's backend uses).
-jni = "0.21"
-# The (patched) backend Slint uses, for its input hook: game controllers.
+# The (patched) backend Slint uses, for its input hook (game controllers)
+# and the TV remote's focus navigation.
 i-slint-backend-android-activity = "=1.19.0"
 
 [dev-dependencies]
-# examples/screenshots.rs renders headless with the software renderer.
+# examples/screenshots.rs renders headless with the software renderer and
+# saves PNGs.
 slint = { workspace = true, features = ["renderer-software"] }
+image.workspace = true
 
 [build-dependencies]
-android-build = "0.1.2"
 slint-build.workspace = true
 
 # Used by `cargo apk build -p hestia-app --lib` for quick local arm64

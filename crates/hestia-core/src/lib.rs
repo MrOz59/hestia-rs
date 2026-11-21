@@ -1,5 +1,5 @@
-//! UI-agnostic client facade. The Slint app, the CLI and (later) other
-//! front-ends all drive hosts through [`HestiaClient`]:
+//! UI-agnostic client facade. The graphical client (`hestia-frontend`, drawn
+//! by a UI shell) and the CLI both drive hosts through [`HestiaClient`]:
 //!
 //! * loads or creates the client identity,
 //! * keeps the list of known hosts (manual + discovered) on disk,

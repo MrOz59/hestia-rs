@@ -41,15 +41,6 @@ pub fn set_keyboard_visible(visible: bool) {
     let _ = visible;
 }
 
-/// TV remotes: whether the D-pad's up/down move the focus between controls
-/// (form screens) or stay arrow keys (grids, the stream).
-pub fn set_form_navigation(on: bool) {
-    #[cfg(target_os = "android")]
-    i_slint_backend_android_activity::set_dpad_focus_navigation(on);
-    #[cfg(not(target_os = "android"))]
-    let _ = on;
-}
-
 #[cfg(target_os = "android")]
 pub(super) fn ime_event(event: ImeEvent) {
     if let Some(sink) = IME_SINK.get() {

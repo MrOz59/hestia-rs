@@ -127,8 +127,8 @@ fn rumble_device(device: i32, low: u16, high: u16) {
 /// Sees every input event before Slint (patched backend). Takes game
 /// controller buttons and sticks while a stream runs.
 #[cfg(target_os = "android")]
-pub fn android_input_hook(event: &i_slint_backend_android_activity::android_activity::input::InputEvent<'_>) -> bool {
-    use i_slint_backend_android_activity::android_activity::input::{Axis, InputEvent, KeyAction, MotionAction};
+pub fn android_input_hook(event: &android_activity::input::InputEvent<'_>) -> bool {
+    use android_activity::input::{Axis, InputEvent, KeyAction, MotionAction};
 
     use crate::gamepad::{self, Axes};
 

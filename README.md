@@ -1,145 +1,184 @@
 # Hestia RS
 
-A cross-platform game-streaming client for [Hermes](https://github.com/MrOz59/Hermes),
-written in Rust: one modular core, a modern [Slint](https://slint.dev) UI, and
-Linux and Android as the first targets.
+A game-streaming client for [Hermes](https://github.com/MrOz59/Hermes), written
+in Rust: a modular core with the whole protocol stack in pure Rust, a UI in
+[Slint](https://slint.dev) that sits behind a port (so the toolkit can be
+replaced), and Linux and Android (phones, tablets, Android TV) as the first
+targets.
 
-Hestia RS speaks the standard GameStream protocol, so it works with Sunshine and
-Apollo hosts too, and it uses Hermes' **Hestia protocol v1** extensions
-(capabilities, session preparation, virtual displays, diagnostics, clipboard,
-server commands) when the host offers them.
+Hestia RS speaks the standard GameStream protocol, and uses Hermes' **Hestia
+protocol v1** extensions when the host offers them: capabilities, session
+preparation, virtual displays, diagnostics, clipboard and server commands.
+Sunshine and Apollo speak GameStream too, but Hestia RS hasn't been tried
+with them yet. A protocol of its own, sturdier and faster over WAN, is a
+goal for the distant future; until then, GameStream it is.
 
-> **Status: prototype.** The control plane (discovery, pairing, apps, Hermes
-> capabilities, launch/quit) and a first streaming pipeline (RTSP, encrypted
-> control stream over ENet, video with Reed–Solomon FEC, software H.264
-> decode, keyboard/mouse input, stereo audio on desktop) are implemented. They
-> are covered by unit tests, an end-to-end test against a mock host, an
-> interop test against the real C ENet, and a decode test with a real H.264
-> stream, but **have not yet been exercised against a live Hermes host**.
-> See [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Status: prototype.** It streams from Hermes hosts on Linux and Android
+> (nightly builds below). Noticeable lag remains and is being studied: the
+> stream reports and the live diagnosis exist to pin it down. See
+> [docs/ROADMAP.md](docs/ROADMAP.md).
 
-## What's implemented
+## Download
 
-- **Discovery** of hosts on the LAN over mDNS (`_nvstream._tcp`), plus adding
-  hosts by IP or name.
-- **Pairing**, both the classic client PIN (type the PIN into the Hermes web UI)
-  and Hermes/Apollo **OTP** pairing (PIN + passphrase shown by the host).
-- **App list and box art**, current running app, launch / resume / quit.
-- **Hermes integration**: capability probe, `session/prepare` before launch
-  (virtual display size, HDR, scale factor, Gamescope launch mode), session
-  stop, diagnostics, client permissions, clipboard and server commands in the
-  API crate.
-- **Streaming** in pure Rust: RTSP handshake (plain and `rtspenc://`), SDP,
-  AES-GCM control stream over a built-in ENet client, video RTP reassembly with
-  Reed–Solomon FEC (byte-compatible with nanors), IDR recovery, Opus audio
-  (AES-CBC), and input packets (keyboard, text, mouse, scroll, touch, pen,
-  gamepad).
-- **Decoding**: on Android, the hardware decoder (MediaCodec: H.264, HEVC,
-  AV1) renders into GPU buffers that the UI draws directly, like Moonlight:
-  no CPU copy, YUV to RGB in the GPU's sampler (Settings → Zero-copy video).
-  Without it (or if the GPU path fails) pictures are read on the CPU, through
-  an image reader or the codec's own output buffers. On the desktop,
-  OpenH264 (software H.264, with its SIMD code) decodes and the GPU converts
-  its YUV planes to RGB while drawing them (Settings → GPU colour
-  conversion): no RGBA conversion or copy on the CPU, a third of the upload.
-  OpenH264 is also Android's last fallback. Decoding runs on its own thread
-  and, like Moonlight, never drops a compressed frame for being late (each
-  one is a reference for the next; dropping one costs a keyframe): bursts
-  decode through and only the newest picture is shown. When keyframes don't
-  fix a failing decoder, keyframe requests space out instead of flooding
-  the host. The whole pipeline, and how to read its numbers in a report, is
-  in [docs/VIDEO.md](docs/VIDEO.md).
-- **Stream screen**: video letterboxed in the window, keyboard (US-layout key
-  mapping, text fallback for other characters), absolute mouse, buttons,
-  scroll, touch as mouse, stats overlay, full screen, disconnect / quit.
-  `Ctrl+Alt+Shift+Q` disconnects, `Ctrl+Alt+Shift+S` toggles statistics.
-- **Touch modes** (stream menu, remembered): *trackpad* (default; the
-  finger moves the host cursor relatively, tap = click, hold = right click,
-  tap then drag = drag), *mouse* (the cursor goes where you touch) and
-  *touchscreen* (every finger reaches the host as a real touch, for
-  touch-aware apps).
-- **On-screen controller** (stream menu, remembered): sticks (tap to click
-  L3/R3), d-pad, A/B/X/Y, bumpers, analog triggers, Back/Home/Start, every
-  finger independent; in portrait it sits under the picture. It takes a
-  controller slot like a physical one.
-- **Zoom** (stream menu): pinch to magnify the picture up to 4×, drag with
-  two fingers to move around.
-- **Orientation** (Android settings): landscape, portrait or the device's
-  rotation, while streaming. **Custom resolution** in the settings takes any
-  size (e.g. 2560x1080).
-- **Keyboard bar** in the stream menu: a text field (opens the on-screen
-  keyboard) replayed on the host, plus Esc, Tab, Enter, Backspace, Win,
-  Alt+Tab and Alt+F4; "Fix picture" asks the host for a fresh keyframe.
-- **Host tools** (Hermes): display status and recovery, server commands,
-  clipboard send/fetch, this device's permissions, diagnostics, the host's
-  readiness preflight (failures first, also summarised on the host card),
-  runtime status (encoder, sessions, pipeline), the host's full diagnostic
-  report and a shortcut to the Hermes web UI.
+Every push to `main` that passes CI replaces the **`nightly`** pre-release
+(Releases page) with:
+
+| File | For |
+| --- | --- |
+| `hestia-rs-android-universal.apk` | any Android device: phones, tablets, Android TV, Chromebooks (all four ABIs) |
+| `hestia-rs-android-<abi>.apk` | a smaller APK for one ABI (most phones: `arm64-v8a`) |
+| `hestia-rs-linux-x86_64.tar.gz` | desktop Linux (needs libopus, ALSA and a recent glibc) |
+| `ui-screenshots.zip` | the screens, rendered headless (phone and desktop) |
+| `SHA256SUMS` | checksums |
+
+The release notes list the commits since the previous nightly; Settings →
+About in the app shows which commit a build is.
+
+## Features
+
+### Hosts and pairing
+
+- **Discovery** on the LAN over mDNS (`_nvstream._tcp`), or add a host by IP
+  or name. **Wake-on-LAN**: tapping an offline host wakes it (once its MAC
+  address is known) and waits for it to come up.
+- **Pairing** with the classic client PIN (typed into the Hermes web UI) or
+  with Hermes/Apollo **OTP** (PIN and passphrase shown by the host).
+- **Apps**: list with box art and the running app marked; launch, resume and
+  quit; "back" while starting cancels the launch.
+
+### Hermes
+
+- **Session preparation** before launch: virtual display size, HDR, scale
+  factor, Gamescope session.
+- **Host tools**: display status and recovery, server commands (with
+  confirmation where Hermes asks for one), clipboard send/fetch, this
+  device's permissions, diagnostics, the readiness preflight (failures first,
+  also summarised on the host card), runtime status (encoder, sessions,
+  pipeline), the full diagnostic report and a shortcut to the web UI.
 - **Stream provenance**: after the first frame, a banner shows what the host
-  is actually using (GPU, encoder, capture path) from Hermes' stream info; it
-  goes into the report too.
-- **Presets** in Settings: Fast (≤1080p60), Balanced (native, ≤60 fps),
-  Quality (native resolution and refresh, more bitrate) and Battery saver
-  (720p30), computed from this device's display (EDID on Linux,
-  `Display.Mode` on Android) with Hestia desktop's bitrate table. Editing
-  resolution, frame rate or bitrate by hand switches to Custom.
-- **Stream profiles**: the settings page's video, audio and host options
-  saved under a name ("Couch TV", "Phone 720p"), loaded back or deleted;
-  each host can launch with one (its page → Stream profile), while touch,
-  orientation and decoding stay this device's.
-- **Clipboard sync** (Hermes, Settings → Clipboard sync): while streaming,
-  what's copied on either side can be pasted on the other; the stream menu
-  also sends or fetches it once. Android reads the clipboard only when it
-  changed (no repeated "pasted" notices); Linux uses wl-clipboard or xclip.
-- **Picture scale**: fit (bars), fill (crop) or stretch, in Settings and the
-  stream menu.
+  actually uses (GPU, encoder, capture path); it goes into the report too.
+- **Clipboard sync** (Settings → Clipboard sync): while streaming, what's
+  copied on either side can be pasted on the other; the stream menu also
+  sends or fetches it once. Android reads the clipboard only when it changed;
+  Linux uses wl-clipboard or xclip.
+
+### Streaming
+
+- **Protocol** in pure Rust: RTSP handshake (plain and `rtspenc://`), SDP,
+  AES-GCM control stream over a built-in ENet client, video RTP reassembly
+  with Reed–Solomon FEC (byte-compatible with nanors), IDR recovery, a video
+  watchdog, Opus audio (AES-CBC), and input packets (keyboard, text, mouse,
+  scroll, touch, pen, gamepad).
+- **Video** ([docs/VIDEO.md](docs/VIDEO.md) has the whole pipeline):
+  - *Android*: MediaCodec (H.264, HEVC, AV1) renders into GPU buffers the UI
+    draws directly, with no CPU copy (Settings → Zero-copy video). Without
+    it, pictures are read back on the CPU; OpenH264 is the last fallback.
+  - *Desktop*: OpenH264 (software H.264, built with its SIMD code), with the
+    GPU converting its YUV planes to RGB while drawing them (Settings → GPU
+    colour conversion), or the CPU when that's off or unavailable.
+  - Decoding runs on its own thread and never drops a compressed frame for
+    being late (dropping one would cost a keyframe): bursts decode through
+    and only the newest picture is shown. Keyframe requests back off when
+    they don't fix a failing decoder.
+- **Audio**: stereo Opus through cpal on desktop Linux; on Android, decoded
+  by MediaCodec and played with AAudio. Surround is mixed down to stereo.
+
+### Input
+
+- **Keyboard** (US-layout key mapping, text for other characters), absolute
+  **mouse**, buttons and scroll. `Ctrl+Alt+Shift+Q` disconnects,
+  `Ctrl+Alt+Shift+S` toggles statistics.
+- **Touch modes** (stream menu, remembered): *trackpad* (default; tap
+  clicks, hold right-clicks, tap then drag drags), *mouse* (the cursor goes
+  where you touch) and *touchscreen* (every finger reaches the host as a real
+  touch). Two-finger tap right-clicks, two-finger drag scrolls, three-finger
+  tap opens the keyboard.
+- **On-screen controller** (stream menu, remembered): sticks (tap for
+  L3/R3), d-pad, A/B/X/Y, bumpers, analog triggers, Back/Home/Start, every
+  finger independent; under the picture in portrait. It takes a controller
+  slot like a physical one.
+- **Game controllers**: up to four, with rumble. On Android, rumble goes to
+  the controller's motor or the phone's. On desktop Linux, controllers are
+  read straight from evdev (no SDL or libudev), with force feedback and hot
+  plugging. Outside a stream (Android) they navigate the app: A confirms, B
+  goes back.
+- **Keyboard bar** in the stream menu: a text field (opens the on-screen
+  keyboard) typed on the host, plus Esc, Tab, Enter, Backspace, Win,
+  Alt+Tab and Alt+F4.
+
+### Stream screen
+
+- Picture scale (fit, fill or stretch), pinch zoom up to 4× with two-finger
+  pan, full screen, orientation (Android: landscape, portrait or the
+  device's), an optional menu button.
+- Statistics overlay, "Fix picture" (asks for a fresh keyframe), disconnect
+  or quit the app.
+
+### Settings
+
+- **Presets**: Fast (≤1080p60), Balanced (native, ≤60 fps), Quality (native
+  resolution and refresh, more bitrate) and Battery saver (720p30), computed
+  from this device's display (EDID on Linux, `Display.Mode` on Android) with
+  Hestia desktop's bitrate table. Editing resolution, frame rate or bitrate
+  by hand switches to Custom; **custom resolution** takes any size (e.g.
+  2560x1080).
+- Codec, bitrate, HDR, audio layout, virtual display, Gamescope session,
+  audio on the host, game optimisation, clipboard sync, decoding options.
+- **Stream profiles**: the video, audio and host options saved under a name
+  ("Couch TV", "Phone 720p"); each host can launch with one (its page →
+  Stream profile), while touch, orientation and decoding stay this device's.
+
+### Diagnostics
+
 - **Live diagnosis**: every second the client works out whether the network,
   the decoder, the display or the host is the bottleneck (Hestia desktop's
-  classifier); the overlay says which and how often it happened in the last
-  five minutes, and the report marks each bad second.
-- **Stream reports**: every session (including one that fails to start)
+  classifier). The overlay says which and how often it happened in the last
+  five minutes; the report marks each bad second.
+- **Stream reports**: every session, including one that fails to start,
   writes a report with the client, host and launch details, what was
-  negotiated, events, per-second statistics and every log line from launch
-  to end. It opens when the stream ends (Settings → Diagnostics turns that
-  off or reopens the last one), and can be shared (Android share sheet),
-  opened in the file manager (desktop) or sent to the host's clipboard.
-  Files: `Android/data/com.mroz59.hestia.rs/files/reports/` on Android,
+  negotiated, events, decoder and video latency figures, per-second
+  statistics and every log line from launch to end. It opens when the stream
+  ends (Settings → Diagnostics turns that off, or reopens the last one) and
+  can be shared (Android share sheet), opened in the file manager (desktop)
+  or sent to the host's clipboard. Files go to
+  `Android/data/com.mroz59.hestia.rs/files/reports/` on Android and
   `~/.local/share/hestia-rs/reports/` on Linux (the CLI writes there too).
-- **Audio**: stereo Opus playback through cpal on desktop Linux; on Android,
-  Opus decoded by the system's MediaCodec and played with AAudio (surround
-  mixed down to stereo).
-- **Game controllers**: up to four (buttons, sticks, triggers, d-pad), with
-  rumble. On Android, on the controller's motor or the phone's; on desktop
-  Linux, read straight from evdev (no SDL/libudev) with force-feedback
-  rumble and hot plugging. They drive the host only while streaming;
-  otherwise (Android) they navigate the app: A confirms, B goes back.
-- **Android TV**: a launcher banner and entry, nothing touch-only required,
-  and the whole app works with a remote: the arrows move an ember focus glow
-  over every control (host and app grids, settings rows, dialogs, the stream
-  menu), left/right change a settings row's value, and the focused control
-  always scrolls into view.
-- **Touch extras**: two-finger tap right-clicks, two-finger drag scrolls,
-  three-finger tap opens the keyboard.
-- **Wake-on-LAN**: tapping an offline host wakes it (once its MAC address is
-  known) and waits for it to come up.
+- **App log** (Settings → Diagnostics): everything logged since the app
+  started, with the hosts' last known state, shared the same way.
+
+### Platforms and UI
+
+- **Desktop Linux** (Wayland or X11) and **Android** 8+ (NativeActivity,
+  universal APK).
+- **Android TV**: launcher banner and entry, nothing touch-only, and the
+  whole app works with a remote. The arrows move an ember focus glow over
+  every control, left/right change a settings row's value, and the focused
+  control always scrolls into view.
+- **UI**: a dark, warm theme with an ember-orange accent and the bundled
+  Outfit typeface (SIL OFL, `apps/hestia-app/fonts`), with layouts for
+  phones, TVs and desktop windows.
+- **Swappable toolkit**: everything but drawing lives in `hestia-frontend`,
+  behind a small port. Slint is one shell; another toolkit (egui, Qt…) would
+  be another, with no change to the app
+  ([docs/FRONTENDS.md](docs/FRONTENDS.md)).
 - **Slint patch**: `third_party/i-slint-backend-android-activity` is Slint's
   Android backend with an input hook (controllers), a fix for mouse-wheel
-  scrolling, which crashed upstream, and remote/controller keys for the UI
-  (see its `PATCHES.md`).
-- **UI** in Slint for desktop Linux and Android (NativeActivity): a dark,
-  warm theme with an ember-orange accent and the bundled Outfit typeface
-  (SIL OFL, `apps/hestia-app/fonts`), layouts for phones, TVs and desktop
-  windows, and confirmations before quitting an app or forgetting a host.
-  Plus a `hestia` CLI for scripting and testing.
+  scrolling (it crashed upstream) and remote/controller keys for the UI (see
+  its `PATCHES.md`).
+- A **`hestia` CLI** for scripting and testing hosts.
 
-### Known limits of the prototype
+### Known limits
 
-- Desktop decodes H.264 in software only (VA-API is next); a 4K or
-  high-frame-rate stream may be more than one CPU core can decode.
-- Surround audio is mixed down to stereo.
+- **Lag**: streams from Hermes work but show noticeable latency; finding where
+  it comes from is the current priority.
+- **Sunshine and Apollo**: untested.
+- **Desktop video**: H.264 only, decoded in software (VA-API is next); a 4K or
+  high-frame-rate stream may be more than one CPU core can decode. HEVC and
+  AV1 need Android's hardware decoder.
+- No HDR presentation (10-bit) yet; surround audio is mixed down to stereo.
 - Keys are mapped by the character they produce (US layout), not by physical
-  scancode; characters without a US key are sent as text.
-- Desktop mouse is absolute only (no pointer capture).
+  scancode; the desktop mouse is absolute only (no pointer capture); no
+  stylus support yet.
 
 ## Layout
 
@@ -149,17 +188,20 @@ crates/
   hestia-nvhttp      GameStream HTTP(S): serverinfo, pairing, applist, box art, launch/quit
   hestia-api         Hermes "Hestia protocol v1" client (/api/hestia/v1/*)
   hestia-discovery   mDNS discovery (legacy-unicast queries, no multicast lock needed)
-  hestia-core        UI-agnostic facade: identity + host store, pairing, apps, launch
+  hestia-core        UI-agnostic facade: identity, host store, settings, pairing, apps, launch, reports
   hestia-stream      streaming data plane: RTSP, ENet control, video + FEC, audio, input
-  hestia-media       decoders/players behind VideoSink/AudioSink (OpenH264, Opus + cpal)
+  hestia-media       decoders and players behind VideoSink/AudioSink (MediaCodec, OpenH264, Opus)
+  hestia-frontend    the GUI without a toolkit: controller, input, platform services, video presentation
 apps/
-  hestia-app         Slint GUI (desktop binary + Android cdylib)
+  hestia-app         the Slint shell over hestia-frontend (desktop binary + Android cdylib)
   hestia-cli         `hestia` command-line client
+third_party/         Slint's Android backend, patched
+tools/               ENet interop test, FEC reference vectors
+scripts/             Android packaging and install checks
 ```
 
-Each crate has one job and depends only on the layers below it; front-ends only
-talk to `hestia-core`. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and
-[docs/VIDEO.md](docs/VIDEO.md) for the video pipeline.
+Each crate has one job and depends only on the layers below it. More in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Building
 
@@ -196,10 +238,12 @@ and the colour conversion without optimisation.
 Use **NDK r30** (or whichever NDK matches skia-bindings' prebuilt Skia, see
 the CI workflow): Slint renders with Skia on Android, and an older NDK's libc++
 lacks symbols the prebuilt library needs, so the app builds but fails to load
-on the device. Point `ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT` at it.
-For the x86_64 ABI, have `nasm` installed too (OpenH264's SIMD code, as on
-the desktop); 32-bit x86 builds without it, since that assembly is not
-position independent and Android refuses text relocations.
+on the device. Point `ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT` at it, and have
+a JDK and an SDK platform installed: the build compiles two small Java
+helpers (Slint's and `crates/hestia-frontend/java`). For the x86_64 ABI,
+install `nasm` too (OpenH264's SIMD code, as on the desktop); 32-bit x86
+builds without it, since that assembly is not position independent and
+Android refuses text relocations.
 
 ```sh
 rustup target add aarch64-linux-android
@@ -216,15 +260,10 @@ entry and banner, icons): it takes `<abi>/libhestia_app.so` for any of
 arm64-v8a, armeabi-v7a, x86_64 and x86 and makes one universal APK plus one
 per ABI. CI builds the four ABIs (the 32-bit ones compile Skia from source,
 which has no prebuilt binaries for them), checks that each library has no
-unresolved C++ runtime symbols and packages them.
+unresolved C++ runtime symbols, packages them, and installs the universal
+APK on an Android 16 emulator, both fresh and over the previous nightly.
 
-## Nightly builds
-
-Every push to `main` that passes CI replaces the **`nightly`** pre-release
-(Releases page) with the Android APKs (`hestia-rs-android-universal.apk` for
-any device, phones, tablets, Android TV and Chromebooks, or the smaller
-`hestia-rs-android-<abi>.apk`), a Linux tarball and `SHA256SUMS`. The release notes list the commits since the
-previous nightly; Settings → About in the app shows which commit a build is.
+### Signing (maintainers)
 
 Published nightlies use the dedicated Hestia RS signing certificate. Configure
 `ANDROID_KEYSTORE_BASE64` and `ANDROID_KEYSTORE_PASSWORD` in the
@@ -249,39 +288,68 @@ Keep the Hestia RS keystore safe. Reuse it when updating the repository secrets.
 ## CLI
 
 ```sh
-hestia discover                 # scan the LAN
-hestia add 192.168.0.10         # add by address
-hestia pair cachy               # prints a PIN; enter it in Hermes → PIN
-hestia pair cachy --otp 1234 --passphrase hunter2   # Hermes OTP pairing
+hestia identity                 # data dir, unique id, certificate fingerprint
+hestia discover [--seconds 3] [--save]   # scan the LAN (and remember what's found)
+hestia add 192.168.0.10         # add by address (IP or name, optionally :port)
+hestia list                     # known hosts
 hestia status cachy             # online/paired/codecs + Hermes capabilities
+hestia pair cachy               # prints a PIN; enter it in Hermes → PIN
+hestia pair cachy --otp 1234 --passphrase hunter2   # Hermes/Apollo OTP pairing
 hestia apps cachy
 hestia launch cachy Desktop --width 2560 --height 1440 --fps 120
-hestia stream cachy Desktop --width 1280 --height 720 --audio   # headless stream + stats
+hestia stream cachy Desktop --width 1280 --height 720 --bitrate 20000 --audio   # headless stream + stats
 hestia stream cachy Desktop --snapshot frame.ppm --seconds 5     # save a decoded frame
-hestia stream cachy Desktop --dump capture --seconds 10          # raw capture.h264
+hestia stream cachy Desktop --dump capture --seconds 10          # raw capture.h264/.h265/.obu
+hestia stream cachy Desktop --count --quit                       # count frames, quit the app after
 hestia quit cachy
-hestia diagnostics cachy        # Hermes diagnostics JSON
-hestia commands cachy           # Hermes server commands
+hestia forget cachy             # forget the host locally
+# Hermes
+hestia diagnostics cachy        # diagnostics JSON
+hestia host-report cachy [-o FILE|-]   # full diagnostic report (default: data dir/reports)
+hestia permissions cachy        # this device's permissions
+hestia commands cachy           # server commands
 hestia run cachy "Restart Steam" [--yes]
 hestia clipboard cachy [--set "text"]
 hestia display cachy [--recover [--force]]
+hestia web cachy                # the web UI's address
 ```
 
 The CLI and the GUI share the same data directory (`~/.local/share/hestia-rs`,
 overridable with `HESTIA_DATA_DIR`), so pairing in one shows up in the other.
+Overrides given to `launch`/`stream` (`--width`, `--height`, `--fps`, and
+`--bitrate` for `stream`) apply to that session only; the saved settings are
+not changed.
 
-Overrides given to `launch`/`stream` (`--width`, `--fps`, `--bitrate`…) apply to
-that session only; the saved settings are not changed.
+## Tests and CI
 
-## Tests
+`cargo test --workspace` runs, among others:
 
-`cargo test --workspace` runs, among others, an end-to-end session against a
-mock host (RTSP, ENet control, FEC-protected video with losses), a decode of
-a real H.264 clip (to RGBA and to planes for the GPU), the colour converters
-against the reference formula, and the desktop GPU colour pass in headless
-Mesa contexts (OpenGL ES 3, OpenGL core and compatibility; skipped where
-there is no EGL). `tools/enet-interop/run.sh` checks the ENet client against
-the C ENet that hosts use (CI runs it too).
+- an end-to-end session against a mock host (RTSP, ENet control,
+  FEC-protected video with losses);
+- a decode of a real H.264 clip, to RGBA and to planes for the GPU;
+- the colour converters against the reference formula;
+- the desktop GPU colour pass in headless Mesa contexts (OpenGL ES 3, OpenGL
+  core and compatibility; skipped where there is no EGL).
+
+`tools/enet-interop/run.sh` checks the ENet client against the C ENet that
+hosts use.
+
+CI (`.github/workflows/ci.yml`) runs:
+
+- formatting, clippy, the tests, a release build and headless UI screenshots
+  on Linux;
+- the ENet interop test;
+- the four Android ABIs, then packaging and the emulator install/update test;
+- on `main`, the nightly release.
+
+## Documentation
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the crates and how they fit.
+- [docs/VIDEO.md](docs/VIDEO.md): the video pipeline per platform, its costs,
+  and how to read a stream report's video figures.
+- [docs/FRONTENDS.md](docs/FRONTENDS.md): the UI port, and how to write a
+  shell for another toolkit.
+- [docs/ROADMAP.md](docs/ROADMAP.md): what's done and what's next.
 
 ## License
 

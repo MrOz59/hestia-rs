@@ -7,6 +7,10 @@
 //! upload is 1.5 bytes per pixel instead of 4. The textures persist between
 //! frames (no per-frame allocation, unlike an image handed to the toolkit).
 //!
+//! Any shell whose toolkit renders with OpenGL can use it: the Slint shell
+//! calls it from its rendering notifier (`apps/hestia-app/src/gl_video.rs`);
+//! an egui shell would call it from a `glow` paint callback.
+//!
 //! It needs OpenGL 3.0 or OpenGL ES 3.0 (single-channel `R8` textures,
 //! vertex array objects). Every bit of state it touches is saved and put
 //! back, since the toolkit's renderer caches GL state.
@@ -17,8 +21,8 @@
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr;
 
-pub(crate) type GLenum = u32;
-pub(crate) type GLuint = u32;
+pub type GLenum = u32;
+pub type GLuint = u32;
 type GLint = i32;
 type GLsizei = i32;
 type GLboolean = u8;
@@ -169,16 +173,16 @@ gl_functions! {
 
 /// One 4:2:0 picture: tightly packed planes (chroma rounded up for odd
 /// sizes) and the conversion to apply.
-pub(crate) struct Planes<'a> {
-    pub(crate) y: &'a [u8],
-    pub(crate) u: &'a [u8],
-    pub(crate) v: &'a [u8],
-    pub(crate) width: u32,
-    pub(crate) height: u32,
+pub struct Planes<'a> {
+    pub y: &'a [u8],
+    pub u: &'a [u8],
+    pub v: &'a [u8],
+    pub width: u32,
+    pub height: u32,
     /// Column-major YUV → RGB matrix, applied after subtracting `offset`
     /// (both for values normalised to 0..1).
-    pub(crate) matrix: [f32; 9],
-    pub(crate) offset: [f32; 3],
+    pub matrix: [f32; 9],
+    pub offset: [f32; 3],
 }
 
 const VERTEX_BODY: &str = "
@@ -257,17 +261,18 @@ struct Objects {
 }
 
 /// The conversion pass of one GL context.
-pub(crate) struct YuvPass {
+pub struct YuvPass {
     gl: Gl,
     header: &'static str,
-    pub(crate) version: String,
+    /// The context's `GL_VERSION`.
+    pub version: String,
     objects: Option<Objects>,
 }
 
 impl YuvPass {
     /// Loads the entry points and checks the context; the context must be
     /// current.
-    pub(crate) fn new(get_proc_address: &dyn Fn(&CStr) -> *const c_void) -> Result<Self, String> {
+    pub fn new(get_proc_address: &dyn Fn(&CStr) -> *const c_void) -> Result<Self, String> {
         let mut gl = Gl::load(get_proc_address)?;
         // SAFETY: a context is current; the string is static.
         let version = unsafe {
@@ -292,7 +297,7 @@ impl YuvPass {
     /// Converts `planes` into the RGBA target texture. Returns the texture
     /// and whether it was (re)allocated (a borrowed image of it must be
     /// recreated). The context must be current.
-    pub(crate) fn draw(&mut self, planes: &Planes<'_>) -> Result<(GLuint, bool), String> {
+    pub fn draw(&mut self, planes: &Planes<'_>) -> Result<(GLuint, bool), String> {
         let (w, h) = (planes.width as usize, planes.height as usize);
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
         if w == 0 || h == 0 || planes.y.len() < w * h || planes.u.len() < cw * ch || planes.v.len() < cw * ch {
@@ -415,20 +420,19 @@ impl YuvPass {
     }
 
     /// Waits for submitted GL work (after a failure, before giving up).
-    pub(crate) fn finish(&self) {
+    pub fn finish(&self) {
         // SAFETY: the context is current.
         unsafe { (self.gl.glFinish)() }
     }
 
     /// The framebuffer holding the converted picture (for tests reading
     /// it back).
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn framebuffer(&self) -> Option<GLuint> {
+    pub fn framebuffer(&self) -> Option<GLuint> {
         self.objects.as_ref().map(|o| o.fbo)
     }
 
     /// Frees the GL objects; the context must be current.
-    pub(crate) fn delete(&mut self) {
+    pub fn delete(&mut self) {
         let Some(o) = self.objects.take() else { return };
         let gl = &self.gl;
         // SAFETY: names created in this context.

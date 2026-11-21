@@ -76,12 +76,15 @@ installing `nasm`, rebuild it: `cargo clean -p openh264-sys2`.
 ## 4. Presentation
 
 The decoder thread hands each picture to a presenter (`presentation.rs` in
-the app), which keeps only the newest one in a `PictureMailbox` shared with
-the UI thread. A newer picture replaces one that was not shown yet (counted
-as "replaced before handoff" / "replaced before draw").
+`hestia-frontend`), which keeps only the newest one in a `PictureMailbox`
+shared with the UI thread. A newer picture replaces one that was not shown
+yet (counted as "replaced before handoff" / "replaced before draw"). The
+renderers below belong to the Slint shell (`apps/hestia-app`); another UI
+toolkit would provide its own (see [FRONTENDS.md](FRONTENDS.md)).
 
-* **RGBA pictures** are copied into a Slint image on the event loop. Slint
-  then creates a texture for that image and uploads it, every frame.
+* **RGBA pictures** go to the shell (`View::show_video_frame`); Slint copies
+  them into an image on the event loop, then creates a texture for that image
+  and uploads it, every frame.
 * **Native pictures** only request a redraw. The window's GPU renderer takes
   the newest one inside Slint's rendering notifier, with Slint's GL context
   current, and draws it into one RGBA texture that the stream view keeps
@@ -90,9 +93,9 @@ as "replaced before handoff" / "replaced before draw").
   * Android (`gpu_render.rs`): the hardware buffer becomes an `EGLImage` on
     an external texture; the GPU's sampler does the YUV to RGB conversion.
     The buffer goes back to MediaCodec with a GPU fence.
-  * Desktop (`gl_video.rs` + `gl_yuv.rs`): the planes are uploaded into
-    three persistent single-channel textures and one shader pass applies the
-    colour matrix (`Colorimetry::gpu_conversion`). Chroma is upsampled
+  * Desktop (`gl_video.rs`, running the frontend's `gl_yuv.rs`): the planes
+    are uploaded into three persistent single-channel textures and one
+    shader pass applies the colour matrix (`Colorimetry::gpu_conversion`). Chroma is upsampled
     bilinearly. Needs OpenGL 3.0 or OpenGL ES 3.0; Slint's default FemtoVG
     renderer on winit asks for ES 2.0 and Mesa, NVIDIA and AMD drivers hand
     out 3.x. With the software renderer (`SLINT_BACKEND=winit-software`) or
@@ -143,6 +146,25 @@ The live diagnosis (stats overlay, and per second in the report) blames
 **decode** when decoding plus conversion takes more than 60% of the frame
 time, and **display** when decoded pictures are replaced before being shown
 (more than 2%).
+
+### Chasing lag
+
+Lag with Hermes is the open problem (see the ROADMAP). A report splits the
+picture's way into parts that can be compared:
+
+* **Host**: each per-second line carries the host's capture-to-send time
+  (`host … ms`, from the frame headers) when the host reports it.
+* **Network**: `rtt` and its variance, FEC recoveries and lost frames, and
+  *first packet to decode queue* (how long a frame takes to arrive whole).
+* **Client**: *decoder queue*, *codec input to output* and *codec output to
+  frame ready*, then *… to Slint handoff* or *… to GPU draw submission*.
+  *First packet to Slint handoff* / *first packet to GPU draw submission*
+  add these up, from the frame's first packet to the moment it is handed to
+  the toolkit.
+
+What the report doesn't see: one-way network delay (only the round trip),
+input's way back to the host, and the display's own delay after the toolkit
+draws (compositor, vsync, the screen).
 
 ## 7. Next
 

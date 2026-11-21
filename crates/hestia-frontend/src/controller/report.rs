@@ -9,9 +9,9 @@ use hestia_core::api::MAX_CLIPBOARD_BYTES;
 use hestia_core::report::{self, StreamReport};
 use hestia_core::{DeviceInfo, LaunchedSession, StreamSettings, logcapture};
 use log::warn;
-use slint::{ModelRc, SharedString, VecModel};
 
 use super::{Controller, Shared, spawn};
+use crate::ui::Screen;
 use crate::{platform, view};
 
 pub(super) type SharedReport = Arc<Mutex<StreamReport>>;
@@ -157,10 +157,8 @@ impl Controller {
             ui.set_report_path(path.into());
             ui.set_report_can_send(can_send);
             ui.set_report_export_label(platform::export_label().into());
-            let summary: Vec<SharedString> = summary.into_iter().map(SharedString::from).collect();
-            ui.set_report_summary(ModelRc::new(VecModel::from(summary)));
-            let tail: Vec<SharedString> = tail.into_iter().map(SharedString::from).collect();
-            ui.set_report_log_tail(ModelRc::new(VecModel::from(tail)));
+            ui.set_report_summary(summary);
+            ui.set_report_log_tail(tail);
         });
     }
 
@@ -181,12 +179,12 @@ impl Controller {
         };
         self.push_report(&last, Some(summary));
         *self.last_report() = Some(last);
-        self.ui(|ui| ui.set_screen(6));
+        self.ui(|ui| ui.set_screen(Screen::Report));
     }
 
     /// Settings → "App log": everything logged since the app started, with
     /// the hosts' last known state, on the report screen (share / save).
-    pub(super) fn open_app_log(self: &Shared) {
+    pub fn open_app_log(self: &Shared) {
         let Some(core) = self.core() else { return };
         let now = std::time::SystemTime::now();
         let lines = logcapture::lines_since(0);
@@ -245,7 +243,7 @@ impl Controller {
 
     /// Settings → "Open last stream report": the one from this run, or the
     /// newest file on disk.
-    pub(super) fn open_last_report(self: &Shared) {
+    pub fn open_last_report(self: &Shared) {
         let has_current = self.last_report().is_some();
         if !has_current {
             let Some(core) = self.core() else { return };
@@ -277,10 +275,11 @@ impl Controller {
         if let Some(last) = self.last_report().as_ref() {
             self.push_report(last, None);
         }
-        self.ui(|ui| ui.set_screen(6));
+        self.ui(|ui| ui.set_screen(Screen::Report));
     }
 
-    pub(super) fn report_export(self: &Shared) {
+    /// Shares or saves the report shown (share sheet, file manager).
+    pub fn report_export(self: &Shared) {
         let (subject, text, path) = {
             let guard = self.last_report();
             let Some(last) = guard.as_ref() else { return };
@@ -295,7 +294,8 @@ impl Controller {
         }
     }
 
-    pub(super) fn report_send_to_host(self: &Shared) {
+    /// Copies the report shown to its host's clipboard (Hermes).
+    pub fn report_send_to_host(self: &Shared) {
         let (host_id, text) = {
             let guard = self.last_report();
             let Some(last) = guard.as_ref() else { return };
