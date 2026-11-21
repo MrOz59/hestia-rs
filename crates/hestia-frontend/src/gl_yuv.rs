@@ -1246,7 +1246,7 @@ mod gl_tests {
             );
             (gl.glBindFramebuffer)(GL_READ_FRAMEBUFFER, 0);
         }
-        for (i, px) in out.chunks_exact(4).enumerate() {
+        for (i, px) in out.as_chunks::<4>().0.iter().enumerate() {
             // Pixel (x, y) of the picture is texel (x, y) of the luma image.
             let luma = y[(i / w) * cw + i % w];
             let yuv = [

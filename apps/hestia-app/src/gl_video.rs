@@ -35,6 +35,11 @@ use slint::{ComponentHandle, GraphicsAPI, RenderingState};
 
 use crate::AppWindow;
 
+/// A picture drawn into the pass's target: its size, the texture and
+/// whether it was reallocated. The error says whether only DMA-BUF import
+/// failed (the rest of the GPU path still works).
+type Drawn = Result<((u32, u32), (u32, bool)), (String, bool)>;
+
 struct Renderer {
     weak: slint::Weak<AppWindow>,
     gpu: Arc<GpuWindow>,
@@ -90,10 +95,9 @@ impl Renderer {
         }
     }
 
-    /// Converts the frame's picture into the pass's target texture: its
-    /// size, the texture and whether it was reallocated. `Err` with `true`
-    /// when only DMA-BUF import failed (the rest of the GPU path works).
-    fn draw(&mut self, frame: &DecodedFrame) -> Option<Result<((u32, u32), (u32, bool)), (String, bool)>> {
+    /// Converts the frame's picture into the pass's target texture; `None`
+    /// when it isn't one the pass draws.
+    fn draw(&mut self, frame: &DecodedFrame) -> Option<Drawn> {
         let pass = self.pass.as_mut()?;
         match &frame.buffer {
             FrameBuffer::Native(NativePicture::Planar(picture)) => {
