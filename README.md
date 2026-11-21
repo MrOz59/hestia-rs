@@ -38,13 +38,17 @@ server commands) when the host offers them.
   AV1) renders into GPU buffers that the UI draws directly, like Moonlight:
   no CPU copy, YUV to RGB in the GPU's sampler (Settings → Zero-copy video).
   Without it (or if the GPU path fails) pictures are read on the CPU, through
-  an image reader or the codec's own output buffers; OpenH264 (software
-  H.264) on desktop and as the last fallback. Decoding runs on its own thread
+  an image reader or the codec's own output buffers. On the desktop,
+  OpenH264 (software H.264, with its SIMD code) decodes and the GPU converts
+  its YUV planes to RGB while drawing them (Settings → GPU colour
+  conversion): no RGBA conversion or copy on the CPU, a third of the upload.
+  OpenH264 is also Android's last fallback. Decoding runs on its own thread
   and, like Moonlight, never drops a compressed frame for being late (each
   one is a reference for the next; dropping one costs a keyframe): bursts
   decode through and only the newest picture is shown. When keyframes don't
   fix a failing decoder, keyframe requests space out instead of flooding
-  the host.
+  the host. The whole pipeline, and how to read its numbers in a report, is
+  in [docs/VIDEO.md](docs/VIDEO.md).
 - **Stream screen**: video letterboxed in the window, keyboard (US-layout key
   mapping, text fallback for other characters), absolute mouse, buttons,
   scroll, touch as mouse, stats overlay, full screen, disconnect / quit.
@@ -130,11 +134,12 @@ server commands) when the host offers them.
 
 ### Known limits of the prototype
 
-- Desktop decodes H.264 in software only (VA-API is next).
+- Desktop decodes H.264 in software only (VA-API is next); a 4K or
+  high-frame-rate stream may be more than one CPU core can decode.
 - Surround audio is mixed down to stereo.
 - Keys are mapped by the character they produce (US layout), not by physical
   scancode; characters without a US key are sent as text.
-- Desktop mouse is absolute only (no pointer capture), no gamepads yet.
+- Desktop mouse is absolute only (no pointer capture).
 
 ## Layout
 
@@ -153,24 +158,38 @@ apps/
 ```
 
 Each crate has one job and depends only on the layers below it; front-ends only
-talk to `hestia-core`. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+talk to `hestia-core`. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and
+[docs/VIDEO.md](docs/VIDEO.md) for the video pipeline.
 
 ## Building
 
-Rust 1.85+ (edition 2024).
+Rust 1.89+ (edition 2024; the code uses let chains, and `openh264` 0.9.10
+needs 1.89).
 
 ### Linux
 
 ```sh
-# Debian/Ubuntu: Slint, audio (Opus, ALSA) and a C++ compiler for OpenH264
-sudo apt install build-essential libfontconfig1-dev libxkbcommon-dev libwayland-dev \
+# Debian/Ubuntu: Slint, audio (Opus, ALSA), a C++ compiler and nasm for OpenH264
+sudo apt install build-essential nasm libfontconfig1-dev libxkbcommon-dev libwayland-dev \
     libopus-dev libasound2-dev
 # Arch/CachyOS
-sudo pacman -S --needed base-devel fontconfig libxkbcommon wayland opus alsa-lib
+sudo pacman -S --needed base-devel nasm fontconfig libxkbcommon wayland opus alsa-lib
+# Fedora
+sudo dnf install gcc-c++ nasm fontconfig-devel libxkbcommon-devel wayland-devel \
+    opus-devel alsa-lib-devel
 
 cargo run --release -p hestia-app      # GUI
 cargo run --release -p hestia-cli -- --help
 ```
+
+`nasm` assembles OpenH264's x86 SIMD code. Without it the build still
+works, but the software decoder is about a quarter slower: the build prints
+a warning and the decoder calls itself "OpenH264 (software, no SIMD)" in the
+stats and reports. Installed it afterwards? `cargo clean -p openh264-sys2`
+and build again.
+
+Build with `--release` to measure anything: debug builds compile OpenH264
+and the colour conversion without optimisation.
 
 ### Android
 
@@ -178,6 +197,9 @@ Use **NDK r30** (or whichever NDK matches skia-bindings' prebuilt Skia, see
 the CI workflow): Slint renders with Skia on Android, and an older NDK's libc++
 lacks symbols the prebuilt library needs, so the app builds but fails to load
 on the device. Point `ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT` at it.
+For the x86_64 ABI, have `nasm` installed too (OpenH264's SIMD code, as on
+the desktop); 32-bit x86 builds without it, since that assembly is not
+position independent and Android refuses text relocations.
 
 ```sh
 rustup target add aarch64-linux-android
@@ -254,8 +276,11 @@ that session only; the saved settings are not changed.
 ## Tests
 
 `cargo test --workspace` runs, among others, an end-to-end session against a
-mock host (RTSP, ENet control, FEC-protected video with losses) and a decode of
-a real H.264 clip. `tools/enet-interop/run.sh` checks the ENet client against
+mock host (RTSP, ENet control, FEC-protected video with losses), a decode of
+a real H.264 clip (to RGBA and to planes for the GPU), the colour converters
+against the reference formula, and the desktop GPU colour pass in headless
+Mesa contexts (OpenGL ES 3, OpenGL core and compatibility; skipped where
+there is no EGL). `tools/enet-interop/run.sh` checks the ENet client against
 the C ENet that hosts use (CI runs it too).
 
 ## License

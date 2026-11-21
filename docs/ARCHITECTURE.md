@@ -89,18 +89,27 @@ Pure-Rust data plane, following moonlight-common-c's Sunshine path:
 ### hestia-media
 Backends for the sink traits. `DecodingSink` runs a `FrameDecoder` on its own
 thread and hands each `DecodedFrame` to a `FramePresenter`. A decoded frame
-owns either reusable RGBA pixels or a `NativePicture`. Platform buffers live
-inline in that type and retain their own release rules. The decoder thread and
-mailbox move the buffer without depending on Android's image type. Queue overflow
-and decoder errors use the same keyframe recovery policy. Backends include
-OpenH264, Android MediaCodec, Opus + cpal playback, Android audio, and null and
-dump sinks. Linux VA-API and surround playback are planned.
+owns either reusable RGBA pixels or a `NativePicture`: something the window's
+GPU renderer draws itself, either an Android hardware buffer or 4:2:0 planes
+from a software decoder (`PlanarPicture`, whose storage returns to the
+decoder's pool when dropped). Each keeps its own release rules, so the
+decoder thread and mailbox move pictures without knowing their kind. A
+`GpuOutput` tells a decoder whether that renderer is available right now
+(`GpuRendererStatus`, set by the renderer); decoders check it per frame and
+fall back to RGBA. Queue overflow and decoder errors use the same keyframe
+recovery policy. Backends include OpenH264 (planes for the GPU, or RGBA
+through the SIMD converters in `color`), Android MediaCodec, Opus + cpal
+playback, Android audio, and null and dump sinks. Linux VA-API and surround
+playback are planned.
 
-The GUI and CLI use `video_decoder::select_decoder` to pair a decoder with
-the formats it can advertise. The hardware probe is supplied at session startup.
-The Android GUI matches codecs to the requested size and rate and passes its
-native output, while headless callers can use the default probe. The selector
-uses OpenH264 when hardware is disabled or unavailable.
+The GUI and CLI use `video_decoder::select_decoder_for_renderer` (or
+`select_decoder`, without a renderer) to pair a decoder with the formats it
+can advertise. The hardware probe is supplied at session startup. The
+Android GUI matches codecs to the requested size and rate and passes its
+native output; the desktop GUI passes its output to OpenH264; headless
+callers can use the default probe. The selector uses OpenH264 when hardware
+is disabled or unavailable. [VIDEO.md](VIDEO.md) follows a frame through all
+of this.
 
 Audio playback uses a shared `PlaybackSink` to connect an `AudioDecoder`
 to a `PcmOutput`. Desktop composes libopus with cpal, and Android composes
@@ -118,10 +127,18 @@ stream screen (`ui/stream.slint`) takes input and shows frames from
 uploads and native redraws. The mailbox lives in `hestia-media` and is shared
 by the decoder, event loop, and native renderer. It keeps the newest pending
 picture, coalesces display callbacks, and returns CPU storage to the decoder
-after upload. Replaced native pictures are released outside its lock. The
-Android renderer imports the hardware picture, draws it without a CPU copy,
-and releases it with a GPU fence. The decoder receives renderer availability
-explicitly at construction by `video_backend.rs`.
+after upload. Replaced native pictures are released outside its lock.
+
+The window's GPU renderer runs in Slint's rendering notifier and draws native
+pictures into one RGBA texture the stream view shows as a borrowed texture.
+On Android (`gpu_render.rs`) it imports the hardware picture, draws it without
+a CPU copy, and releases it with a GPU fence. On the desktop (`gl_video.rs`,
+with the Slint-free pass in `gl_yuv.rs`) it uploads OpenH264's planes and
+converts them to RGB in a shader; it loads GL through Slint's
+`get_proc_address`, works with OpenGL 3 and OpenGL ES 3 contexts, and its
+test runs headless on Mesa. Either renderer saves and restores the GL state
+it touches. The decoder receives renderer availability explicitly at
+construction by `video_backend.rs`.
 
 `stream_input.rs` owns the per-session touch and controller gesture state and
 converts input into protocol events. The controller handles UI updates, timers,
