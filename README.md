@@ -3,15 +3,19 @@
 A game-streaming client for [Hermes](https://github.com/MrOz59/Hermes), written
 in Rust: a modular core with the whole protocol stack in pure Rust, a UI in
 [Slint](https://slint.dev) that sits behind a port (so the toolkit can be
-replaced), and Linux and Android (phones, tablets, Android TV) as the first
-targets.
+replaced), and Linux on Wayland and Android (phones, tablets, Android TV) as
+the first targets.
 
-Hestia RS speaks the standard GameStream protocol, and uses Hermes' **Hestia
-protocol v1** extensions when the host offers them: capabilities, session
-preparation, virtual displays, diagnostics, clipboard and server commands.
-Sunshine and Apollo speak GameStream too, but Hestia RS hasn't been tried
-with them yet. A protocol of its own, sturdier and faster over WAN, is a
-goal for the distant future; until then, GameStream it is.
+Hestia RS is made for Hermes. It speaks GameStream because that is what
+Hermes speaks today, and uses Hermes' **Hestia protocol v1** extensions on
+top of it: capabilities, session preparation, virtual displays, diagnostics,
+clipboard and server commands. A protocol of its own, sturdier and faster
+over WAN, is a goal for the distant future; until then, GameStream it is.
+
+Sunshine and Apollo speak GameStream too, so Hestia RS may connect to them,
+but only as a side effect: they aren't a target, nothing is tested against
+them, and features are designed around what Hermes offers. Likewise on the
+desktop, the target is **Wayland**; X11 isn't one.
 
 > **Status: prototype.** It streams from Hermes hosts on Linux and Android
 > (nightly builds below). Noticeable lag remains and is being studied: the
@@ -27,7 +31,7 @@ Every push to `main` that passes CI replaces the **`nightly`** pre-release
 | --- | --- |
 | `hestia-rs-android-universal.apk` | any Android device: phones, tablets, Android TV, Chromebooks (all four ABIs) |
 | `hestia-rs-android-<abi>.apk` | a smaller APK for one ABI (most phones: `arm64-v8a`) |
-| `hestia-rs-linux-x86_64.tar.gz` | desktop Linux (needs libopus, ALSA and a recent glibc) |
+| `hestia-rs-linux-x86_64.tar.gz` | desktop Linux on Wayland (needs libopus, ALSA and a recent glibc) |
 | `ui-screenshots.zip` | the screens, rendered headless (phone and desktop) |
 | `SHA256SUMS` | checksums |
 
@@ -50,7 +54,7 @@ a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
   or name. **Wake-on-LAN**: tapping an offline host wakes it (once its MAC
   address is known) and waits for it to come up.
 - **Pairing** with the classic client PIN (typed into the Hermes web UI) or
-  with Hermes/Apollo **OTP** (PIN and passphrase shown by the host).
+  with Hermes' **OTP** (PIN and passphrase shown by the host).
 - **Apps**: list with box art and the running app marked; launch, resume and
   quit; "back" while starting cancels the launch.
 
@@ -157,7 +161,7 @@ a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
 
 ### Platforms and UI
 
-- **Desktop Linux** (Wayland or X11) and **Android** 8+ (NativeActivity,
+- **Desktop Linux on Wayland** and **Android** 8+ (NativeActivity,
   universal APK).
 - **Android TV**: launcher banner and entry, nothing touch-only, and the
   whole app works with a remote. The arrows move an ember focus glow over
@@ -180,7 +184,12 @@ a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
 
 - **Lag**: streams from Hermes work but show noticeable latency; finding where
   it comes from is the current priority.
-- **Sunshine and Apollo**: untested.
+- **Hosts other than Hermes** (Sunshine, Apollo): not a target. They may
+  work because they share GameStream, but they aren't tested and problems
+  that only show up with them aren't a priority.
+- **X11**: not a target. Slint's window backend can still open on X11, but
+  nothing is tested or tuned there. Desktop features are built for Wayland:
+  the clipboard today, pointer capture and VA-API/DMA-BUF video next.
 - **Desktop video**: H.264 only, decoded in software (VA-API is next); a 4K or
   high-frame-rate stream may be more than one CPU core can decode. HEVC and
   AV1 need Android's hardware decoder.
@@ -214,8 +223,8 @@ Each crate has one job and depends only on the layers below it. More in
 
 ## Building
 
-Rust 1.89+ (edition 2024; the code uses let chains, and `openh264` 0.9.10
-needs 1.89).
+Rust 1.95+ (edition 2024; Slint 1.19, and with it the patched Android
+backend in `third_party`, needs 1.95).
 
 ### Linux
 
@@ -281,7 +290,7 @@ hestia add 192.168.0.10         # add by address (IP or name, optionally :port)
 hestia list                     # known hosts
 hestia status mypc              # online/paired/codecs + Hermes capabilities
 hestia pair mypc                # prints a PIN; enter it in Hermes → PIN
-hestia pair mypc --otp 1234 --passphrase secret     # Hermes/Apollo OTP pairing
+hestia pair mypc --otp 1234 --passphrase secret     # Hermes OTP pairing
 hestia apps mypc
 hestia launch mypc Desktop --width 2560 --height 1440 --fps 120
 hestia stream mypc Desktop --width 1280 --height 720 --bitrate 20000 --audio    # headless stream + stats

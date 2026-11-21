@@ -4,6 +4,10 @@ Where Hestia RS stands, milestone by milestone. **Now:** it streams from
 Hermes hosts on Linux and Android, with noticeable lag; finding where that
 lag comes from is the current priority.
 
+**Scope:** the host is Hermes and the Linux desktop is Wayland. Working
+with Sunshine or Apollo (they share GameStream) or on X11 is a side effect,
+not a goal: no item here exists for them.
+
 ## Milestone 0 — prototype
 
 - [x] Modular workspace, pure-Rust crypto and TLS
@@ -11,7 +15,7 @@ lag comes from is the current priority.
 - [x] PIN and OTP pairing
 - [x] App list, box art, launch / resume / quit
 - [x] Hermes Hestia API v1 client and session preparation
-- [x] Slint UI shell (Linux desktop + Android NativeActivity)
+- [x] Slint UI shell (Linux desktop on Wayland + Android NativeActivity)
 - [x] App logic in a toolkit-free crate (`hestia-frontend`) behind a UI port,
       so Slint can be swapped (egui, Qt…) by writing another shell
 - [x] CLI
@@ -23,19 +27,19 @@ lag comes from is the current priority.
 - [x] RTSP handshake (OPTIONS / DESCRIBE / SETUP ×3 / ANNOUNCE / PLAY) with SDP
       generation, plain and encrypted (`rtspenc://`)
 - [x] UDP pings (`X-SS-Ping-Payload`) to open the video/audio paths
-- [x] Video RTP reassembly + Reed–Solomon FEC (compatible with nanors as used by
-      Sunshine/Hermes), frame depacketizer, IDR requests
+- [x] Video RTP reassembly + Reed–Solomon FEC (compatible with nanors as Hermes
+      uses it), frame depacketizer, IDR requests
 - [x] ENet-compatible control stream (start, pings, IDR, termination, rumble/HDR
       messages), verified against the C ENet
 - [x] Software H.264 decode (OpenH264) and a video view inside the Slint window
 - [x] Streams from a live Hermes host (Linux and Android)
 - [ ] **Find and fix the lag seen with Hermes** (latency study: reports, live
       diagnosis, per-stage video latency histograms)
-- [ ] Validate with Sunshine and Apollo
 - [x] Desktop GPU colour conversion: OpenH264's YUV planes converted to RGB
       in a GL pass inside Slint's context (no CPU conversion or RGBA copy),
       CPU fallback; OpenH264 built with its SIMD code (nasm) in CI
-- [ ] Linux VA-API decode (HEVC/AV1, DMA-BUF into the same GL pass)
+- [ ] Linux VA-API decode on Wayland (HEVC/AV1, DMA-BUF into the same GL
+      pass)
 - [x] Android MediaCodec (H.264/HEVC/AV1) via AImageReader, with output
       buffers (NV12/I420/Qualcomm NV12) and software H.264 as fallbacks
 - [x] Android zero-copy output (MediaCodec into GPU buffers, drawn as an
@@ -55,8 +59,8 @@ lag comes from is the current priority.
 - [x] Desktop game controllers (Linux evdev, rumble, hot plug)
 - [x] Android TV: launcher banner, remote navigation (grids, forms, stream
       menu), controller A/B in the app; universal APK (all four ABIs)
-- [ ] Input: scancode-based keyboard, desktop pointer capture, stylus /
-      S Pen
+- [ ] Input: scancode-based keyboard, desktop pointer capture (Wayland
+      pointer constraints and relative pointer), stylus / S Pen
 - [x] Stream overlay: stats, full screen, keyframe request, disconnect, quit
 - [x] Hermes host tools: display recovery, server commands, clipboard,
       permissions, diagnostics (app and CLI)
@@ -84,5 +88,5 @@ lag comes from is the current priority.
 
 ## Later (no timeline)
 
-- [ ] Hestia's own streaming protocol, sturdier and faster over WAN. GameStream
-      stays, for compatibility, until then.
+- [ ] Hestia's own streaming protocol, sturdier and faster over WAN. Until
+      then Hestia RS uses GameStream, which is what Hermes speaks today.
