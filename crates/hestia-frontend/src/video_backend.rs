@@ -2,10 +2,10 @@
 //!
 //! The "GPU video" setting (`gpu_video`) gives the stream a [`GpuOutput`]
 //! tied to the window's renderer: on Android, MediaCodec renders into
-//! hardware buffers drawn without a CPU copy; on the desktop, OpenH264 hands
-//! YUV planes to the GL pass that converts them to RGB. Either way the
-//! decoder falls back to RGBA on the CPU whenever that renderer is not
-//! available.
+//! hardware buffers drawn without a CPU copy; on Linux, VA-API decodes into
+//! DMA-BUFs the GL pass draws in place, and OpenH264 hands it YUV planes.
+//! Either way the decoder falls back to RGBA on the CPU whenever that
+//! renderer is not available.
 
 use std::sync::Arc;
 
@@ -45,10 +45,25 @@ impl StreamVideo {
             // (the fallback) converts on the CPU.
             None,
         )?;
-        // No hardware decoder on the desktop yet (VA-API is planned): OpenH264
-        // with GPU colour conversion.
+        // VA-API on Linux (on the renderer's GPU when it knows it), else
+        // OpenH264 with GPU colour conversion.
         #[cfg(not(target_os = "android"))]
-        let decoder = select_decoder_for_renderer(colorimetry, settings.hardware_decoding, |_| None, gpu.clone())?;
+        let decoder = select_decoder_for_renderer(
+            colorimetry,
+            settings.hardware_decoding,
+            |colorimetry| {
+                #[cfg(all(feature = "vaapi", target_os = "linux"))]
+                {
+                    hestia_media::vaapi::probe(colorimetry, gpu.clone())
+                }
+                #[cfg(not(all(feature = "vaapi", target_os = "linux")))]
+                {
+                    let _ = colorimetry;
+                    None
+                }
+            },
+            gpu.clone(),
+        )?;
         Ok(Self { decoder, gpu })
     }
 }

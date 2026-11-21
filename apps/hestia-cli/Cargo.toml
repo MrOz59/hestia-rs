@@ -13,9 +13,11 @@ name = "hestia"
 path = "src/main.rs"
 
 [features]
-default = ["openh264", "audio"]
+default = ["openh264", "audio", "vaapi"]
 # Software H.264 decoding for `hestia stream`.
 openh264 = ["hestia-media/openh264"]
+# Hardware decoding through VA-API for `hestia stream` (Linux).
+vaapi = ["hestia-media/vaapi"]
 # `hestia stream --audio`: play the stream's audio.
 audio = ["hestia-media/audio"]
 

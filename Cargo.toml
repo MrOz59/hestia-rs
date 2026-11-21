@@ -77,6 +77,9 @@ android_logger = "0.14"
 
 # Media
 openh264 = "0.9"
+# VA-API decoding (Linux): cros-codecs with Hestia RS's low-delay patches;
+# see third_party/cros-codecs/PATCHES.md.
+cros-codecs = { path = "third_party/cros-codecs", features = ["vaapi"] }
 opus = "0.3"
 cpal = "0.15"
 

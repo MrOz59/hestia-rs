@@ -17,6 +17,8 @@ pub mod controller;
 #[cfg(target_os = "linux")]
 pub mod desktop_pads;
 mod gamepad;
+#[cfg(target_os = "linux")]
+pub mod gl_dmabuf;
 #[cfg(not(target_os = "android"))]
 pub mod gl_yuv;
 mod hostinfo;
