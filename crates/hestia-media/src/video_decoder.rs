@@ -1,0 +1,110 @@
+//! Selects a decoder and its advertised formats before a stream starts.
+
+#[cfg(target_os = "android")]
+use crate::mediacodec::MediaCodecDecoder;
+use crate::{Colorimetry, FrameDecoder, VideoFormat};
+
+/// The decoder and the formats it can announce to the host.
+pub type DecoderChoice = (Box<dyn FrameDecoder>, Vec<VideoFormat>);
+
+/// Select hardware for this session when requested. The platform supplies its
+/// probe, so asking for software never queries the native decoder APIs.
+pub fn select_decoder(
+    colorimetry: Colorimetry,
+    hardware: bool,
+    probe_hardware: impl FnOnce(Colorimetry) -> Option<DecoderChoice>,
+) -> Result<DecoderChoice, String> {
+    if hardware && let Some(decoder) = probe_hardware(colorimetry) {
+        return Ok(decoder);
+    }
+    software_decoder(colorimetry)
+}
+
+/// The best video decoder this build offers without a native renderer.
+pub fn default_decoder(colorimetry: Colorimetry) -> Result<DecoderChoice, String> {
+    decoder_with(colorimetry, true)
+}
+
+/// Like [`default_decoder`]; `hardware: false` skips hardware decoders.
+pub fn decoder_with(colorimetry: Colorimetry, hardware: bool) -> Result<DecoderChoice, String> {
+    select_decoder(colorimetry, hardware, |colorimetry| {
+        #[cfg(target_os = "android")]
+        {
+            MediaCodecDecoder::probe(colorimetry).map(mediacodec_choice)
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = colorimetry;
+            None
+        }
+    })
+}
+
+/// Constructs the MediaCodec choice from components already matched to the
+/// requested stream mode by Android's codec discovery API.
+#[cfg(target_os = "android")]
+pub fn probe_android_decoder(
+    colorimetry: Colorimetry,
+    candidates: Vec<(crate::VideoCodec, String)>,
+    output: Option<std::sync::Arc<crate::gpu_video::GpuOutput>>,
+) -> Option<DecoderChoice> {
+    MediaCodecDecoder::with_components(colorimetry, candidates, output).map(mediacodec_choice)
+}
+
+#[cfg(target_os = "android")]
+pub fn decoder_with_android_capabilities(
+    colorimetry: Colorimetry,
+    candidates: Vec<(crate::VideoCodec, String)>,
+    output: Option<std::sync::Arc<crate::gpu_video::GpuOutput>>,
+) -> Result<DecoderChoice, String> {
+    select_decoder(colorimetry, true, |colorimetry| {
+        probe_android_decoder(colorimetry, candidates, output)
+    })
+}
+
+#[cfg(target_os = "android")]
+fn mediacodec_choice(decoder: MediaCodecDecoder) -> DecoderChoice {
+    let formats = decoder.formats();
+    (Box::new(decoder), formats)
+}
+
+fn software_decoder(colorimetry: Colorimetry) -> Result<DecoderChoice, String> {
+    #[cfg(feature = "openh264")]
+    {
+        use crate::software_h264::OpenH264Decoder;
+
+        let decoder = OpenH264Decoder::new(colorimetry)?;
+        Ok((Box::new(decoder), OpenH264Decoder::formats()))
+    }
+    #[cfg(not(feature = "openh264"))]
+    {
+        let _ = colorimetry;
+        Err("this build has no video decoder (enable the `openh264` feature)".into())
+    }
+}
+
+#[cfg(all(test, feature = "openh264"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn software_selection_skips_the_probe_and_unavailable_hardware_falls_back() {
+        let (_, forced) =
+            select_decoder(Colorimetry::default(), false, |_| panic!("unexpected hardware probe")).unwrap();
+        let (_, fallback) = select_decoder(Colorimetry::default(), true, |_| None).unwrap();
+        assert_eq!(forced, crate::software_h264::OpenH264Decoder::formats());
+        assert_eq!(fallback, forced);
+    }
+
+    #[test]
+    fn selected_backend_supplies_its_advertised_formats() {
+        let (decoder, _) = software_decoder(Colorimetry::default()).unwrap();
+        let format = VideoFormat {
+            codec: crate::VideoCodec::Av1,
+            ten_bit: false,
+            yuv444: false,
+        };
+        let (_, advertised) = select_decoder(Colorimetry::default(), true, |_| Some((decoder, vec![format]))).unwrap();
+        assert_eq!(advertised, [format]);
+    }
+}

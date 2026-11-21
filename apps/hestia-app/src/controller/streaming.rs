@@ -1,14 +1,14 @@
 //! The stream screen: runs a [`ManagedStream`] after a launch, shows decoded
 //! frames and forwards keyboard, mouse and touch input to the host.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use hestia_core::TouchMode;
 use hestia_core::diagnosis::{self, Bottleneck, SpikeHistory};
 use hestia_core::report::StatsSample;
-use hestia_core::stream::input::{Modifiers, MouseButton, TouchPhase};
+use hestia_core::stream::input::Modifiers;
 use hestia_core::stream::{InputEvent, SessionListener, StreamEvent, StreamStats};
 use hestia_core::{LaunchedSession, ManagedStream, StreamHost};
 use hestia_media::{DecodeStats, DecodingSink};
@@ -17,78 +17,18 @@ use slint::{ComponentHandle, Image, ModelRc, SharedString, VecModel};
 
 use super::report::{self, SharedReport};
 use super::{Controller, Shared, spawn};
-use crate::keymap::{self, Mapped};
-use crate::presentation::{Presentation, StreamVideo, UiPresenter};
-use crate::touch::{self, Trackpad};
+use crate::presentation::{Presentation, UiPresenter};
+use crate::stream_input::{self, GestureAction, ImeEvent, Picture, StreamInput};
 use crate::typing;
-use crate::virtual_pad::{PadState, VirtualPad};
+use crate::video_backend::StreamVideo;
+use crate::virtual_pad::PadState;
 use crate::{hostinfo, platform};
-
-/// Wheel units (120 per notch) per logical pixel of two-finger drag.
-const TOUCH_SCROLL_SPEED: f32 = 2.0;
-/// Trackpad speed on top of the on-screen → host pixel ratio.
-const TRACKPAD_SPEED: f32 = 1.4;
-/// Most a pinch magnifies the stream.
-const MAX_ZOOM: f32 = 4.0;
-
-/// Where the picture is on screen (logical px), from a pointer event.
-#[derive(Debug, Clone, Copy)]
-struct Picture {
-    centre: (f32, f32),
-    size: (f32, f32),
-}
-
-/// Where a pinch started.
-#[derive(Debug, Clone, Copy)]
-struct PinchStart {
-    /// Finger distance and midpoint.
-    distance: f32,
-    mid: (f32, f32),
-    zoom: f32,
-    pan: (f32, f32),
-    /// The picture's centre, and its size unzoomed.
-    centre: (f32, f32),
-    size: (f32, f32),
-}
-
-/// Pinch-to-zoom state (Artemis' pan/zoom).
-#[derive(Debug, Clone, Copy)]
-struct Zoom {
-    /// Zoom mode on: two fingers pinch and pan instead of scrolling.
-    on: bool,
-    factor: f32,
-    pan: (f32, f32),
-    pinch: Option<PinchStart>,
-}
-
-impl Default for Zoom {
-    fn default() -> Self {
-        Self {
-            on: false,
-            factor: 1.0,
-            pan: (0.0, 0.0),
-            pinch: None,
-        }
-    }
-}
 
 pub(super) struct ActiveStream {
     generation: u64,
     session: ManagedStream,
     host_id: String,
-    /// Stream resolution, for trackpad scaling.
-    width: u32,
-    trackpad: Trackpad,
-    /// Identifies the current touch, so a stale long-press timer is ignored.
-    touch_id: u64,
-    /// Multi-finger taps (2: right click, 3: keyboard).
-    fingers: touch::FingerTaps,
-    /// On-screen controller (drawn when `pad_visible`).
-    pad: VirtualPad,
-    pad_visible: bool,
-    /// The stream view's size (logical px).
-    view: (f32, f32),
-    zoom: Zoom,
+    input: StreamInput,
     report: SharedReport,
     decode: Arc<DecodeStats>,
     present: Arc<Presentation>,
@@ -100,13 +40,6 @@ impl ActiveStream {
             self.session.send_input(&event);
         }
     }
-}
-
-fn trackpad_events(outputs: Vec<touch::Output>) -> impl Iterator<Item = InputEvent> {
-    outputs.into_iter().map(|o| match o {
-        touch::Output::Move { dx, dy } => InputEvent::MouseMove { dx, dy },
-        touch::Output::Button { button, pressed } => InputEvent::MouseButton { button, pressed },
-    })
 }
 
 #[derive(Clone)]
@@ -419,9 +352,10 @@ impl Controller {
 
         // A stream replacing another keeps the laid-out view (no new layout
         // event comes for it).
-        let view = self.active_stream().as_ref().map_or((0.0, 0.0), |a| a.view);
-        let mut pad = VirtualPad::default();
-        pad.resize(view.0, view.1);
+        let view = self
+            .active_stream()
+            .as_ref()
+            .map_or((0.0, 0.0), |a| a.input.view_size());
         // Hermes host offering clipboard sync (the menu's actions, and the
         // setting's live sync).
         let clipboard = self
@@ -435,14 +369,7 @@ impl Controller {
             generation,
             session,
             host_id,
-            width: stream_width,
-            trackpad: Trackpad::new(),
-            touch_id: 0,
-            fingers: touch::FingerTaps::default(),
-            pad,
-            pad_visible: launched.settings.onscreen_controller,
-            view,
-            zoom: Zoom::default(),
+            input: StreamInput::new(stream_width, view, launched.settings.onscreen_controller),
             report: session_report,
             decode,
             present,
@@ -632,14 +559,8 @@ impl Controller {
                 _ => {}
             }
         }
-        match keymap::map(text) {
-            Some(Mapped::Key(key)) => self.send_input(InputEvent::Key {
-                key,
-                pressed,
-                modifiers,
-            }),
-            Some(Mapped::Text(text)) if pressed => self.send_input(InputEvent::Text(text)),
-            _ => {}
+        if let Some(event) = stream_input::key(text, pressed, modifiers) {
+            self.send_input(event);
         }
     }
 
@@ -663,7 +584,10 @@ impl Controller {
         }
         let mode = self.touch_mode();
         if touch && mode == TouchMode::Touchscreen {
-            return self.native_touch(kind, finger, (x, y), (width, height));
+            if let Some(event) = stream_input::native_touch(kind, finger, (x, y), (width, height)) {
+                self.send_input(event);
+            }
+            return;
         }
         let picture = Picture {
             centre: (screen.0 - x + width / 2.0, screen.1 - y + height / 2.0),
@@ -675,149 +599,40 @@ impl Controller {
         if touch && mode == TouchMode::Trackpad {
             return self.trackpad_event(kind, x, y, width);
         }
-        if width < 1.0 || height < 1.0 {
-            return;
-        }
-        let clamp = |v: f32, max: f32| v.clamp(0.0, max - 1.0).round() as i16;
-        let mut events = vec![InputEvent::MousePosition {
-            x: clamp(x, width),
-            y: clamp(y, height),
-            width: width.round().min(i16::MAX as f32) as i16,
-            height: height.round().min(i16::MAX as f32) as i16,
-        }];
-        let button = match button {
-            1 => Some(MouseButton::Left),
-            2 => Some(MouseButton::Middle),
-            3 => Some(MouseButton::Right),
-            _ => None,
-        };
-        // Touch reports no button; it is the left one.
-        let button = button.or(touch.then_some(MouseButton::Left));
-        if let (Some(button), 0 | 1) = (button, kind) {
-            events.push(InputEvent::MouseButton {
-                button,
-                pressed: kind == 0,
-            });
-        }
         if let Some(active) = self.active_stream().as_ref() {
-            active.send(events);
+            active.send(stream_input::absolute_pointer(
+                kind,
+                button,
+                (x, y),
+                (width, height),
+                touch,
+            ));
         }
     }
 
-    /// Tracks every finger for multi-finger taps. True when this event
-    /// belongs to a gesture with more than one finger (the trackpad and
-    /// direct touch only follow the first finger, and drop it once a
-    /// second one lands).
-    fn multi_finger(self: &Shared, kind: i32, finger: i32, (x, y): (f32, f32), picture: Picture) -> bool {
-        let now = Instant::now();
-        let mut guard = self.active_stream();
-        let Some(active) = guard.as_mut() else { return false };
-        match kind {
-            0 => {
-                let was_multi = active.fingers.multi();
-                active.fingers.down(finger, x, y, now);
-                if active.fingers.multi() && !was_multi {
-                    // The first finger's tap/drag/long press is off.
-                    let released = active.trackpad.cancel();
-                    active.touch_id += 1;
-                    active.send(trackpad_events(released));
-                }
-                active.fingers.multi()
-            }
-            2 => {
-                let (dx, dy) = active.fingers.moved(finger, x, y);
-                if active.zoom.on && active.fingers.count() == 2 {
-                    let update = Self::pinch(active, picture);
-                    drop(guard);
-                    if let Some((factor, (px, py))) = update {
-                        self.ui(move |ui| {
-                            ui.set_stream_zoom(factor);
-                            ui.set_stream_pan_x(px);
-                            ui.set_stream_pan_y(py);
-                        });
-                    }
-                    return true;
-                }
-                // Two fingers dragging scroll the host, content following
-                // the fingers (as on the phone); the first finger leads.
-                if active.fingers.count() == 2 && active.fingers.primary() == Some(finger) {
-                    let amount = |v: f32| (v * TOUCH_SCROLL_SPEED).round().clamp(-32767.0, 32767.0) as i16;
-                    let (horizontal, vertical) = (amount(-dx), amount(dy));
-                    if horizontal != 0 || vertical != 0 {
-                        active.send([InputEvent::Scroll { vertical, horizontal }]);
-                    }
-                }
-                active.fingers.multi() || active.fingers.primary() != Some(finger)
-            }
-            1 | 3 => {
-                active.zoom.pinch = None;
-                let secondary = active.fingers.multi() || active.fingers.primary() != Some(finger);
-                let tap = if kind == 1 {
-                    active.fingers.up(finger, now)
-                } else {
-                    active.fingers.reset();
-                    None
-                };
-                match tap {
-                    Some(2) => {
-                        active.send([
-                            InputEvent::MouseButton {
-                                button: MouseButton::Right,
-                                pressed: true,
-                            },
-                            InputEvent::MouseButton {
-                                button: MouseButton::Right,
-                                pressed: false,
-                            },
-                        ]);
-                    }
-                    Some(3..) => {
-                        drop(guard);
-                        self.ui(|ui| ui.set_stream_keyboard_open(!ui.get_stream_keyboard_open()));
-                        return true;
-                    }
-                    _ => {}
-                }
-                secondary || tap.is_some()
-            }
-            _ => false,
+    fn multi_finger(self: &Shared, kind: i32, finger: i32, point: (f32, f32), picture: Picture) -> bool {
+        let action = {
+            let mut guard = self.active_stream();
+            let Some(ActiveStream { input, session, .. }) = guard.as_mut() else {
+                return false;
+            };
+            input.multi_finger(kind, finger, point, picture, Instant::now(), |event| {
+                session.send_input(&event)
+            })
+        };
+        match action {
+            GestureAction::Pointer => return false,
+            GestureAction::Consumed => {}
+            GestureAction::Zoom(factor, (px, py)) => self.ui(move |ui| {
+                ui.set_stream_zoom(factor);
+                ui.set_stream_pan_x(px);
+                ui.set_stream_pan_y(py);
+            }),
+            GestureAction::ToggleKeyboard => self.ui(|ui| {
+                ui.set_stream_keyboard_open(!ui.get_stream_keyboard_open());
+            }),
         }
-    }
-
-    /// Pinch-zoom from the first two fingers: zooms about their midpoint
-    /// and pans with it. Returns the new zoom and pan when they changed.
-    fn pinch(active: &mut ActiveStream, picture: Picture) -> Option<(f32, (f32, f32))> {
-        let ((ax, ay), (bx, by)) = active.fingers.pair()?;
-        let distance = (bx - ax).hypot(by - ay).max(1.0);
-        let mid = ((ax + bx) / 2.0, (ay + by) / 2.0);
-        let z = &mut active.zoom;
-        let start = *z.pinch.get_or_insert(PinchStart {
-            distance,
-            mid,
-            zoom: z.factor,
-            pan: z.pan,
-            centre: picture.centre,
-            size: (picture.size.0 / z.factor, picture.size.1 / z.factor),
-        });
-        let factor = (start.zoom * distance / start.distance).clamp(1.0, MAX_ZOOM);
-        // The picture point under the fingers (unzoomed px from its centre)
-        // stays under them; the centre moves with the pan.
-        let anchor = (
-            (start.mid.0 - start.centre.0) / start.zoom,
-            (start.mid.1 - start.centre.1) / start.zoom,
-        );
-        let base = (start.centre.0 - start.pan.0, start.centre.1 - start.pan.1);
-        // The zoomed picture always covers where it was unzoomed.
-        let limit = |size: f32| size * (factor - 1.0) / 2.0;
-        let pan = (
-            (mid.0 - anchor.0 * factor - base.0).clamp(-limit(start.size.0), limit(start.size.0)),
-            (mid.1 - anchor.1 * factor - base.1).clamp(-limit(start.size.1), limit(start.size.1)),
-        );
-        if (factor, pan) == (z.factor, z.pan) {
-            return None;
-        }
-        (z.factor, z.pan) = (factor, pan);
-        Some((factor, pan))
+        true
     }
 
     /// Menu → Zoom: two fingers pinch and pan; turning it off resets.
@@ -825,11 +640,7 @@ impl Controller {
         let on = {
             let mut guard = self.active_stream();
             let Some(active) = guard.as_mut() else { return };
-            active.zoom = Zoom {
-                on: !active.zoom.on,
-                ..Zoom::default()
-            };
-            active.zoom.on
+            active.input.toggle_zoom()
         };
         self.ui(move |ui| {
             ui.set_stream_zoom_mode(on);
@@ -849,52 +660,16 @@ impl Controller {
             .unwrap_or_default()
     }
 
-    /// Touchscreen mode: every finger goes to the host as a touch, at its
-    /// place in the video (Sunshine/Hermes touch events).
-    fn native_touch(&self, kind: i32, finger: i32, (x, y): (f32, f32), (w, h): (f32, f32)) {
-        if w < 1.0 || h < 1.0 {
-            return;
-        }
-        let phase = match kind {
-            0 => TouchPhase::Down,
-            1 => TouchPhase::Up,
-            2 => TouchPhase::Move,
-            _ => TouchPhase::Cancel,
-        };
-        self.send_input(InputEvent::Touch {
-            pointer_id: finger as u32,
-            phase,
-            x: (x / w).clamp(0.0, 1.0),
-            y: (y / h).clamp(0.0, 1.0),
-            pressure: if kind == 1 { 0.0 } else { 1.0 },
-        });
-    }
-
     /// Touches on the on-screen controller; true when the pad took it.
-    fn pad_event(self: &Shared, kind: i32, finger: i32, (x, y): (f32, f32)) -> bool {
+    fn pad_event(self: &Shared, kind: i32, finger: i32, point: (f32, f32)) -> bool {
         let now = Instant::now();
         let (state, click, generation) = {
             let mut guard = self.active_stream();
             let Some(active) = guard.as_mut() else { return false };
-            if !active.pad_visible {
+            let Some((state, click)) = active.input.pad_event(kind, finger, point, now) else {
                 return false;
-            }
-            let took = match kind {
-                0 => active.pad.down(finger, x, y, now),
-                2 if active.pad.owns(finger) => {
-                    active.pad.moved(finger, x, y);
-                    true
-                }
-                1 | 3 if active.pad.owns(finger) => {
-                    active.pad.up(finger, now);
-                    true
-                }
-                _ => false,
             };
-            if !took {
-                return false;
-            }
-            (active.pad.state(), active.pad.take_click(), active.generation)
+            (state, click, active.generation)
         };
         Self::send_pad(state, click);
         if click != 0 {
@@ -904,8 +679,8 @@ impl Controller {
                 let state = c
                     .active_stream()
                     .as_ref()
-                    .filter(|active| active.generation == generation && active.pad_visible)
-                    .map(|active| active.pad.state());
+                    .filter(|active| active.generation == generation)
+                    .and_then(|active| active.input.visible_pad_state());
                 if let Some(state) = state {
                     Self::send_pad(state, 0);
                 }
@@ -929,7 +704,7 @@ impl Controller {
         let controls = {
             let guard = self.active_stream();
             let Some(active) = guard.as_ref() else { return };
-            crate::pad_controls(&active.pad)
+            crate::pad_controls(active.input.pad())
         };
         self.ui(move |ui| ui.set_stream_pad_controls(ModelRc::new(VecModel::from(controls))));
     }
@@ -939,10 +714,7 @@ impl Controller {
         let on = {
             let mut guard = self.active_stream();
             let Some(active) = guard.as_mut() else { return };
-            active.pad_visible = !active.pad_visible;
-            let (w, h) = active.view;
-            active.pad.resize(w, h);
-            active.pad_visible
+            active.input.toggle_pad()
         };
         if on {
             self.push_pad_view();
@@ -965,12 +737,7 @@ impl Controller {
         let visible = {
             let mut guard = self.active_stream();
             let Some(active) = guard.as_mut() else { return };
-            if active.view == (width, height) {
-                return;
-            }
-            active.view = (width, height);
-            active.pad.resize(width, height);
-            active.pad_visible
+            active.input.resize(width, height)
         };
         if visible {
             self.push_pad_view();
@@ -985,58 +752,49 @@ impl Controller {
     }
 
     /// Text and deletions from the on-screen keyboard, typed on the host.
-    pub(super) fn stream_ime(self: &Shared, event: platform::ImeEvent) {
-        let guard = self.active_stream();
-        let Some(active) = guard.as_ref() else { return };
-        match event {
-            platform::ImeEvent::Text(text) => active.send(typing::edit_events("", &text)),
-            platform::ImeEvent::DeleteBefore(count) => {
-                for _ in 0..count.min(256) {
-                    active.send(typing::special_key_events("backspace"));
-                }
-            }
+    pub(super) fn stream_ime(self: &Shared, event: ImeEvent) {
+        if let Some(active) = self.active_stream().as_ref() {
+            stream_input::ime(event, |event| active.session.send_input(&event));
         }
     }
 
     fn trackpad_event(self: &Shared, kind: i32, x: f32, y: f32, video_width: f32) {
-        let now = Instant::now();
         let mut guard = self.active_stream();
-        let Some(active) = guard.as_mut() else { return };
-        let outputs = match kind {
-            0 => {
-                active.touch_id += 1;
-                let (generation, touch_id) = (active.generation, active.touch_id);
-                let c = self.clone();
-                slint::Timer::single_shot(touch::LONG_PRESS, move || c.trackpad_long_press(generation, touch_id));
-                active.trackpad.down(x, y, now)
-            }
-            1 => active.trackpad.up(now),
-            2 => {
-                let scale = TRACKPAD_SPEED * active.width as f32 / video_width.max(1.0);
-                active.trackpad.moved(x, y, scale)
-            }
-            _ => active.trackpad.cancel(),
+        let Some(ActiveStream {
+            input,
+            session,
+            generation,
+            ..
+        }) = guard.as_mut()
+        else {
+            return;
         };
-        active.send(trackpad_events(outputs));
+        if let Some(touch_id) = input.trackpad_event(kind, (x, y), video_width, Instant::now(), |event| {
+            session.send_input(&event);
+        }) {
+            let generation = *generation;
+            let c = self.clone();
+            slint::Timer::single_shot(crate::touch::LONG_PRESS, move || {
+                c.trackpad_long_press(generation, touch_id)
+            });
+        }
     }
 
     fn trackpad_long_press(&self, generation: u64, touch_id: u64) {
         let mut guard = self.active_stream();
-        let Some(active) = guard.as_mut() else { return };
-        if active.generation == generation && active.touch_id == touch_id {
-            let outputs = active.trackpad.long_press(Instant::now());
-            active.send(trackpad_events(outputs));
-        }
+        let Some(active) = guard.as_mut().filter(|active| active.generation == generation) else {
+            return;
+        };
+        let ActiveStream { input, session, .. } = active;
+        input.long_press(touch_id, Instant::now(), |event| session.send_input(&event));
     }
 
     /// Menu → Touch: trackpad → mouse → touchscreen (remembered).
     pub(super) fn cycle_touch_mode(self: &Shared) {
         let mode = self.touch_mode().next();
         self.touch_mode.store(mode.index() as u8, Ordering::Relaxed);
-        if let Some(active) = self.active_stream().as_mut() {
-            let released = active.trackpad.cancel();
-            active.send(trackpad_events(released));
-            active.fingers.reset();
+        if let Some(ActiveStream { input, session, .. }) = self.active_stream().as_mut() {
+            input.reset_touch(|event| session.send_input(&event));
         }
         self.ui(move |ui| ui.set_stream_touch_mode(mode.index()));
         self.toast(match mode {
@@ -1068,12 +826,8 @@ impl Controller {
     }
 
     pub(super) fn stream_scroll(&self, dx: f32, dy: f32) {
-        // Slint reports pixels (about 60 per wheel notch); GameStream wants
-        // 120 per notch.
-        let amount = |v: f32| (v * 2.0).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
-        let (horizontal, vertical) = (amount(dx), amount(dy));
-        if horizontal != 0 || vertical != 0 {
-            self.send_input(InputEvent::Scroll { vertical, horizontal });
+        if let Some(event) = stream_input::scroll(dx, dy) {
+            self.send_input(event);
         }
     }
 

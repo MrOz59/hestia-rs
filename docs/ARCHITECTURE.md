@@ -89,10 +89,18 @@ Pure-Rust data plane, following moonlight-common-c's Sunshine path:
 ### hestia-media
 Backends for the sink traits. `DecodingSink` runs a `FrameDecoder` on its own
 thread and hands each `DecodedFrame` to a `FramePresenter`. A decoded frame
-owns either reusable RGBA pixels or an Android hardware picture. Queue overflow
-and decoder errors still use the same keyframe recovery policy. Backends include
+owns either reusable RGBA pixels or a `NativePicture`. Platform buffers live
+inline in that type and retain their own release rules. The decoder thread and
+mailbox move the buffer without depending on Android's image type. Queue overflow
+and decoder errors use the same keyframe recovery policy. Backends include
 OpenH264, Android MediaCodec, Opus + cpal playback, Android audio, and null and
 dump sinks. Linux VA-API and surround playback are planned.
+
+The GUI and CLI use `video_decoder::select_decoder` to pair a decoder with
+the formats it can advertise. The hardware probe is supplied at session startup.
+The Android GUI matches codecs to the requested size and rate and passes its
+native output, while headless callers can use the default probe. The selector
+uses OpenH264 when hardware is disabled or unavailable.
 
 Audio playback uses a shared `PlaybackSink` to connect an `AudioDecoder`
 to a `PcmOutput`. Desktop composes libopus with cpal, and Android composes
@@ -113,7 +121,13 @@ picture, coalesces display callbacks, and returns CPU storage to the decoder
 after upload. Replaced native pictures are released outside its lock. The
 Android renderer imports the hardware picture, draws it without a CPU copy,
 and releases it with a GPU fence. The decoder receives renderer availability
-explicitly at construction.
+explicitly at construction by `video_backend.rs`.
+
+`stream_input.rs` owns the per-session touch and controller gesture state and
+converts input into protocol events. The controller handles UI updates, timers,
+and delivery to the session. System services are grouped under `platform/`
+by capability, including display, keyboard, clipboard, controllers, and Android
+network routing. Android's service adapters share the activity and JNI helper.
 
 ### hestia-cli
 `hestia` binary over the same core, for scripting and for testing hosts without

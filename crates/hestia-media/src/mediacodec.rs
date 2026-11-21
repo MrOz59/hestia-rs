@@ -25,6 +25,7 @@ use ndk::hardware_buffer::HardwareBufferUsage;
 use crate::color::{Colorimetry, Yuv420, yuv420_to_rgba};
 use crate::decode::{DecodeStats, DecodedFrame, FrameBuffer, FrameDecoder, FrameTiming};
 use crate::gpu_video::{GpuOutput, GpuPicture, SharedReader};
+use crate::native_picture::NativePicture;
 use crate::{EncodedFrame, VideoFormat};
 
 /// Bound time spent feeding one frame when the codec is under pressure.
@@ -551,7 +552,7 @@ impl Running {
             let picture = GpuPicture::new(image, reader.clone())?;
             out.width = picture.width;
             out.height = picture.height;
-            out.buffer = FrameBuffer::Android(picture);
+            out.buffer = FrameBuffer::Native(NativePicture::Android(picture));
         } else {
             convert(&image, colorimetry, (self.width, self.height), out)?;
         }

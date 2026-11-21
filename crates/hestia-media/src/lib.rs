@@ -34,12 +34,14 @@ pub mod dump;
 pub mod gpu_video;
 #[cfg(target_os = "android")]
 pub mod mediacodec;
+pub mod native_picture;
 pub mod null;
 #[cfg(feature = "audio")]
 pub mod opus_decode;
 pub mod picture_mailbox;
 #[cfg(feature = "openh264")]
 pub mod software_h264;
+pub mod video_decoder;
 
 pub use color::Colorimetry;
 pub use decode::{
@@ -47,6 +49,11 @@ pub use decode::{
     RecoveryLatency,
 };
 pub use hestia_stream::sink::{AudioFormat, AudioSink, EncodedFrame, SubmitResult, VideoCodec, VideoFormat, VideoSink};
+
+pub use video_decoder::{DecoderChoice, decoder_with, default_decoder};
+
+#[cfg(target_os = "android")]
+pub use video_decoder::decoder_with_android_capabilities;
 
 /// Description of a decoder backend, for settings screens and logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,53 +86,6 @@ pub fn video_backends() -> Vec<BackendInfo> {
             available: true,
         },
     ]
-}
-
-/// A decoder plus the formats to announce to the host for it.
-pub type DecoderChoice = (Box<dyn FrameDecoder>, Vec<VideoFormat>);
-
-/// The best video decoder this build offers.
-pub fn default_decoder(colorimetry: Colorimetry) -> Result<DecoderChoice, String> {
-    decoder_with(colorimetry, true)
-}
-
-/// Like [`default_decoder`]; `hardware: false` skips hardware decoders.
-pub fn decoder_with(colorimetry: Colorimetry, hardware: bool) -> Result<DecoderChoice, String> {
-    #[cfg(target_os = "android")]
-    if hardware && let Some(decoder) = mediacodec::MediaCodecDecoder::probe(colorimetry) {
-        let formats = decoder.formats();
-        return Ok((Box::new(decoder), formats));
-    }
-    #[cfg(not(target_os = "android"))]
-    let _ = hardware;
-    software_decoder(colorimetry)
-}
-
-/// Chooses a component already matched by Android to the requested stream mode.
-#[cfg(target_os = "android")]
-pub fn decoder_with_android_capabilities(
-    colorimetry: Colorimetry,
-    candidates: Vec<(VideoCodec, String)>,
-    output: Option<std::sync::Arc<gpu_video::GpuOutput>>,
-) -> Result<DecoderChoice, String> {
-    if let Some(decoder) = mediacodec::MediaCodecDecoder::with_components(colorimetry, candidates, output) {
-        let formats = decoder.formats();
-        return Ok((Box::new(decoder), formats));
-    }
-    software_decoder(colorimetry)
-}
-
-fn software_decoder(colorimetry: Colorimetry) -> Result<DecoderChoice, String> {
-    #[cfg(feature = "openh264")]
-    {
-        let decoder = software_h264::OpenH264Decoder::new(colorimetry)?;
-        Ok((Box::new(decoder), software_h264::OpenH264Decoder::formats()))
-    }
-    #[cfg(not(feature = "openh264"))]
-    {
-        let _ = colorimetry;
-        Err("this build has no video decoder (enable the `openh264` feature)".into())
-    }
 }
 
 /// Audio playback when this build has it, otherwise a sink that only counts.
