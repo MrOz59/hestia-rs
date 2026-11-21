@@ -37,6 +37,7 @@ pub mod mediacodec;
 pub mod null;
 #[cfg(feature = "audio")]
 pub mod opus_decode;
+pub mod picture_mailbox;
 #[cfg(feature = "openh264")]
 pub mod software_h264;
 

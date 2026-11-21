@@ -106,10 +106,14 @@ Slint UI (`ui/*.slint`, fluent-dark base style with a custom theme). A
 `upgrade_in_event_loop`; no network call ever runs on the UI thread. The same
 crate builds a desktop binary and an Android `cdylib` (`android_main`). The
 stream screen (`ui/stream.slint`) takes input and shows frames from
-`presentation.rs`. Each session owns one pending picture slot shared by the
-Slint event loop and the native renderer. The Android renderer imports the
-hardware picture, draws it without a CPU copy, and releases it with a GPU
-fence. The decoder receives renderer availability explicitly at construction.
+`presentation.rs`. That adapter maps `PictureMailbox` updates to Slint image
+uploads and native redraws. The mailbox lives in `hestia-media` and is shared
+by the decoder, event loop, and native renderer. It keeps the newest pending
+picture, coalesces display callbacks, and returns CPU storage to the decoder
+after upload. Replaced native pictures are released outside its lock. The
+Android renderer imports the hardware picture, draws it without a CPU copy,
+and releases it with a GPU fence. The decoder receives renderer availability
+explicitly at construction.
 
 ### hestia-cli
 `hestia` binary over the same core, for scripting and for testing hosts without
