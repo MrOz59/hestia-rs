@@ -223,8 +223,8 @@ Each crate has one job and depends only on the layers below it. More in
 
 ## Building
 
-Rust 1.89+ (edition 2024; the code uses let chains, and `openh264` 0.9.10
-needs 1.89).
+Rust 1.95+ (edition 2024; Slint 1.19, and with it the patched Android
+backend in `third_party`, needs 1.95).
 
 ### Linux
 
