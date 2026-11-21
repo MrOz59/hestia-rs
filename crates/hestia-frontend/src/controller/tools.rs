@@ -88,7 +88,10 @@ impl Controller {
             let unsupported = perms.as_ref().err().is_some_and(ApiError::is_unsupported);
             let mut notes = Vec::new();
             if unsupported {
-                notes.push("This host doesn't offer the Hermes tools API (plain Sunshine or Apollo).".to_owned());
+                notes.push(
+                    "This host doesn't offer the Hermes tools API: it isn't a Hermes host, or its Hermes is too old."
+                        .to_owned(),
+                );
             }
             let (perm_text, display_ok, commands_ok, clipboard_ok) = match &perms {
                 Ok(p) => (

@@ -13,11 +13,7 @@ use sha2::{Digest, Sha256};
 mod stream;
 
 #[derive(Parser)]
-#[command(
-    name = "hestia",
-    version,
-    about = "Hestia RS command-line client for Hermes / Sunshine hosts"
-)]
+#[command(name = "hestia", version, about = "Hestia RS command-line client for Hermes hosts")]
 struct Cli {
     /// Data directory (identity, hosts, settings). Defaults to the app's.
     #[arg(long, global = true, env = "HESTIA_DATA_DIR")]

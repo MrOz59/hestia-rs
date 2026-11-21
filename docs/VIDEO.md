@@ -14,7 +14,7 @@ stream report where time goes.
 
 `video.rs` receives the RTP shards on their own thread, decrypts them when
 the session is encrypted, recovers lost shards with Reed–Solomon FEC
-(byte-compatible with nanors, as Sunshine and Hermes use it), and
+(byte-compatible with nanors, as Hermes uses it), and
 reassembles one access unit per frame. A frame that cannot be recovered is
 dropped and everything after it is skipped until the next IDR, which is
 requested over the control stream (no reference frame invalidation yet).

@@ -1,6 +1,6 @@
 [package]
 name = "hestia-nvhttp"
-description = "GameStream (Sunshine/Apollo/Hermes) HTTP API and pairing for Hestia RS"
+description = "GameStream HTTP API and pairing, as Hermes speaks them, for Hestia RS"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
