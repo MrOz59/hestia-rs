@@ -1,8 +1,17 @@
-//! YUV → RGBA conversion for software decoders.
+//! YUV → RGBA conversion for software decoders and CPU readback paths.
 //!
 //! The host encodes with the colorimetry the client asks for in ANNOUNCE
 //! (`x-nv-video[0].encoderCscMode = (colorspace << 1) | full_range`); the
 //! session currently asks for mode 0, BT.601 limited range.
+//!
+//! The CPU conversion is 8.8 fixed point. Rows are converted two pixels (one
+//! chroma sample) at a time; on x86-64 an SSE2 kernel (part of the baseline
+//! ISA, no runtime detection) does eight pixels per step with exactly the
+//! same arithmetic, about six times faster than the scalar loop. Large
+//! pictures are split into bands over up to four threads.
+//!
+//! [`Colorimetry::gpu_conversion`] gives the same conversion as a matrix for
+//! GPU shaders (the desktop renderer converts there when it can).
 
 /// Matrix + range of the decoded stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -34,6 +43,41 @@ impl Colorimetry {
             Self::Bt709Limited => [16, 298, 459, -55, -136, 541],
             Self::Bt709Full => [0, 256, 403, -48, -120, 475],
         }
+    }
+
+    /// The conversion for a shader, on samples normalised to 0..1:
+    /// `rgb = matrix * (yuv - offset)`, `matrix` column-major (Y, U, V
+    /// columns), as `glUniformMatrix3fv` takes it.
+    pub fn gpu_conversion(self) -> ([f32; 9], [f32; 3]) {
+        let (kr, kb) = match self {
+            Self::Bt601Limited | Self::Bt601Full => (0.299f32, 0.114f32),
+            Self::Bt709Limited | Self::Bt709Full => (0.2126, 0.0722),
+        };
+        let full = matches!(self, Self::Bt601Full | Self::Bt709Full);
+        let (y_scale, c_scale, y_offset) = if full {
+            (1.0, 1.0, 0.0)
+        } else {
+            (255.0 / 219.0, 255.0 / 224.0, 16.0 / 255.0)
+        };
+        let kg = 1.0 - kr - kb;
+        let r_v = 2.0 * (1.0 - kr);
+        let b_u = 2.0 * (1.0 - kb);
+        let g_u = -b_u * kb / kg;
+        let g_v = -r_v * kr / kg;
+        (
+            [
+                y_scale,
+                y_scale,
+                y_scale,
+                0.0,
+                g_u * c_scale,
+                b_u * c_scale,
+                r_v * c_scale,
+                g_v * c_scale,
+                0.0,
+            ],
+            [y_offset, 128.0 / 255.0, 128.0 / 255.0],
+        )
     }
 }
 
@@ -117,7 +161,7 @@ pub fn i420_to_rgba(src: &I420<'_>, colorimetry: Colorimetry, out: &mut [u8]) {
 }
 
 fn i420_rows(src: &I420<'_>, colorimetry: Colorimetry, out: &mut [u8]) {
-    let [y_off, ys, rv, gu, gv, bu] = colorimetry.coefficients();
+    let k = colorimetry.coefficients();
     let (w, h) = (src.width, src.height);
     assert!(out.len() >= w * h * 4, "RGBA buffer too small");
     let chroma_w = w.div_ceil(2);
@@ -127,30 +171,127 @@ fn i420_rows(src: &I420<'_>, colorimetry: Colorimetry, out: &mut [u8]) {
         let c = (row / 2) * src.uv_stride;
         let u_row = &src.u[c..c + chroma_w];
         let v_row = &src.v[c..c + chroma_w];
+        #[cfg(target_arch = "x86_64")]
+        let done = sse2::row(y_row, u_row, v_row, out_row, k);
+        #[cfg(not(target_arch = "x86_64"))]
+        let done = 0;
+        planar_row(
+            &y_row[done..],
+            &u_row[done / 2..],
+            &v_row[done / 2..],
+            &mut out_row[done * 4..],
+            k,
+        );
+    }
+}
 
-        let mut pixels = out_row.chunks_exact_mut(8);
-        let mut lumas = y_row.chunks_exact(2);
-        for ((px, yy), (&u, &v)) in (&mut pixels).zip(&mut lumas).zip(u_row.iter().zip(v_row)) {
-            let (u, v) = (u as i32 - 128, v as i32 - 128);
-            let (dr, dg, db) = (rv * v + 128, gu * u + gv * v + 128, bu * u + 128);
-            for (p, &l) in px.chunks_exact_mut(4).zip(yy) {
-                let l = (l as i32 - y_off) * ys;
-                p[0] = clamp8((l + dr) >> 8);
-                p[1] = clamp8((l + dg) >> 8);
-                p[2] = clamp8((l + db) >> 8);
-                p[3] = 255;
+/// One RGBA pixel, 8.8 fixed point: `l` is the scaled luma, `d*` the chroma
+/// terms with rounding included.
+#[inline(always)]
+fn pixel(l: i32, dr: i32, dg: i32, db: i32) -> u32 {
+    u32::from(clamp8((l + dr) >> 8))
+        | u32::from(clamp8((l + dg) >> 8)) << 8
+        | u32::from(clamp8((l + db) >> 8)) << 16
+        | 0xff00_0000
+}
+
+/// Converts a row two pixels (one chroma sample) at a time; `u_row`/`v_row`
+/// hold `ceil(y_row.len() / 2)` samples, `uv_step` bytes apart.
+#[inline(always)]
+fn pairs_row(y_row: &[u8], u_row: &[u8], v_row: &[u8], uv_step: usize, out_row: &mut [u8], k: [i32; 6]) {
+    let [y_off, ys, rv, gu, gv, bu] = k;
+    let chroma = |u: u8, v: u8| {
+        let (u, v) = (i32::from(u) - 128, i32::from(v) - 128);
+        (rv * v + 128, gu * u + gv * v + 128, bu * u + 128)
+    };
+    let mut samples = u_row.iter().step_by(uv_step).zip(v_row.iter().step_by(uv_step));
+    let mut out_pairs = out_row.chunks_exact_mut(8);
+    let mut luma_pairs = y_row.chunks_exact(2);
+    for ((out, luma), (&u, &v)) in (&mut out_pairs).zip(&mut luma_pairs).zip(&mut samples) {
+        let (dr, dg, db) = chroma(u, v);
+        let l0 = (i32::from(luma[0]) - y_off) * ys;
+        let l1 = (i32::from(luma[1]) - y_off) * ys;
+        let both = u64::from(pixel(l0, dr, dg, db)) | u64::from(pixel(l1, dr, dg, db)) << 32;
+        out.copy_from_slice(&both.to_le_bytes());
+    }
+    // Odd width: one pixel left.
+    if let ([l], Some(out), Some((&u, &v))) = (
+        luma_pairs.remainder(),
+        out_pairs.into_remainder().get_mut(..4),
+        samples.next(),
+    ) {
+        let (dr, dg, db) = chroma(u, v);
+        out.copy_from_slice(&pixel((i32::from(*l) - y_off) * ys, dr, dg, db).to_le_bytes());
+    }
+}
+
+fn planar_row(y_row: &[u8], u_row: &[u8], v_row: &[u8], out_row: &mut [u8], k: [i32; 6]) {
+    pairs_row(y_row, u_row, v_row, 1, out_row, k);
+}
+
+/// Eight pixels per step with SSE2 (always present on x86-64), bit-exact
+/// with [`pixel`]: 16×16→32-bit luma products, `pmaddwd` for the chroma
+/// terms, and saturating packs for the clamp to 0..255.
+#[cfg(target_arch = "x86_64")]
+mod sse2 {
+    use std::arch::x86_64::*;
+
+    /// Converts the leading multiple of eight pixels; returns how many.
+    pub(super) fn row(y_row: &[u8], u_row: &[u8], v_row: &[u8], out_row: &mut [u8], k: [i32; 6]) -> usize {
+        let blocks = (y_row.len() / 8)
+            .min(u_row.len() / 4)
+            .min(v_row.len() / 4)
+            .min(out_row.len() / 32);
+        for b in 0..blocks {
+            // SAFETY: SSE2 is part of x86-64; block `b` reads 8 luma, 4 + 4
+            // chroma bytes and writes 32 bytes, all within the bounds above.
+            unsafe {
+                eight(
+                    y_row.as_ptr().add(b * 8),
+                    u_row.as_ptr().add(b * 4),
+                    v_row.as_ptr().add(b * 4),
+                    out_row.as_mut_ptr().add(b * 32),
+                    k,
+                );
             }
         }
-        // Odd width: one pixel left.
-        if let ([l], p) = (lumas.remainder(), pixels.into_remainder()) {
-            if p.len() == 4 {
-                let (u, v) = (u_row[chroma_w - 1] as i32 - 128, v_row[chroma_w - 1] as i32 - 128);
-                let l = (*l as i32 - y_off) * ys;
-                p[0] = clamp8((l + rv * v + 128) >> 8);
-                p[1] = clamp8((l + gu * u + gv * v + 128) >> 8);
-                p[2] = clamp8((l + bu * u + 128) >> 8);
-                p[3] = 255;
-            }
+        blocks * 8
+    }
+
+    #[inline(always)]
+    unsafe fn eight(y: *const u8, u: *const u8, v: *const u8, out: *mut u8, k: [i32; 6]) {
+        let [y_off, ys, rv, gu, gv, bu] = k;
+        unsafe {
+            let zero = _mm_setzero_si128();
+            let luma = _mm_loadl_epi64(y.cast());
+            let u4 = _mm_cvtsi32_si128(u.cast::<i32>().read_unaligned());
+            let v4 = _mm_cvtsi32_si128(v.cast::<i32>().read_unaligned());
+            // (Y - offset) * scale, as eight 32-bit products.
+            let luma = _mm_sub_epi16(_mm_unpacklo_epi8(luma, zero), _mm_set1_epi16(y_off as i16));
+            let scale = _mm_set1_epi16(ys as i16);
+            let (lo, hi) = (_mm_mullo_epi16(luma, scale), _mm_mulhi_epi16(luma, scale));
+            let (l0, l1) = (_mm_unpacklo_epi16(lo, hi), _mm_unpackhi_epi16(lo, hi));
+            // Per chroma sample: U and V interleaved, one pmaddwd per channel.
+            let half = _mm_set1_epi16(128);
+            let u16 = _mm_sub_epi16(_mm_unpacklo_epi8(u4, zero), half);
+            let v16 = _mm_sub_epi16(_mm_unpacklo_epi8(v4, zero), half);
+            let uv = _mm_unpacklo_epi16(u16, v16);
+            let weights = |wu: i32, wv: i32| _mm_set1_epi32((wu & 0xffff) | (wv << 16));
+            let round = _mm_set1_epi32(128);
+            let channel = |wu: i32, wv: i32| {
+                let c = _mm_add_epi32(_mm_madd_epi16(uv, weights(wu, wv)), round);
+                // Each chroma term serves two neighbouring pixels.
+                let (c0, c1) = (_mm_unpacklo_epi32(c, c), _mm_unpackhi_epi32(c, c));
+                let a = _mm_srai_epi32(_mm_add_epi32(l0, c0), 8);
+                let b = _mm_srai_epi32(_mm_add_epi32(l1, c1), 8);
+                let words = _mm_packs_epi32(a, b);
+                _mm_packus_epi16(words, words)
+            };
+            let (r, g, b) = (channel(0, rv), channel(gu, gv), channel(bu, 0));
+            let rg = _mm_unpacklo_epi8(r, g);
+            let ba = _mm_unpacklo_epi8(b, _mm_set1_epi8(-1));
+            _mm_storeu_si128(out.cast(), _mm_unpacklo_epi16(rg, ba));
+            _mm_storeu_si128(out.add(16).cast(), _mm_unpackhi_epi16(rg, ba));
         }
     }
 }
@@ -212,14 +353,23 @@ pub fn yuv420_to_rgba(src: &Yuv420<'_>, colorimetry: Colorimetry, out: &mut [u8]
 }
 
 fn yuv420_rows(src: &Yuv420<'_>, colorimetry: Colorimetry, out: &mut [u8]) {
-    let [y_off, ys, rv, gu, gv, bu] = colorimetry.coefficients();
+    let k = colorimetry.coefficients();
+    let [y_off, ys, rv, gu, gv, bu] = k;
     let (w, h) = (src.width, src.height);
     let ps = src.uv_pixel_stride.max(1);
+    // Bytes a full chroma row spans.
+    let chroma_span = (w.div_ceil(2).max(1) - 1) * ps + 1;
 
     for (row, out_row) in out.chunks_exact_mut(w * 4).take(h).enumerate() {
         let y_row = &src.y[row * src.y_stride..row * src.y_stride + w];
         let u_row = src.u.get((row / 2) * src.u_stride..).unwrap_or_default();
         let v_row = src.v.get((row / 2) * src.v_stride..).unwrap_or_default();
+        if u_row.len() >= chroma_span && v_row.len() >= chroma_span {
+            pairs_row(y_row, u_row, v_row, ps, out_row, k);
+            continue;
+        }
+        // A short last row (some codecs' buffers end early): missing chroma
+        // reads as neutral grey.
         for (x, (p, &l)) in out_row.chunks_exact_mut(4).zip(y_row).enumerate() {
             let c = (x / 2) * ps;
             let u = i32::from(u_row.get(c).copied().unwrap_or(128)) - 128;
@@ -353,6 +503,166 @@ mod tests {
         };
         yuv420_to_rgba(&as_888, Colorimetry::Bt601Limited, &mut again);
         assert_eq!(again, expected);
+    }
+
+    /// The conversion of one pixel, written out plainly.
+    fn reference(y: u8, u: u8, v: u8, c: Colorimetry) -> [u8; 4] {
+        let [y_off, ys, rv, gu, gv, bu] = c.coefficients();
+        let (u, v) = (i32::from(u) - 128, i32::from(v) - 128);
+        let l = (i32::from(y) - y_off) * ys;
+        [
+            clamp8((l + rv * v + 128) >> 8),
+            clamp8((l + gu * u + gv * v + 128) >> 8),
+            clamp8((l + bu * u + 128) >> 8),
+            255,
+        ]
+    }
+
+    const ALL: [Colorimetry; 4] = [
+        Colorimetry::Bt601Limited,
+        Colorimetry::Bt601Full,
+        Colorimetry::Bt709Limited,
+        Colorimetry::Bt709Full,
+    ];
+
+    #[test]
+    fn vector_and_scalar_paths_match_the_formula() {
+        // Odd width: eight-pixel blocks, then pairs, then a lone pixel.
+        let (w, h) = (259usize, 6usize);
+        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        let hash = |i: usize, k: usize| ((i.wrapping_mul(2654435761) >> k) & 0xff) as u8;
+        let y: Vec<u8> = (0..w * h).map(|i| hash(i, 3)).collect();
+        let u: Vec<u8> = (0..cw * ch).map(|i| hash(i + 7, 9)).collect();
+        let v: Vec<u8> = (0..cw * ch).map(|i| hash(i + 13, 17)).collect();
+        let src = I420 {
+            y: &y,
+            u: &u,
+            v: &v,
+            y_stride: w,
+            uv_stride: cw,
+            width: w,
+            height: h,
+        };
+        let nv12: Vec<u8> = u.iter().zip(&v).flat_map(|(&a, &b)| [a, b]).collect();
+        let semi = Yuv420 {
+            y: &y,
+            u: &nv12,
+            v: &nv12[1..],
+            y_stride: w,
+            u_stride: cw * 2,
+            v_stride: cw * 2,
+            uv_pixel_stride: 2,
+            width: w,
+            height: h,
+        };
+        for c in ALL {
+            let mut planar = vec![0u8; w * h * 4];
+            i420_to_rgba(&src, c, &mut planar);
+            let mut interleaved = vec![0u8; w * h * 4];
+            yuv420_to_rgba(&semi, c, &mut interleaved);
+            for (i, (p, q)) in planar.chunks_exact(4).zip(interleaved.chunks_exact(4)).enumerate() {
+                let (row, x) = (i / w, i % w);
+                let ci = (row / 2) * cw + x / 2;
+                let want = reference(y[i], u[ci], v[ci], c);
+                assert_eq!(p, want, "{c:?} I420 pixel {x},{row}");
+                assert_eq!(q, want, "{c:?} NV12 pixel {x},{row}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_luma_and_chroma_extreme_converts_exactly() {
+        // One row of 256 luma values per chroma pair, through the SIMD path.
+        let y: Vec<u8> = (0..=255).collect();
+        for c in ALL {
+            for (cu, cv) in [
+                (0u8, 0u8),
+                (0, 255),
+                (255, 0),
+                (255, 255),
+                (128, 128),
+                (16, 240),
+                (240, 16),
+            ] {
+                let (u, v) = ([cu; 128], [cv; 128]);
+                let src = I420 {
+                    y: &y,
+                    u: &u,
+                    v: &v,
+                    y_stride: 256,
+                    uv_stride: 128,
+                    width: 256,
+                    height: 1,
+                };
+                let mut out = [0u8; 1024];
+                i420_to_rgba(&src, c, &mut out);
+                for (l, px) in out.chunks_exact(4).enumerate() {
+                    assert_eq!(px, reference(l as u8, cu, cv, c), "{c:?} y={l} u={cu} v={cv}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn short_chroma_rows_read_as_grey() {
+        // 4x4 NV12 whose buffer ends two bytes early: the second chroma row
+        // has its first U/V pair only.
+        let y = [
+            16u8, 50, 90, 130, 170, 210, 235, 20, 40, 60, 80, 100, 120, 140, 160, 180,
+        ];
+        let nv12 = [90u8, 240, 54, 34, 240, 110];
+        let src = Yuv420 {
+            y: &y,
+            u: &nv12,
+            v: &nv12[1..],
+            y_stride: 4,
+            u_stride: 4,
+            v_stride: 4,
+            uv_pixel_stride: 2,
+            width: 4,
+            height: 4,
+        };
+        let mut out = [0u8; 64];
+        yuv420_to_rgba(&src, Colorimetry::Bt601Limited, &mut out);
+        let c = Colorimetry::Bt601Limited;
+        let want = |i: usize, u: u8, v: u8| reference(y[i], u, v, c);
+        for (i, (u, v)) in [(90, 240), (90, 240), (54, 34), (54, 34)].into_iter().enumerate() {
+            assert_eq!(out[i * 4..i * 4 + 4], want(i, u, v), "row 0 pixel {i}");
+        }
+        for i in 8..16 {
+            let (u, v) = if i % 4 < 2 { (240, 110) } else { (128, 128) };
+            assert_eq!(out[i * 4..i * 4 + 4], want(i, u, v), "pixel {i}");
+        }
+    }
+
+    #[test]
+    fn gpu_matrix_agrees_with_the_fixed_point_conversion() {
+        for c in ALL {
+            let (m, offset) = c.gpu_conversion();
+            for (y, u, v) in [
+                (16u8, 128u8, 128u8),
+                (235, 128, 128),
+                (81, 90, 240),
+                (145, 54, 34),
+                (41, 240, 110),
+                (128, 200, 60),
+            ] {
+                let yuv = [
+                    f32::from(y) / 255.0 - offset[0],
+                    f32::from(u) / 255.0 - offset[1],
+                    f32::from(v) / 255.0 - offset[2],
+                ];
+                let fixed = reference(y, u, v, c);
+                for ch in 0..3 {
+                    let f = (m[ch] * yuv[0] + m[3 + ch] * yuv[1] + m[6 + ch] * yuv[2]).clamp(0.0, 1.0) * 255.0;
+                    assert!(
+                        (f - f32::from(fixed[ch])).abs() <= 2.0,
+                        "{c:?} {y},{u},{v} channel {ch}: {f} vs {}",
+                        fixed[ch]
+                    );
+                }
+            }
+        }
     }
 
     #[test]

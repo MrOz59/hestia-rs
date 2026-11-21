@@ -36,11 +36,11 @@ impl VideoSink for DumpVideoSink {
     }
 
     fn submit(&mut self, frame: EncodedFrame) -> SubmitResult {
-        if let Some(out) = &mut self.out {
-            if let Err(e) = out.write_all(&frame.data) {
-                log::warn!("dump write failed: {e}");
-                self.out = None;
-            }
+        if let Some(out) = &mut self.out
+            && let Err(e) = out.write_all(&frame.data)
+        {
+            log::warn!("dump write failed: {e}");
+            self.out = None;
         }
         SubmitResult::Ok
     }

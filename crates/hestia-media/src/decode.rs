@@ -17,8 +17,10 @@ use log::{info, warn};
 
 /// Pixel storage owned by a decoded picture.
 pub enum FrameBuffer {
-    /// RGBA8, row-major, without padding.
+    /// RGBA8, row-major, without padding: the toolkit uploads it as an image.
     Rgba(Vec<u8>),
+    /// A picture the window's GPU renderer takes at draw time (a hardware
+    /// buffer, or 4:2:0 planes it converts itself).
     Native(crate::native_picture::NativePicture),
 }
 
@@ -57,7 +59,8 @@ impl DecodedFrame {
         }
     }
 
-    /// Keeps a CPU allocation for reuse without retaining a native buffer.
+    /// Keeps a CPU allocation for reuse without retaining a native picture
+    /// (dropping it releases the hardware image or returns the planes).
     pub fn discard_native(&mut self) {
         if matches!(self.buffer, FrameBuffer::Native(_)) {
             self.buffer = FrameBuffer::Rgba(Vec::new());
@@ -626,7 +629,7 @@ fn decode_loop(
                 // The first few in full, then a reminder now and then: a
                 // decoder failing every frame would bury the log.
                 let errors = shared.stats.errors.fetch_add(1, Ordering::Relaxed) + 1;
-                if errors <= 5 || errors % 100 == 0 {
+                if errors <= 5 || errors.is_multiple_of(100) {
                     if let Some(frame) = input_number {
                         warn!("decode error on frame {frame} ({errors} so far): {e}");
                     } else {
