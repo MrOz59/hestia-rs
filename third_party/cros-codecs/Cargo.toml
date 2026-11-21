@@ -29,7 +29,9 @@ v4l2 = ["v4l2r", "backend"]
 [dependencies]
 anyhow = { version = "1.0.75", optional = true }
 byteorder = { version = "1.4.3", optional = true }
-libva = { version = "0.0.12", package = "cros-libva", optional = true }
+# cros-libva from git: no release builds against libva 2.23 (VP9 encoder
+# struct fields, cros-libva #37; Arch, Fedora 41+ and current Ubuntu ship it).
+libva = { git = "https://github.com/chromeos/cros-libva", rev = "59384456ac2ae78c0c3e5515f41ef1efd9b802cf", package = "cros-libva", optional = true }
 v4l2r = { version = "0.0.5", package = "v4l2r", optional = true }
 log = { version = "0" }
 thiserror = { version = "1.0.58", optional = true }

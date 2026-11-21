@@ -31,6 +31,16 @@ A `low_delay` field in `H264DecoderState` / `H265DecoderState` holds the mode
 with a `Hestia RS` comment. Interlaced streams are not supported in low-delay
 mode (the second field of a pair would be finished on its own).
 
+## cros-libva with libva 2.23
+
+libva 2.23 added fields to `VAEncPictureParameterBufferVP9`, and no
+cros-libva release builds against it. `Cargo.toml` takes cros-libva from git
+at `59384456ac2ae78c0c3e5515f41ef1efd9b802cf` (its fix, #37), whose
+`EncPictureParameterBufferVP9::new` takes one more argument
+(`seg_id_block_size`): the VP9 encoder
+(`encoder/stateless/vp9/vaapi.rs`) passes 0. Hestia RS doesn't encode; this
+only keeps the crate building.
+
 ## Packaging
 
 `Cargo.toml`: version 0.0.6, no examples, tests or dev-dependencies (their
@@ -42,5 +52,6 @@ path dependencies) holds this code to upstream's style, not the workspace's.
 ## Updating
 
 Copy the new upstream `src/` (without the `test_data` directories), `LICENSE`
-and `README.md`, reapply the changes above (search for `Hestia RS`), and keep
-the `cros-libva` version in `Cargo.toml` equal to upstream's.
+and `README.md`, reapply the changes above (search for `Hestia RS`), and take
+the `cros-libva` version upstream uses once a release builds against current
+libva.

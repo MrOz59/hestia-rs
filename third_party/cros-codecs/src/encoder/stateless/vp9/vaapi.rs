@@ -219,6 +219,8 @@ where
                 0,
                 0,
                 0,
+                // Hestia RS: seg_id_block_size, added by cros-libva for libva 2.23.
+                0,
             ),
         ));
 
