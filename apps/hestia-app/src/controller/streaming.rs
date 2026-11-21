@@ -1,7 +1,7 @@
 //! The stream screen: runs a [`ManagedStream`] after a launch, shows decoded
 //! frames and forwards keyboard, mouse and touch input to the host.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
