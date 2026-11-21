@@ -26,16 +26,23 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # nasm: OpenH264's x86 SIMD code (without it the openh264 crate quietly
+      # builds the plain C decoder, about a quarter slower). Mesa's EGL lets
+      # the GPU colour-conversion test run headless.
       - name: System packages for Slint
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
-            libgl1-mesa-dev libegl1-mesa-dev \
-            libopus-dev libasound2-dev
+            libgl1-mesa-dev libegl1-mesa-dev libegl-mesa0 libgl1-mesa-dri \
+            libopus-dev libasound2-dev nasm
 
+      # The key changed with nasm: a cached openh264-sys2 built without it
+      # would otherwise be reused (its build script doesn't look again).
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: openh264-nasm
 
       - name: Format
         run: cargo fmt --all --check
@@ -121,6 +128,16 @@ jobs:
           done
           echo "ANDROID_JAR=$ANDROID_HOME/platforms/android-34/android.jar" >> "$GITHUB_ENV"
 
+      # OpenH264's SIMD code for the x86_64 APK (ARM builds compile their
+      # NEON code with the NDK's compiler). Not for 32-bit x86: that
+      # assembly isn't position independent as openh264-sys2 builds it, and
+      # Android refuses libraries with text relocations.
+      - name: nasm for OpenH264
+        if: matrix.abi == 'x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nasm
+
       - name: Tools to build Skia from source
         if: matrix.skia-from-source
         run: |
@@ -129,7 +146,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: android-ndk30-${{ matrix.abi }}
+          key: android-ndk30-nasm-${{ matrix.abi }}
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked

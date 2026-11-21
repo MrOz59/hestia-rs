@@ -1,20 +1,23 @@
 //! Slint and native renderer adapters for a stream's picture mailbox.
+//!
+//! RGBA pictures are uploaded as Slint images on the event loop. Native
+//! pictures (Android hardware buffers, desktop YUV planes) only trigger a
+//! redraw; the window's GPU renderer (`gpu_render` on Android, `gl_video` on
+//! the desktop) takes the newest one while Slint renders.
 
-use std::sync::Arc;
-#[cfg(target_os = "android")]
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-#[cfg(target_os = "android")]
-use hestia_media::gpu_video::{GpuOutput, GpuRendererStatus};
+use hestia_media::native_picture::{GpuOutput, GpuRendererStatus};
 use hestia_media::picture_mailbox::{DisplayUpdate, PictureKind, PictureMailbox};
 use hestia_media::{DecodedFrame, FramePresenter, LatencyHistogram, RecoveryLatency};
 use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer, SharedString};
 
 use crate::AppWindow;
 
-#[cfg(target_os = "android")]
+/// Pictures drawn by the window's own GPU renderer (Android hardware
+/// buffers, desktop YUV planes).
 #[derive(Default)]
 pub(crate) struct GpuVideoStats {
     pub(crate) redraw_requests: AtomicU64,
@@ -34,23 +37,15 @@ pub(crate) struct Presentation {
     pub(crate) handoff: LatencyHistogram,
     pub(crate) receive_to_ui: LatencyHistogram,
     pub(crate) recovery: RecoveryLatency,
-    #[cfg(target_os = "android")]
     pub(crate) gpu: GpuVideoStats,
-    #[cfg(target_os = "android")]
     output: Option<Arc<GpuOutput>>,
-    #[cfg(target_os = "android")]
     pub(crate) generation: u64,
 }
 
 impl Presentation {
-    pub(crate) fn new(
-        #[cfg(target_os = "android")] generation: u64,
-        #[cfg(target_os = "android")] output: Option<Arc<GpuOutput>>,
-    ) -> Self {
+    pub(crate) fn new(generation: u64, output: Option<Arc<GpuOutput>>) -> Self {
         Self {
-            #[cfg(target_os = "android")]
             generation,
-            #[cfg(target_os = "android")]
             output,
             ..Self::default()
         }
@@ -61,10 +56,7 @@ impl Presentation {
     }
 
     pub(crate) fn superseded(&self) -> u64 {
-        let count = self.superseded.load(Ordering::Relaxed);
-        #[cfg(target_os = "android")]
-        let count = count + self.gpu.superseded.load(Ordering::Relaxed);
-        count
+        self.superseded.load(Ordering::Relaxed) + self.gpu.superseded.load(Ordering::Relaxed)
     }
 
     /// Returns whether a callback needs to be scheduled on the UI thread.
@@ -76,32 +68,22 @@ impl Presentation {
             Some(PictureKind::Cpu) => {
                 self.superseded.fetch_add(1, Ordering::Relaxed);
             }
-            #[cfg(target_os = "android")]
             Some(PictureKind::Native) => {
                 self.gpu.superseded.fetch_add(1, Ordering::Relaxed);
             }
-            _ => {}
+            None => {}
         }
         update.schedule
     }
 
     pub(crate) fn gpu_available(&self) -> bool {
-        #[cfg(target_os = "android")]
-        {
-            !self.pictures.is_closed() && self.output.as_ref().is_some_and(|output| output.available())
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            false
-        }
+        !self.pictures.is_closed() && self.output.as_ref().is_some_and(|output| output.available())
     }
 
-    #[cfg(target_os = "android")]
     pub(crate) fn discard_gpu(&self) {
         self.pictures.discard_native();
     }
 
-    #[cfg(target_os = "android")]
     pub(crate) fn take_gpu(&self) -> Option<DecodedFrame> {
         let frame = self.pictures.take_native()?;
         self.gpu_available().then_some(frame)
@@ -109,7 +91,6 @@ impl Presentation {
 }
 
 /// The window's native renderer knows only which session is active.
-#[cfg(target_os = "android")]
 #[derive(Default)]
 pub(crate) struct GpuWindow {
     pub(crate) status: Arc<GpuRendererStatus>,
@@ -117,7 +98,6 @@ pub(crate) struct GpuWindow {
     active_generation: AtomicU64,
 }
 
-#[cfg(target_os = "android")]
 impl GpuWindow {
     pub(crate) fn set_active(&self, session: &Arc<Presentation>) {
         let mut active = self.active.lock().unwrap_or_else(|p| p.into_inner());
@@ -149,7 +129,6 @@ impl FramePresenter for UiPresenter {
             let frame = match presentation.pictures.next_for_display(|| presentation.gpu_available()) {
                 Some(DisplayUpdate::Cpu(frame)) => frame,
                 Some(DisplayUpdate::RedrawNative) => {
-                    #[cfg(target_os = "android")]
                     presentation.gpu.redraw_requests.fetch_add(1, Ordering::Relaxed);
                     ui.window().request_redraw();
                     return;

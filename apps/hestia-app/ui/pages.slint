@@ -1417,7 +1417,9 @@ export component SettingsPage inherits Rectangle {
         return p < 19 ? p : (p < 19 + root.profile-count ? 100 + (p - 19) : 20 + (p - 19 - root.profile-count));
     }
     pure function valid(i: int) -> bool {
-        return (i != 8 || (root.android && root.hardware-decoding)) && (i != 10 || root.android);
+        // Row 8: zero-copy video (Android, with hardware decoding) or GPU
+        // colour conversion (desktop).
+        return (i != 8 || !root.android || root.hardware-decoding) && (i != 10 || root.android);
     }
     pure function step(from: int, dir: int) -> int {
         let p = root.pos(from) + dir;
@@ -1696,6 +1698,18 @@ export component SettingsPage inherits Rectangle {
                         if root.android && root.hardware-decoding: SwitchRow {
                             label: "Zero-copy video";
                             hint: "Decoded pictures go straight to the GPU. Turn off to read them on the CPU";
+                            checked <=> root.gpu-video;
+                            want-focus: root.at(8);
+                            nav(k) => {
+                                return root.move(8, k);
+                            }
+                            entered => {
+                                root.nav = 8;
+                            }
+                        }
+                        if !root.android: SwitchRow {
+                            label: "GPU colour conversion";
+                            hint: "The GPU turns decoded pictures into RGB as it draws them. Turn off to convert on the CPU";
                             checked <=> root.gpu-video;
                             want-focus: root.at(8);
                             nav(k) => {

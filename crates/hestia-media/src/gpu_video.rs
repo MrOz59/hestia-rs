@@ -1,10 +1,12 @@
-//! Android hardware picture ownership and renderer availability.
+//! Android hardware picture ownership.
 
 use std::os::fd::OwnedFd;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use ndk::media::image_reader::{Image, ImageReader};
+
+// Renderer availability is shared with the desktop's GPU path.
+pub use crate::native_picture::{GpuOutput, GpuRendererStatus};
 
 /// An image reader shared by the codec and the pictures acquired from it:
 /// the reader is deleted only after its last picture.
@@ -72,60 +74,5 @@ impl GpuPicture {
     /// finishes sampling it. The reader stays live through the release call.
     pub fn release(self, fence: OwnedFd) {
         self.image.delete_async(fence);
-    }
-}
-
-/// Availability of a window's native video renderer. Carries no frames.
-#[derive(Default)]
-pub struct GpuRendererStatus {
-    ready: AtomicBool,
-    failure: Mutex<Option<String>>,
-}
-
-impl GpuRendererStatus {
-    pub fn ready(&self) {
-        *self.failure.lock().unwrap_or_else(|p| p.into_inner()) = None;
-        self.ready.store(true, Ordering::Release);
-    }
-
-    pub fn pause(&self) {
-        self.ready.store(false, Ordering::Release);
-    }
-
-    pub fn fail(&self, why: String) {
-        let mut failure = self.failure.lock().unwrap_or_else(|p| p.into_inner());
-        if failure.is_none() {
-            log::warn!("GPU video path failed: {why}");
-            *failure = Some(why);
-        }
-        self.pause();
-    }
-}
-
-/// One stream's native output. Retiring it stops presentation of pending
-/// native frames when the decoder falls back to CPU output.
-pub struct GpuOutput {
-    renderer: Arc<GpuRendererStatus>,
-    retired: AtomicBool,
-}
-
-impl GpuOutput {
-    pub fn new(renderer: Arc<GpuRendererStatus>) -> Self {
-        Self {
-            renderer,
-            retired: AtomicBool::new(false),
-        }
-    }
-
-    pub fn available(&self) -> bool {
-        !self.retired.load(Ordering::Acquire) && self.renderer.ready.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn failure(&self) -> Option<String> {
-        self.renderer.failure.lock().unwrap_or_else(|p| p.into_inner()).clone()
-    }
-
-    pub(crate) fn retire(&self) {
-        self.retired.store(true, Ordering::Release);
     }
 }

@@ -51,7 +51,8 @@ pub struct Controller {
     state: Mutex<State>,
     stream: Mutex<Option<streaming::ActiveStream>>,
     stream_generation: AtomicU64,
-    #[cfg(target_os = "android")]
+    /// The window's GPU video renderer (Android zero-copy, desktop colour
+    /// conversion) and the stream it draws.
     gpu_window: Arc<crate::presentation::GpuWindow>,
     /// What a finger does in the stream (`TouchMode` index; persisted).
     touch_mode: AtomicU8,
@@ -69,17 +70,17 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
 
 impl Controller {
     pub fn new(ui: &AppWindow) -> Shared {
-        #[cfg(target_os = "android")]
         let gpu_window = Arc::new(crate::presentation::GpuWindow::default());
         #[cfg(target_os = "android")]
         crate::gpu_render::install(ui, gpu_window.clone());
+        #[cfg(not(target_os = "android"))]
+        crate::gl_video::install(ui, gpu_window.clone());
         Arc::new(Self {
             weak: Mutex::new(ui.as_weak()),
             core: OnceLock::new(),
             state: Mutex::new(State::default()),
             stream: Mutex::new(None),
             stream_generation: AtomicU64::new(0),
-            #[cfg(target_os = "android")]
             gpu_window,
             touch_mode: AtomicU8::new(0),
             last_report: Mutex::new(None),
@@ -794,11 +795,7 @@ impl Controller {
                     info!("launching with stream profile “{name}”");
                     report::lock(&session_report).field("Settings", "profile", name);
                 }
-                let decoder = crate::video_backend::StreamVideo::select(
-                    &settings,
-                    #[cfg(target_os = "android")]
-                    &c.gpu_window,
-                );
+                let decoder = crate::video_backend::StreamVideo::select(&settings, &c.gpu_window);
                 let launched = decoder.and_then(|decoder| {
                     if !c.launch_current(seq) {
                         return Err("cancelled".into());

@@ -12,8 +12,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use hestia_media::color::{I420, i420_to_rgba};
+use hestia_media::native_picture::{GpuOutput, GpuRendererStatus, NativePicture};
 use hestia_media::software_h264::OpenH264Decoder;
-use hestia_media::{Colorimetry, DecodedFrame, DecodingSink, FrameDecoder};
+use hestia_media::{Colorimetry, DecodedFrame, DecodingSink, FrameBuffer, FrameDecoder};
 use hestia_stream::{EncodedFrame, VideoSink};
 
 const CLIP: &[u8] = include_bytes!("data/red-blue-64x36-high.h264");
@@ -124,4 +126,60 @@ fn decoding_sink_presents_every_frame() {
     assert!(shown.iter().all(|s| s.1 == 64 && s.2 == 36 && near(s.3, [255, 0, 0])));
     let stats = sink.stats();
     assert_eq!(stats.errors.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[test]
+fn hands_planes_to_a_ready_gpu_renderer_and_falls_back_to_rgba() {
+    let renderer = Arc::new(GpuRendererStatus::default());
+    let output = Arc::new(GpuOutput::new(renderer.clone()));
+    let mut decoder = OpenH264Decoder::with_gpu_output(Colorimetry::Bt601Limited, Some(output)).unwrap();
+    let mut out = DecodedFrame::default();
+    let units = access_units(CLIP);
+
+    // Not ready yet: RGBA, as before.
+    let (data, key) = units[0].clone();
+    assert!(decoder.decode(&frame(0, data, key), &mut out).unwrap());
+    assert!(out.rgba().is_some());
+    assert!(!decoder.name().contains("GPU colour"), "{}", decoder.name());
+    let cpu = out.rgba().unwrap().to_vec();
+
+    // Ready: the same picture as packed planes that convert to the same pixels.
+    renderer.ready();
+    decoder.reset().unwrap();
+    assert!(decoder.decode(&frame(0, units[0].0.clone(), true), &mut out).unwrap());
+    assert!(decoder.name().contains("GPU colour"), "{}", decoder.name());
+    assert_eq!((out.width, out.height), (64, 36));
+    let FrameBuffer::Native(NativePicture::Planar(picture)) = &out.buffer else {
+        panic!("expected planes for the GPU");
+    };
+    assert_eq!((picture.width, picture.height), (64, 36));
+    let (y, u, v) = picture.planes();
+    assert_eq!((y.len(), u.len(), v.len()), (64 * 36, 32 * 18, 32 * 18));
+    let mut converted = vec![0u8; 64 * 36 * 4];
+    let planes = I420 {
+        y,
+        u,
+        v,
+        y_stride: 64,
+        uv_stride: 32,
+        width: 64,
+        height: 36,
+    };
+    i420_to_rgba(&planes, picture.colorimetry, &mut converted);
+    assert_eq!(converted, cpu);
+
+    // The renderer fails: the next picture is RGBA again.
+    renderer.fail("lost the GL context".into());
+    let (data, key) = units[1].clone();
+    assert!(decoder.decode(&frame(1, data, key), &mut out).unwrap());
+    assert!(out.rgba().is_some());
+    assert!(near(pixel(&out, 8, 18), [255, 0, 0]));
+    assert!(!decoder.name().contains("GPU colour"));
+}
+
+#[test]
+fn reports_whether_openh264_has_simd() {
+    let decoder = OpenH264Decoder::new(Colorimetry::default()).unwrap();
+    let simd = hestia_media::software_h264::openh264_simd();
+    assert_eq!(decoder.name().contains("no SIMD"), !simd, "{}", decoder.name());
 }

@@ -286,13 +286,7 @@ impl Controller {
         hestia_core::add_stream_config_to_report(&config, decoder.name(), &mut report::lock(&session_report));
         let generation = self.stream_generation.fetch_add(1, Ordering::Relaxed) + 1;
         let weak = self.weak.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let present = Arc::new(Presentation::new(
-            #[cfg(target_os = "android")]
-            generation,
-            #[cfg(target_os = "android")]
-            video.gpu,
-        ));
-        #[cfg(target_os = "android")]
+        let present = Arc::new(Presentation::new(generation, video.gpu));
         self.gpu_window.set_active(&present);
         let sink = DecodingSink::new(
             decoder,
@@ -480,26 +474,28 @@ impl Controller {
                     ] {
                         r.field("MediaCodec", label, counter.load(Ordering::Relaxed));
                     }
-                    let gpu = &present.gpu;
-                    r.field(
-                        "GPU video",
-                        "redraw requests",
-                        gpu.redraw_requests.load(Ordering::Relaxed),
-                    );
-                    r.field("GPU video", "draws submitted", gpu.drawn.load(Ordering::Relaxed));
-                    r.field(
-                        "GPU video",
-                        "replaced before draw",
-                        gpu.superseded.load(Ordering::Relaxed),
-                    );
-                    for (stage, histogram) in [
-                        ("GPU picture ready to draw submission", &gpu.ready_to_draw),
-                        ("first packet to GPU draw submission", &gpu.receive_to_draw),
-                        ("IDR request to first GPU draw submission", &gpu.recovery.latency),
-                    ] {
-                        if let Some(summary) = histogram.summary() {
-                            r.field("Video latency", stage, summary);
-                        }
+                }
+                // Pictures the window's GPU renderer drew itself (Android
+                // hardware buffers, desktop YUV planes).
+                let gpu = &present.gpu;
+                r.field(
+                    "GPU video",
+                    "redraw requests",
+                    gpu.redraw_requests.load(Ordering::Relaxed),
+                );
+                r.field("GPU video", "draws submitted", gpu.drawn.load(Ordering::Relaxed));
+                r.field(
+                    "GPU video",
+                    "replaced before draw",
+                    gpu.superseded.load(Ordering::Relaxed),
+                );
+                for (stage, histogram) in [
+                    ("GPU picture ready to draw submission", &gpu.ready_to_draw),
+                    ("first packet to GPU draw submission", &gpu.receive_to_draw),
+                    ("IDR request to first GPU draw submission", &gpu.recovery.latency),
+                ] {
+                    if let Some(summary) = histogram.summary() {
+                        r.field("Video latency", stage, summary);
                     }
                 }
                 r.field(

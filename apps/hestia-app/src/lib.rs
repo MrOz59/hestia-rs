@@ -6,6 +6,10 @@ mod controller;
 #[cfg(target_os = "linux")]
 mod desktop_pads;
 mod gamepad;
+#[cfg(not(target_os = "android"))]
+mod gl_video;
+#[cfg(not(target_os = "android"))]
+mod gl_yuv;
 #[cfg(target_os = "android")]
 mod gpu_render;
 mod hostinfo;
