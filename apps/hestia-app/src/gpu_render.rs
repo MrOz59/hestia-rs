@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use hestia_frontend::presentation::GpuWindow;
 use hestia_media::FrameBuffer;
 use hestia_media::gpu_video::GpuPicture;
 use hestia_media::native_picture::NativePicture;
@@ -27,7 +28,6 @@ use log::{info, warn};
 use slint::{ComponentHandle, GraphicsAPI, RenderingState};
 
 use crate::AppWindow;
-use crate::presentation::GpuWindow;
 
 #[allow(non_snake_case, dead_code, clippy::upper_case_acronyms)]
 mod ffi {

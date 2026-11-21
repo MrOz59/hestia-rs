@@ -1,9 +1,13 @@
-//! Slint and native renderer adapters for a stream's picture mailbox.
+//! A stream's pictures on their way to the window, without a toolkit.
 //!
-//! RGBA pictures are uploaded as Slint images on the event loop. Native
-//! pictures (Android hardware buffers, desktop YUV planes) only trigger a
-//! redraw; the window's GPU renderer (`gpu_render` on Android, `gl_video` on
-//! the desktop) takes the newest one while Slint renders.
+//! The decoder thread hands each picture to [`UiPresenter`], which keeps the
+//! newest one in a mailbox and schedules the UI thread through the port:
+//! RGBA pictures go to [`View::show_video_frame`]; native pictures (Android
+//! hardware buffers, desktop YUV planes) only ask for a redraw, and the
+//! window's GPU renderer — part of the shell, since it hooks into the
+//! toolkit's rendering — takes the newest one with [`Presentation::take_gpu`]
+//! while the window renders. [`GpuWindow`] tells that renderer which stream
+//! is active.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,34 +16,34 @@ use std::time::Instant;
 use hestia_media::native_picture::{GpuOutput, GpuRendererStatus};
 use hestia_media::picture_mailbox::{DisplayUpdate, PictureKind, PictureMailbox};
 use hestia_media::{DecodedFrame, FramePresenter, LatencyHistogram, RecoveryLatency};
-use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer, SharedString};
 
-use crate::AppWindow;
+use crate::ui::{UiHandle, View};
 
 /// Pictures drawn by the window's own GPU renderer (Android hardware
-/// buffers, desktop YUV planes).
+/// buffers, desktop YUV planes); the renderer records them.
 #[derive(Default)]
-pub(crate) struct GpuVideoStats {
-    pub(crate) redraw_requests: AtomicU64,
-    pub(crate) drawn: AtomicU64,
-    pub(crate) superseded: AtomicU64,
-    pub(crate) ready_to_draw: LatencyHistogram,
-    pub(crate) receive_to_draw: LatencyHistogram,
-    pub(crate) recovery: RecoveryLatency,
+pub struct GpuVideoStats {
+    pub redraw_requests: AtomicU64,
+    pub drawn: AtomicU64,
+    pub superseded: AtomicU64,
+    pub ready_to_draw: LatencyHistogram,
+    pub receive_to_draw: LatencyHistogram,
+    pub recovery: RecoveryLatency,
 }
 
 /// One stream's link to the window and its presentation metrics.
 #[derive(Default)]
-pub(crate) struct Presentation {
+pub struct Presentation {
     pictures: PictureMailbox,
     pub(crate) delivered: AtomicU64,
     pub(crate) superseded: AtomicU64,
     pub(crate) handoff: LatencyHistogram,
     pub(crate) receive_to_ui: LatencyHistogram,
     pub(crate) recovery: RecoveryLatency,
-    pub(crate) gpu: GpuVideoStats,
+    pub gpu: GpuVideoStats,
     output: Option<Arc<GpuOutput>>,
-    pub(crate) generation: u64,
+    /// The stream this belongs to (see [`GpuWindow::is_active`]).
+    pub generation: u64,
 }
 
 impl Presentation {
@@ -76,15 +80,18 @@ impl Presentation {
         update.schedule
     }
 
-    pub(crate) fn gpu_available(&self) -> bool {
+    /// The window's GPU renderer draws this stream's native pictures now.
+    pub fn gpu_available(&self) -> bool {
         !self.pictures.is_closed() && self.output.as_ref().is_some_and(|output| output.available())
     }
 
-    pub(crate) fn discard_gpu(&self) {
+    /// Drops a pending native picture (the renderer failed or went away).
+    pub fn discard_gpu(&self) {
         self.pictures.discard_native();
     }
 
-    pub(crate) fn take_gpu(&self) -> Option<DecodedFrame> {
+    /// The newest native picture, for the renderer to draw now.
+    pub fn take_gpu(&self) -> Option<DecodedFrame> {
         let frame = self.pictures.take_native()?;
         self.gpu_available().then_some(frame)
     }
@@ -92,8 +99,9 @@ impl Presentation {
 
 /// The window's native renderer knows only which session is active.
 #[derive(Default)]
-pub(crate) struct GpuWindow {
-    pub(crate) status: Arc<GpuRendererStatus>,
+pub struct GpuWindow {
+    /// Set by the renderer: ready, paused (no GL context) or failed.
+    pub status: Arc<GpuRendererStatus>,
     active: Mutex<std::sync::Weak<Presentation>>,
     active_generation: AtomicU64,
 }
@@ -105,17 +113,18 @@ impl GpuWindow {
         *active = Arc::downgrade(session);
     }
 
-    pub(crate) fn active(&self) -> Option<Arc<Presentation>> {
+    /// The stream being shown, if any.
+    pub fn active(&self) -> Option<Arc<Presentation>> {
         self.active.lock().unwrap_or_else(|p| p.into_inner()).upgrade()
     }
 
-    pub(crate) fn is_active(&self, generation: u64) -> bool {
+    pub fn is_active(&self, generation: u64) -> bool {
         self.active_generation.load(Ordering::Acquire) == generation
     }
 }
 
 pub(crate) struct UiPresenter {
-    pub(crate) weak: slint::Weak<AppWindow>,
+    pub(crate) ui: Arc<dyn UiHandle>,
     pub(crate) presentation: Arc<Presentation>,
 }
 
@@ -125,22 +134,20 @@ impl FramePresenter for UiPresenter {
             return;
         }
         let presentation = self.presentation.clone();
-        let _ = self.weak.upgrade_in_event_loop(move |ui| {
+        self.ui.run(Box::new(move |ui: &dyn View| {
             let frame = match presentation.pictures.next_for_display(|| presentation.gpu_available()) {
                 Some(DisplayUpdate::Cpu(frame)) => frame,
                 Some(DisplayUpdate::RedrawNative) => {
                     presentation.gpu.redraw_requests.fetch_add(1, Ordering::Relaxed);
-                    ui.window().request_redraw();
+                    ui.request_redraw();
                     return;
                 }
                 None => return,
             };
-            let Some(data) = frame.rgba() else { return };
-            let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(data, frame.width, frame.height);
-            if presentation.pictures.is_closed() {
+            if frame.rgba().is_none() || presentation.pictures.is_closed() {
                 return;
             }
-            ui.set_stream_frame(Image::from_rgba8(buffer));
+            ui.show_video_frame(&frame);
             let delivered_at = Instant::now();
             presentation.recovery.record(frame.idr_requested_at, delivered_at);
             presentation
@@ -150,9 +157,9 @@ impl FramePresenter for UiPresenter {
                 .receive_to_ui
                 .record(delivered_at.duration_since(frame.received_at));
             if presentation.delivered.fetch_add(1, Ordering::Relaxed) == 0 {
-                ui.set_stream_status(SharedString::new());
+                ui.set_stream_status(String::new());
             }
             presentation.pictures.recycle_cpu(frame);
-        });
+        }));
     }
 }

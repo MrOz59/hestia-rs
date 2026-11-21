@@ -1,87 +1,51 @@
-//! Hestia RS graphical client. The UI lives in `ui/*.slint`; this crate wires
-//! it to `hestia-core` and runs every network call on worker threads.
+//! Hestia RS's graphical client, drawn with Slint.
+//!
+//! This crate is the UI shell only: the screens (`ui/*.slint`), the Slint
+//! side of the UI port (`slint_ui`), and the GPU video renderers that hook
+//! into Slint's rendering (`gl_video` on the desktop, `gpu_render` on
+//! Android). Everything else — the controller, input, system services, video
+//! presentation — is `hestia-frontend`, which knows no toolkit; see
+//! `docs/FRONTENDS.md` for writing another shell.
 
-mod clipsync;
-mod controller;
-#[cfg(target_os = "linux")]
-mod desktop_pads;
-mod gamepad;
 #[cfg(not(target_os = "android"))]
 mod gl_video;
-#[cfg(not(target_os = "android"))]
-mod gl_yuv;
 #[cfg(target_os = "android")]
 mod gpu_render;
-mod hostinfo;
-mod keymap;
-mod netroute;
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-mod padmap;
-mod platform;
-mod presentation;
-mod stream_input;
-mod touch;
-mod typing;
-mod video_backend;
-mod view;
-mod virtual_pad;
+mod slint_ui;
 
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use hestia_frontend::Controller;
+use hestia_frontend::presentation::GpuWindow;
 
 slint::include_modules!();
-
-/// The on-screen controller as the stream view draws it: layout, what is
-/// held, where the stick knobs are.
-fn pad_controls(pad: &virtual_pad::VirtualPad) -> Vec<PadControl> {
-    use hestia_core::stream::input::buttons;
-    use virtual_pad::Kind;
-    pad.controls()
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
-            let (pressed, (knob_x, knob_y), dpad) = pad.view(i);
-            PadControl {
-                kind: match c.kind {
-                    Kind::Round(_) => 0,
-                    Kind::Rect(_) | Kind::Trigger(_) => 1,
-                    Kind::Stick(_) => 2,
-                    Kind::Dpad => 3,
-                },
-                label: c.label.into(),
-                x: c.x,
-                y: c.y,
-                w: c.w,
-                h: c.h,
-                pressed,
-                knob_x,
-                knob_y,
-                up: dpad & buttons::UP != 0,
-                down: dpad & buttons::DOWN != 0,
-                left: dpad & buttons::LEFT != 0,
-                right: dpad & buttons::RIGHT != 0,
-            }
-        })
-        .collect()
-}
 
 /// The on-screen controller, untouched, for a `width`×`height` stream view
 /// (the screenshot example draws it).
 #[doc(hidden)]
 pub fn pad_preview(width: f32, height: f32) -> Vec<PadControl> {
-    let mut pad = virtual_pad::VirtualPad::default();
-    pad.resize(width, height);
-    pad_controls(&pad)
+    hestia_frontend::pad_preview(width, height)
+        .into_iter()
+        .map(slint_ui::pad_control)
+        .collect()
 }
 
 /// Builds the window and runs the event loop until it closes.
 pub fn run(data_dir: PathBuf) -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     ui.set_is_android(cfg!(target_os = "android"));
-    let controller = controller::Controller::new(&ui);
-    controller.wire(&ui);
+    // The renderer that draws native pictures inside Slint's rendering.
+    let gpu_window = Arc::new(GpuWindow::default());
+    #[cfg(target_os = "android")]
+    gpu_render::install(&ui, gpu_window.clone());
+    #[cfg(not(target_os = "android"))]
+    gl_video::install(&ui, gpu_window.clone());
+    let controller = Controller::new(Arc::new(slint_ui::SlintUi::new(&ui)), gpu_window);
+    slint_ui::wire(&ui, &controller);
     // Desktop: game controllers straight from evdev.
     #[cfg(target_os = "linux")]
-    desktop_pads::start();
+    hestia_frontend::desktop_pads::start();
     controller.start(data_dir);
     ui.run()
 }
@@ -96,11 +60,11 @@ fn android_main(app: slint::android::AndroidApp) {
             .with_tag("hestia"),
     );
     let _ = hestia_core::logcapture::install(Box::new(logcat), log::LevelFilter::Info);
-    platform::set_android_app(app.clone());
+    hestia_frontend::platform::set_android_app(app.clone());
     // Reach LAN hosts over Wi-Fi even when Android prefers mobile data.
-    hestia_core::nvhttp::http::set_route_hook(platform::route_for);
+    hestia_core::nvhttp::http::set_route_hook(hestia_frontend::platform::route_for);
     // Game controllers reach the host through the (patched) backend's hook.
-    i_slint_backend_android_activity::set_input_hook(platform::android_input_hook);
+    i_slint_backend_android_activity::set_input_hook(hestia_frontend::platform::android_input_hook);
     let data_dir = app
         .internal_data_path()
         .unwrap_or_else(|| PathBuf::from("/data/local/tmp/hestia-rs"));

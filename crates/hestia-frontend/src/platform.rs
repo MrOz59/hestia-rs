@@ -1,4 +1,5 @@
-//! System services used by the graphical client.
+//! System services used by the graphical client (none of them depends on
+//! the UI toolkit; the shell only hands over the Android activity).
 
 #[cfg(target_os = "android")]
 mod android;
@@ -20,7 +21,7 @@ pub use gamepads::{
     gamepad_gone, gamepad_state, onscreen_gamepad, onscreen_gamepad_off, rumble, set_gamepad_sink,
     set_gamepads_streaming,
 };
-pub use keyboard::{has_soft_keyboard, set_form_navigation, set_ime_sink, set_keyboard_visible};
+pub use keyboard::{has_soft_keyboard, set_ime_sink, set_keyboard_visible};
 #[cfg(target_os = "android")]
 pub use network::route_for;
 pub use reports::{export_label, export_report, open_url, reports_dir};

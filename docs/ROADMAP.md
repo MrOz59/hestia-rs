@@ -8,6 +8,8 @@
 - [x] App list, box art, launch / resume / quit
 - [x] Hermes Hestia API v1 client and session preparation
 - [x] Slint UI shell (Linux desktop + Android NativeActivity)
+- [x] App logic in a toolkit-free crate (`hestia-frontend`) behind a UI port,
+      so Slint can be swapped (egui, Qt…) by writing another shell
 - [x] CLI
 - [x] CI: fmt, clippy, tests, Linux build, Android build
 

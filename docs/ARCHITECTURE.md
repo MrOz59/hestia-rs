@@ -3,14 +3,19 @@
 Hestia RS is split into small crates with one direction of dependencies:
 
 ```
-          hestia-app (Slint)      hestia-cli
-                    \              /
+      hestia-app (Slint shell)
+                |
+         hestia-frontend                hestia-cli
+                 \                     /
                      hestia-core                      hestia-media
               /      |       |      \                      |
    hestia-nvhttp  hestia-api  hestia-discovery        hestia-stream
          |            |
    hestia-crypto  (hestia-nvhttp)
 ```
+
+(`hestia-frontend` also uses `hestia-media` directly, for decoder selection
+and video presentation.)
 
 ## Principles
 
@@ -117,34 +122,50 @@ MediaCodec with AAudio. The sink owns the FIFO, stereo downmix, and session
 lifecycle. Output callbacks only read PCM through a `PcmReader`, which
 keeps the same buffering and underrun behavior with either decoder.
 
-### hestia-app
-Slint UI (`ui/*.slint`, fluent-dark base style with a custom theme). A
-`Controller` owns the core and pushes view models to the window through
-`upgrade_in_event_loop`; no network call ever runs on the UI thread. The same
-crate builds a desktop binary and an Android `cdylib` (`android_main`). The
-stream screen (`ui/stream.slint`) takes input and shows frames from
-`presentation.rs`. That adapter maps `PictureMailbox` updates to Slint image
-uploads and native redraws. The mailbox lives in `hestia-media` and is shared
-by the decoder, event loop, and native renderer. It keeps the newest pending
-picture, coalesces display callbacks, and returns CPU storage to the decoder
-after upload. Replaced native pictures are released outside its lock.
+### hestia-frontend
+The graphical client without a UI toolkit, so the toolkit can be swapped
+(see [FRONTENDS.md](FRONTENDS.md)). The `Controller` owns the core; its
+public methods are the user's intents, called by the shell on the UI thread,
+and no network call ever runs there. Results reach the screen through the
+port in `ui.rs`: `UiHandle` queues closures for the UI thread (now or after
+a delay), and `View` is what the screens show, as plain Rust values (strings,
+numbers, `HostCard`/`AppCard`/… structs, a `SettingsForm`).
 
-The window's GPU renderer runs in Slint's rendering notifier and draws native
-pictures into one RGBA texture the stream view shows as a borrowed texture.
-On Android (`gpu_render.rs`) it imports the hardware picture, draws it without
-a CPU copy, and releases it with a GPU fence. On the desktop (`gl_video.rs`,
-with the Slint-free pass in `gl_yuv.rs`) it uploads OpenH264's planes and
-converts them to RGB in a shader; it loads GL through Slint's
-`get_proc_address`, works with OpenGL 3 and OpenGL ES 3 contexts, and its
-test runs headless on Mesa. Either renderer saves and restores the GL state
-it touches. The decoder receives renderer availability explicitly at
-construction by `video_backend.rs`.
+`presentation.rs` connects the decoder to the window. Its `UiPresenter`
+feeds a `PictureMailbox` (in `hestia-media`, shared by the decoder, the UI
+thread and the native renderer). The mailbox keeps the newest pending
+picture, coalesces display callbacks, returns CPU storage to the decoder
+after upload, and releases replaced native pictures outside its lock. RGBA
+pictures go to `View::show_video_frame`; native ones only ask for a redraw,
+and the shell's GPU renderer takes them from the `Presentation` that
+`GpuWindow` marks active. `gl_yuv.rs` is the toolkit-free GL pass that
+converts the desktop's YUV planes: it loads GL through a
+`get_proc_address`, works with OpenGL 3 and OpenGL ES 3 contexts, restores
+the GL state it touches, and its test runs headless on Mesa. The decoder
+receives renderer availability explicitly at construction by
+`video_backend.rs`.
 
 `stream_input.rs` owns the per-session touch and controller gesture state and
-converts input into protocol events. The controller handles UI updates, timers,
-and delivery to the session. System services are grouped under `platform/`
-by capability, including display, keyboard, clipboard, controllers, and Android
-network routing. Android's service adapters share the activity and JNI helper.
+converts input into protocol events. System services are grouped under
+`platform/` by capability, including display, keyboard, clipboard,
+controllers, and Android network routing. Android's service adapters share
+the activity (handed over by the shell) and the JNI helper, whose Java side
+(`java/HestiaHelper.java`) this crate's build script compiles into a dex.
+
+### hestia-app
+The Slint shell: the screens (`ui/*.slint`, fluent-dark base style with a
+custom theme), `slint_ui.rs` (the `View` over the generated `AppWindow`, the
+`UiHandle` over Slint's event loop, and the callbacks wired to the
+controller's intents), and the GPU renderers that need Slint's rendering
+notifier. Both draw native pictures into one RGBA texture the stream view
+shows as a borrowed texture:
+
+- `gpu_render.rs` (Android) imports the hardware picture, draws it without a
+  CPU copy, and releases it with a GPU fence.
+- `gl_video.rs` (desktop) runs `gl_yuv`'s pass with Slint's GL context.
+
+The same crate builds a desktop binary and an Android `cdylib`
+(`android_main`, which also installs the patched backend's controller hook).
 
 ### hestia-cli
 `hestia` binary over the same core, for scripting and for testing hosts without
