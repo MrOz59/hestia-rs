@@ -34,6 +34,7 @@ pub struct DecodedFrame {
     pub received_at: Instant,
     pub decoded_at: Instant,
     pub idr_requested_at: Option<Instant>,
+    pub loss_detected_at: Option<Instant>,
 }
 
 impl Default for DecodedFrame {
@@ -47,6 +48,7 @@ impl Default for DecodedFrame {
             received_at: now,
             decoded_at: now,
             idr_requested_at: None,
+            loss_detected_at: None,
         }
     }
 }
@@ -91,6 +93,7 @@ pub struct FrameTiming {
     pub codec_input_at: Instant,
     pub codec_output_at: Instant,
     pub idr_requested_at: Option<Instant>,
+    pub loss_detected_at: Option<Instant>,
 }
 
 impl FrameTiming {
@@ -103,6 +106,7 @@ impl FrameTiming {
             codec_input_at: started_at,
             codec_output_at: started_at,
             idr_requested_at: frame.idr_requested_at,
+            loss_detected_at: frame.loss_detected_at,
         }
     }
 }
@@ -595,6 +599,7 @@ fn decode_loop(
                 picture.received_at = timing.received_at;
                 picture.decoded_at = Instant::now();
                 picture.idr_requested_at = timing.idr_requested_at;
+                picture.loss_detected_at = timing.loss_detected_at;
                 let stats = &shared.stats;
                 stats.recovery.record(timing.idr_requested_at, picture.decoded_at);
                 if input_number.is_none() {
@@ -680,6 +685,7 @@ mod tests {
             data: vec![0, 0, 0, 1],
             received_at: Instant::now(),
             idr_requested_at: None,
+            loss_detected_at: None,
             host_latency: None,
         }
     }
@@ -729,17 +735,23 @@ mod tests {
         let (presented, pictures) = mpsc::channel();
         let mut sink = DecodingSink::new(
             Box::new(Delayed::default()),
-            Box::new(move |frame: &DecodedFrame| presented.send((frame.frame_number, frame.idr_requested_at)).unwrap()),
+            Box::new(move |frame: &DecodedFrame| {
+                presented
+                    .send((frame.frame_number, frame.idr_requested_at, frame.loss_detected_at))
+                    .unwrap()
+            }),
         );
         let stats = sink.stats();
         sink.setup(H264, 2, 1, 60).unwrap();
         let mut keyframe = frame(17, true);
         let requested = Instant::now();
+        let loss = requested - Duration::from_millis(80);
         keyframe.idr_requested_at = Some(requested);
+        keyframe.loss_detected_at = Some(loss);
         assert_eq!(sink.submit(keyframe), SubmitResult::Ok);
         assert_eq!(
             pictures.recv_timeout(Duration::from_secs(2)).unwrap(),
-            (17, Some(requested))
+            (17, Some(requested), Some(loss))
         );
         sink.cleanup();
         assert_eq!(stats.decoded.load(Ordering::Relaxed), 1);

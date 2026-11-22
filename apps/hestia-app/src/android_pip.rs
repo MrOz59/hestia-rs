@@ -115,6 +115,9 @@ extern "system" fn mode_changed(env: JNIEnv<'_>, activity: JObject<'_>, in_pip: 
         let entered = in_pip && !was_in_pip;
         (callbacks.window.clone(), callbacks.controller.clone(), entered)
     };
+    if let Some(controller) = controller.upgrade() {
+        controller.picture_in_picture_changed(in_pip, dismissed != 0);
+    }
     if dismissed != 0 {
         log::info!("Android picture-in-picture dismissed");
         // onStop may be followed immediately by Activity destruction. Start

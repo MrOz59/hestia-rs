@@ -17,7 +17,6 @@ use std::num::NonZeroU32;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::ptr;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use hestia_frontend::presentation::GpuWindow;
@@ -678,8 +677,7 @@ impl Renderer {
                 let stats = &presentation.gpu;
                 stats.ready_to_draw.record(now.duration_since(frame.decoded_at));
                 stats.receive_to_draw.record(now.duration_since(frame.received_at));
-                stats.recovery.record(frame.idr_requested_at, now);
-                stats.drawn.fetch_add(1, Ordering::Relaxed);
+                stats.record_draw(frame.idr_requested_at, frame.loss_detected_at, now);
                 picture.release(fence);
                 if !presentation.gpu_available() || !self.gpu.is_active(presentation.generation) {
                     return;

@@ -105,7 +105,12 @@ pub struct AssemblerStats {
     pub dropped_waiting_idr: u64,
 }
 
+/// Sunshine's SS_FRAME_FEC_STATUS, packed in network byte order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameFecStatus(pub [u8; 21]);
+
 struct Block {
+    info: PacketInfo,
     lowest_seq: u16,
     data_shards: usize,
     parity_shards: usize,
@@ -119,6 +124,7 @@ impl Block {
         let data_shards = usize::from(info.data_shards);
         let parity_shards = usize::from(info.parity_shards());
         Self {
+            info,
             lowest_seq: info.seq.wrapping_sub(info.fec_index),
             data_shards,
             parity_shards,
@@ -132,10 +138,41 @@ impl Block {
         self.received >= self.data_shards
     }
 
-    fn add(&mut self, info: PacketInfo, packet: &[u8], shard_len: usize) -> Result<usize, fec::FecError> {
+    fn status(&self) -> FrameFecStatus {
+        let highest = self
+            .shards
+            .iter()
+            .rposition(Option::is_some)
+            .expect("block received a shard");
+        let contiguous = self.shards.iter().take_while(|shard| shard.is_some()).count();
+        let mut bytes = [0; 21];
+        bytes[..4].copy_from_slice(&self.info.frame.to_be_bytes());
+        let counts = [
+            self.lowest_seq.wrapping_add(highest as u16),
+            self.lowest_seq.wrapping_add(contiguous as u16),
+            (highest + 1 - self.received) as u16,
+            self.data_shards as u16,
+            self.parity_shards as u16,
+            self.received_data as u16,
+            (self.received - self.received_data) as u16,
+        ];
+        for (field, count) in bytes[4..18].chunks_exact_mut(2).zip(counts) {
+            field.copy_from_slice(&count.to_be_bytes());
+        }
+        bytes[18..].copy_from_slice(&[self.info.fec_percent as u8, self.info.block, self.info.last_block + 1]);
+        FrameFecStatus(bytes)
+    }
+
+    fn add(
+        &mut self,
+        info: PacketInfo,
+        packet: &[u8],
+        shard_len: usize,
+        report_fec: bool,
+    ) -> Result<(usize, Option<FrameFecStatus>), fec::FecError> {
         let index = usize::from(info.seq.wrapping_sub(self.lowest_seq));
         if self.complete() || index >= self.shards.len() || self.shards[index].is_some() {
-            return Ok(0);
+            return Ok((0, None));
         }
         let mut shard = Vec::with_capacity(shard_len);
         shard.extend_from_slice(packet);
@@ -146,10 +183,11 @@ impl Block {
             self.received_data += 1;
         }
         if !self.complete() || self.received_data == self.data_shards {
-            return Ok(0);
+            return Ok((0, None));
         }
+        let status = report_fec.then(|| self.status());
         fec::reconstruct(&mut self.shards, self.data_shards, self.parity_shards, shard_len)?;
-        Ok(self.data_shards - self.received_data)
+        Ok((self.data_shards - self.received_data, status))
     }
 }
 
@@ -164,6 +202,7 @@ struct FrameState {
 /// Reassembles frames from shards. Pure logic, no I/O. Newer frames may finish
 /// first but are emitted in sequence while the preceding frame can still arrive.
 pub struct FrameAssembler {
+    report_fec: bool,
     shard_len: usize,
     codec: VideoCodec,
     next_frame: Option<u32>,
@@ -174,6 +213,7 @@ pub struct FrameAssembler {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum AssemblerOutput {
+    FecStatus(FrameFecStatus),
     Frame(AssembledFrame),
     /// A frame was lost; the decoder needs an IDR to recover.
     NeedIdr,
@@ -187,6 +227,7 @@ impl FrameAssembler {
             codec,
             next_frame: None,
             pending: Vec::with_capacity(MAX_FRAME_LOOKAHEAD as usize + 2),
+            report_fec: false,
             waiting_for_idr: true,
             stats: AssemblerStats::default(),
         }
@@ -248,8 +289,11 @@ impl FrameAssembler {
         let frame = &mut self.pending[index];
         if frame.result.is_none() && frame.last_block == usize::from(info.last_block) {
             let block = frame.blocks[usize::from(info.block)].get_or_insert_with(|| Block::new(info));
-            match block.add(info, packet, self.shard_len) {
-                Ok(recovered) => {
+            match block.add(info, packet, self.shard_len, self.report_fec) {
+                Ok((recovered, status)) => {
+                    if let Some(status) = status {
+                        out.push(AssemblerOutput::FecStatus(status));
+                    }
                     self.stats.recovered_packets += recovered as u64;
                     if frame.blocks[..=frame.last_block]
                         .iter()
@@ -317,7 +361,17 @@ impl FrameAssembler {
                 break;
             }
             let skipped = if number == next {
-                self.pending.remove(0);
+                let expired = self.pending.remove(0);
+                if self.report_fec {
+                    for block in expired
+                        .blocks
+                        .iter()
+                        .flatten()
+                        .filter(|b| !b.complete() && b.received > 0)
+                    {
+                        out.push(AssemblerOutput::FecStatus(block.status()));
+                    }
+                }
                 1
             } else {
                 number.wrapping_sub(next)
@@ -432,6 +486,7 @@ pub fn is_keyframe_bitstream(data: &[u8], codec: VideoCodec) -> bool {
 /// Configuration of the receive side.
 #[derive(Debug, Clone)]
 pub struct VideoConfig {
+    pub report_fec: bool,
     pub remote: SocketAddr,
     pub ping_payload: Option<[u8; 16]>,
     pub packet_size: u32,
@@ -445,7 +500,8 @@ pub struct VideoConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VideoFeedback {
-    NeedIdr,
+    FecStatus(FrameFecStatus),
+    NeedIdr { loss_detected_at: Option<Instant> },
     FirstFrame,
     NoVideo,
     VideoStalled,
@@ -456,6 +512,7 @@ pub enum VideoFeedback {
 #[derive(Debug, Default)]
 pub struct VideoCounters {
     pub packets: AtomicU64,
+    pub fec_reports_sent: AtomicU64,
     pub bytes: AtomicU64,
     pub frames: AtomicU64,
     pub recovered: AtomicU64,
@@ -470,6 +527,9 @@ pub struct VideoCounters {
 #[derive(Debug, Default)]
 pub struct VideoRecoveryCounters {
     pub loss_requests: AtomicU64,
+    pub loss_sends: AtomicU64,
+    pub loss_to_send_us: AtomicU64,
+    pub max_loss_to_send_us: AtomicU64,
     pub decoder_requests: AtomicU64,
     pub silence_requests: AtomicU64,
     pub retries: AtomicU64,
@@ -492,7 +552,7 @@ impl VideoRecoveryCounters {
         .sum()
     }
 
-    fn request(&self, reason: IdrReason, emit: &impl Fn(VideoFeedback)) {
+    fn request(&self, reason: IdrReason, loss_detected_at: Option<Instant>, emit: &impl Fn(VideoFeedback)) {
         match reason {
             IdrReason::Loss => &self.loss_requests,
             IdrReason::Decoder => &self.decoder_requests,
@@ -501,7 +561,7 @@ impl VideoRecoveryCounters {
         }
         .fetch_add(1, Ordering::Relaxed);
         debug!("video keyframe requested ({reason:?})");
-        emit(VideoFeedback::NeedIdr);
+        emit(VideoFeedback::NeedIdr { loss_detected_at });
     }
 
     fn recovered(&self, elapsed: Duration) {
@@ -724,19 +784,21 @@ fn receive_loop(
     decoder_wants_idr: Arc<AtomicBool>,
 ) {
     let mut assembler = FrameAssembler::new(cfg.packet_size, cfg.format.codec);
+    assembler.report_fec = cfg.report_fec;
     let shard_len = assembler.shard_len();
     let mut buf = vec![0u8; shard_len + ENC_PREFIX_LEN + 64];
     let mut activity = VideoActivity::new(Instant::now());
     let mut first_frame = false;
     let mut idr = IdrRequests::default();
     let mut recovered_request = None;
+    let mut recovered_loss = None;
 
     while !stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         if decoder_wants_idr.swap(false, Ordering::Relaxed) {
             assembler.wait_for_keyframe();
             if let Some(reason) = idr.want(now, IdrReason::Decoder) {
-                counters.recovery.request(reason, emit);
+                counters.recovery.request(reason, idr.loss_detected_at, emit);
             }
         }
         let packet = match socket.recv_from(&mut buf) {
@@ -797,7 +859,7 @@ fn receive_loop(
             Some(VideoInactivity::Probe) => {
                 debug!("video paused; probing with a keyframe request");
                 if let Some(reason) = idr.want(now, IdrReason::Silence) {
-                    counters.recovery.request(reason, emit);
+                    counters.recovery.request(reason, idr.loss_detected_at, emit);
                 }
             }
             Some(VideoInactivity::Stalled) => {
@@ -809,9 +871,10 @@ fn receive_loop(
         }
         for output in outputs {
             match output {
+                AssemblerOutput::FecStatus(status) => emit(VideoFeedback::FecStatus(status)),
                 AssemblerOutput::NeedIdr => {
                     if let Some(reason) = idr.want(Instant::now(), IdrReason::Loss) {
-                        counters.recovery.request(reason, emit);
+                        counters.recovery.request(reason, idr.loss_detected_at, emit);
                     }
                 }
                 AssemblerOutput::Frame(frame) => {
@@ -820,11 +883,13 @@ fn receive_loop(
                         emit(VideoFeedback::FirstFrame);
                     }
                     counters.frames.fetch_add(1, Ordering::Relaxed);
-                    if frame.keyframe
-                        && let Some(request) = idr.keyframe_arrived()
-                    {
-                        counters.recovery.recovered(request.elapsed());
-                        recovered_request = Some(request);
+                    if frame.keyframe {
+                        let (request, loss) = idr.keyframe_arrived();
+                        recovered_loss = loss.or(recovered_loss);
+                        if let Some(request) = request {
+                            counters.recovery.recovered(request.elapsed());
+                            recovered_request = Some(request);
+                        }
                     }
                     if frame.host_latency_100us > 0 {
                         counters
@@ -838,13 +903,14 @@ fn receive_loop(
                         data: frame.data,
                         received_at: frame.received_at,
                         idr_requested_at: recovered_request,
+                        loss_detected_at: recovered_loss,
                         host_latency: Some(Duration::from_micros(frame.host_latency_100us as u64 * 100)),
                     };
                     if sink.submit(encoded) == SubmitResult::NeedKeyframe {
                         debug!("decoder asked for a keyframe");
                         assembler.wait_for_keyframe();
                         if let Some(reason) = idr.want(Instant::now(), IdrReason::Decoder) {
-                            counters.recovery.request(reason, emit);
+                            counters.recovery.request(reason, idr.loss_detected_at, emit);
                         }
                         break;
                     }
@@ -852,7 +918,7 @@ fn receive_loop(
             }
         }
         if let Some(reason) = idr.retry_due(Instant::now()) {
-            counters.recovery.request(reason, emit);
+            counters.recovery.request(reason, idr.loss_detected_at, emit);
         }
         counters
             .recovered
@@ -884,6 +950,8 @@ enum IdrReason {
 /// [`IdrRequests::MAX_GAP`] apart, until the stream runs cleanly again.
 #[derive(Debug, Default)]
 struct IdrRequests {
+    /// First assembly loss in this episode, including deferred requests.
+    loss_detected_at: Option<Instant>,
     pending_since: Option<Instant>,
     first_request: Option<Instant>,
     last_sent: Option<Instant>,
@@ -904,12 +972,21 @@ impl IdrRequests {
 
     /// A keyframe is needed: return the reason if a request should go out now.
     fn want(&mut self, now: Instant, reason: IdrReason) -> Option<IdrReason> {
+        if reason == IdrReason::Loss {
+            self.loss_detected_at.get_or_insert(now);
+        }
         if self.pending_since.is_some() {
             return self.retry_due(now);
         }
         match self.last_sent.map(|at| now.duration_since(at)) {
             Some(since) if since < Self::STORM => {
-                if !self.grew {
+                // A fresh transport loss after a usable IDR is a new episode.
+                // Keep a spacing floor, preserving exponential backoff for decoder failures.
+                if reason == IdrReason::Loss {
+                    self.gap = Self::MIN_GAP;
+                    self.deferred = Some(reason);
+                    self.grew = true;
+                } else if !self.grew {
                     self.gap = (self.gap * 2).clamp(Self::MIN_GAP, Self::MAX_GAP);
                     self.grew = true;
                 }
@@ -944,10 +1021,10 @@ impl IdrRequests {
         }
     }
 
-    fn keyframe_arrived(&mut self) -> Option<Instant> {
+    fn keyframe_arrived(&mut self) -> (Option<Instant>, Option<Instant>) {
         self.pending_since = None;
         self.deferred = None;
-        self.first_request.take()
+        (self.first_request.take(), self.loss_detected_at.take())
     }
 }
 
@@ -1149,10 +1226,57 @@ mod tests {
         assert_eq!(idr.retry_due(ms(900)), None);
         assert_eq!(idr.retry_due(ms(1000)), Some(IdrReason::Retry));
         assert_eq!(idr.retry_due(ms(1500)), None);
-        assert_eq!(idr.keyframe_arrived(), Some(t0), "retries keep the first request time");
-        assert_eq!(idr.keyframe_arrived(), None);
+        assert_eq!(
+            idr.keyframe_arrived(),
+            (Some(t0), Some(t0)),
+            "retries keep the first request time"
+        );
+        assert_eq!(idr.keyframe_arrived(), (None, None));
         assert_eq!(idr.retry_due(ms(5000)), None);
         assert_eq!(idr.want(ms(5001), IdrReason::Loss), Some(IdrReason::Loss));
+    }
+
+    #[test]
+    fn recovered_transport_losses_have_bounded_spacing() {
+        let start = Instant::now();
+        let ms = |n| start + Duration::from_millis(n);
+        let mut idr = IdrRequests::default();
+        assert_eq!(idr.want(start, IdrReason::Loss), Some(IdrReason::Loss));
+        for previous in [0, 250, 500, 750, 1000] {
+            let (request, loss) = idr.keyframe_arrived();
+            assert_eq!(request, Some(ms(previous)));
+            assert_eq!(loss, Some(ms(previous.saturating_sub(100))));
+            assert_eq!(idr.want(ms(previous + 150), IdrReason::Loss), None);
+            assert_eq!(idr.retry_due(ms(previous + 249)), None);
+            assert_eq!(idr.retry_due(ms(previous + 250)), Some(IdrReason::Loss));
+        }
+        idr.keyframe_arrived();
+        assert_eq!(idr.want(ms(1300), IdrReason::Loss), None);
+        assert_eq!(idr.keyframe_arrived(), (None, Some(ms(1300))));
+        assert_eq!(
+            idr.retry_due(ms(1550)),
+            None,
+            "unsolicited keyframe cancelled deferred feedback"
+        );
+    }
+
+    #[test]
+    fn reports_partial_block_once_at_expiry_with_wrapping_sequences() {
+        let mut asm = FrameAssembler::new(PACKET_SIZE as u32, VideoCodec::H264);
+        asm.report_fec = true;
+        let start = Instant::now();
+        let partial = packetize(9, &h264_frame(4000, false), PACKET_SIZE, 20, 65535, false);
+        for index in [0, 2, 2] {
+            assert!(asm.add_at(&partial[index], start).is_empty());
+        }
+        let next = packetize(10, &h264_frame(500, true), PACKET_SIZE, 20, 4, true);
+        assert!(asm.add_at(&next[0], start).is_empty());
+        let out = asm.expire(start + REORDER_WINDOW);
+        assert!(
+            matches!(&out[..], [AssemblerOutput::FecStatus(FrameFecStatus(bytes)), AssemblerOutput::NeedIdr, AssemblerOutput::Frame(_)]
+            if bytes == &[0,0,0,9, 0,1, 0,0, 0,1, 0,3, 0,2, 0,2, 0,0, 34,0,1])
+        );
+        assert!(asm.expire(start + REORDER_WINDOW * 2).is_empty());
     }
 
     #[test]

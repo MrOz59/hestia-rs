@@ -219,6 +219,9 @@ impl MockHost {
                             }
                             9 => {
                                 let n = be16(d, pos + 6) as usize;
+                                if let Some(message) = control::open(&key, &d[pos + 8..pos + 8 + n], b'C') {
+                                    msgs.lock().unwrap().push(message);
+                                }
                                 pos += 8 + n;
                             }
                             _ => break,

@@ -205,6 +205,7 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
 
     let deadline = (opts.seconds > 0).then(|| Instant::now() + Duration::from_secs(opts.seconds));
     let mut last: Option<(Instant, hestia_core::stream::StreamStats, u64)> = None;
+    let mut tracker = diagnosis::DiagnosisTracker::default();
     let outcome = loop {
         let wait = deadline.map_or(Duration::from_millis(500), |d| {
             d.saturating_duration_since(Instant::now())
@@ -217,6 +218,7 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
                 if let Some((at, prev, prev_decoded)) = &last {
                     let secs = at.elapsed().as_secs_f64().max(0.001);
                     let received = stats.frames - prev.frames;
+                    let skipped = stats.dropped_waiting_idr - prev.dropped_waiting_idr;
                     let lost = stats.lost_frames - prev.lost_frames;
                     let host_frames = stats.host_latency_frames - prev.host_latency_frames;
                     let host_ms = (host_frames > 0)
@@ -231,17 +233,19 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
                             received as f64 / secs
                         },
                         decode_ms: decode_stats.as_ref().map_or(0.0, |d| d.mean_decode_ms()),
-                        network_drop_pct: if received + lost == 0 {
+                        skipped_waiting_idr_fps: skipped as f64 / secs,
+                        network_drop_pct: if received + skipped + lost == 0 {
                             0.0
                         } else {
-                            lost as f64 * 100.0 / (received + lost) as f64
+                            lost as f64 * 100.0 / (received + skipped + lost) as f64
                         },
                         display_drop_pct: 0.0,
                         host_ms,
                     };
-                    let verdict = diagnosis::diagnose(&window);
+                    let verdict = tracker.sample(&window);
                     report.sample(StatsSample {
                         fps: window.received_fps,
+                        assembled_fps: (received + skipped) as f64 / secs,
                         mbps: (stats.bytes - prev.bytes) as f64 * 8.0 / secs / 1e6,
                         rtt_ms: stats.rtt_ms,
                         rtt_variance_ms: stats.rtt_variance_ms,
