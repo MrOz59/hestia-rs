@@ -22,12 +22,12 @@
 //!   VA-API, its NV12 pictures shared with the window's renderer as
 //!   DMA-BUFs, or read back.
 //!
-//! Planned: surround audio.
-//!
 //! See `docs/VIDEO.md` in the repository for the whole video pipeline.
 
 #[cfg(target_os = "android")]
 pub mod aaudio;
+#[cfg(all(feature = "audio", target_os = "linux"))]
+mod alsa_surround;
 #[cfg(target_os = "android")]
 pub mod android_audio;
 pub mod audio_fifo;

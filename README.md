@@ -96,8 +96,11 @@ a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
     being late (dropping one would cost a keyframe): bursts decode through
     and only the newest picture is shown. Keyframe requests back off when
     they don't fix a failing decoder.
-- **Audio**: stereo Opus through cpal on desktop Linux; on Android, decoded
-  by MediaCodec and played with AAudio. Surround is mixed down to stereo.
+- **Audio**: stereo, 5.1 and 7.1 Opus. On Linux, surround uses the speaker
+  layout reported by the default ALSA device. On Android, AAudio uses
+  positional surround on Android 12L (API 32) and newer. Playback falls
+  back to 5.1 or stereo when the requested layout cannot be opened; Android
+  can also mix the stream to fit the current route.
 
 ### Input
 
@@ -204,7 +207,7 @@ a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
   desktops decode H.264 in software for now, where a 4K or high-frame-rate
   stream may be more than one CPU core can handle. 8-bit only (no 10-bit
   HEVC or AV1 yet).
-- No HDR presentation (10-bit) yet; surround audio is mixed down to stereo.
+- No HDR presentation (10-bit) yet.
 - Keys are mapped by the character they produce (US layout), not by physical
   scancode; the desktop mouse is absolute only (no pointer capture); no
   stylus support yet.

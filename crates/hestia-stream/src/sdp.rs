@@ -88,6 +88,9 @@ impl HostSdp {
         if channels == 2 {
             return (Some(AudioFormat::stereo()), None);
         }
+        if !matches!(channels, 6 | 8) {
+            return (None, None);
+        }
         let prefix = format!("a=fmtp:97 surround-params={channels}");
         let mut found = self
             .raw
@@ -109,18 +112,28 @@ impl HostSdp {
                 mapping,
             })
         };
-        let normal = found.next().and_then(parse).map(|mut cfg| {
-            // GFE's normal-quality mapping is FL FR C RL RR SL SR LFE; clients
-            // use FL FR C LFE RL RR SL SR, so move LFE after C.
-            if channels == 6 || channels == 8 {
-                let n = channels as usize;
-                let original = cfg.mapping;
-                cfg.mapping[3] = original[n - 1];
-                cfg.mapping[4..n].copy_from_slice(&original[3..n - 1]);
+        let normal = found.next().and_then(parse);
+        let high = found.next().and_then(parse);
+        let normal = normal.map(|mut cfg| {
+            // Some Sunshine-family hosts rotate only the first six positions
+            // of their 7.1 map. Their high-quality line carries the same
+            // speaker map in the correct order, with different stream counts.
+            if let Some(high) = high
+                && (channels, cfg.streams, cfg.coupled_streams) == (8, 5, 3)
+                && (high.streams, high.coupled_streams) == (8, 0)
+            {
+                let mut truncated = high.mapping;
+                truncated[3..6].rotate_left(1);
+                if cfg.mapping == truncated {
+                    cfg.mapping = high.mapping;
+                    return cfg;
+                }
             }
+            // GFE announces normal quality with LFE last. Restore
+            // GameStream playback order (FL FR FC LFE BL BR SL SR).
+            cfg.mapping[3..usize::from(channels)].rotate_right(1);
             cfg
         });
-        let high = found.next().and_then(parse);
         (normal, high)
     }
 
@@ -326,6 +339,21 @@ a=fmtp:97 surround-params=88001234567\n";
         assert_eq!(&normal.mapping[..6], &[0, 1, 2, 5, 3, 4]);
         assert_eq!(high.unwrap().streams, 6);
         assert_eq!(sdp.opus_configs(2).0.unwrap(), AudioFormat::stereo());
+    }
+
+    #[test]
+    fn parses_7_1_from_current_and_older_sunshine_family_hosts() {
+        for normal in ["85301245673", "85301245367"] {
+            let sdp = HostSdp::new(format!(
+                "a=fmtp:97 surround-params={normal}\r\na=fmtp:97 surround-params=88001234567\r\n"
+            ));
+            let (normal, high) = sdp.opus_configs(8);
+            let normal = normal.unwrap();
+            let high = high.unwrap();
+            assert_eq!((normal.streams, normal.coupled_streams), (5, 3));
+            assert_eq!(normal.mapping, high.mapping);
+            assert_eq!(normal.mapping, [0, 1, 2, 3, 4, 5, 6, 7]);
+        }
     }
 
     #[test]

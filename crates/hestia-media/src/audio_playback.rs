@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use hestia_stream::{AudioFormat, AudioSink};
 use log::warn;
 
-use crate::audio_fifo::{CHANNELS, Fifo, SAMPLE_RATE, downmix_to_stereo, fill, lock};
+use crate::audio_fifo::{Fifo, SAMPLE_RATE, fill, lock};
 
 /// Borrowed, interleaved 48 kHz PCM. An empty slice means no decoder output yet.
 pub struct DecodedAudio<'a> {
@@ -23,16 +23,26 @@ pub trait AudioDecoder: Send {
 
 /// The audio callback's side of the PCM buffer.
 #[derive(Clone)]
-pub struct PcmReader(Arc<Mutex<Fifo>>);
+pub struct PcmReader {
+    fifo: Arc<Mutex<Fifo>>,
+    channels: usize,
+}
 
 impl PcmReader {
-    /// Fill the device buffer without waiting for the decoder thread.
+    /// Number of channels negotiated with the host.
+    pub fn channels(&self) -> usize {
+        self.channels
+    }
+
+    /// Fill the device buffer in GameStream speaker order without waiting for decoding.
     pub fn read<T: Copy>(&self, out: &mut [T], channels: usize, convert: impl Fn(f32) -> T, silence: T) {
-        if channels == 0 {
-            out.fill(silence);
-            return;
-        }
-        fill(&self.0, out, channels, convert, silence);
+        fill(&self.fifo, out, channels, channels, convert, silence);
+    }
+
+    /// In a backend without speaker positions, only use the first two outputs.
+    #[cfg(feature = "audio")]
+    pub(crate) fn read_stereo<T: Copy>(&self, out: &mut [T], channels: usize, convert: impl Fn(f32) -> T, silence: T) {
+        fill(&self.fifo, out, channels, channels.min(2), convert, silence);
     }
 }
 
@@ -49,9 +59,7 @@ pub trait PcmOutput: Send {
 pub struct PlaybackSink<D: AudioDecoder, O: PcmOutput> {
     decoder: D,
     output: O,
-    fifo: PcmReader,
-    stereo: Vec<f32>,
-    started: bool,
+    reader: Option<PcmReader>,
 }
 
 impl<D: AudioDecoder, O: PcmOutput> PlaybackSink<D, O> {
@@ -59,9 +67,7 @@ impl<D: AudioDecoder, O: PcmOutput> PlaybackSink<D, O> {
         Self {
             decoder,
             output,
-            fifo: PcmReader(Arc::new(Mutex::new(Fifo::new()))),
-            stereo: Vec::new(),
-            started: false,
+            reader: None,
         }
     }
 }
@@ -72,22 +78,30 @@ impl<D: AudioDecoder, O: PcmOutput> AudioSink for PlaybackSink<D, O> {
         if format.sample_rate != SAMPLE_RATE {
             return Err(format!("unexpected audio rate {} Hz", format.sample_rate));
         }
+        if !matches!(format.channels, 2 | 6 | 8) {
+            return Err(format!("unexpected audio layout: {} channels", format.channels));
+        }
         if let Err(e) = self.decoder.configure(format) {
             self.decoder.cleanup();
             return Err(e);
         }
-        if let Err(e) = self.output.start(self.fifo.clone()) {
+        let channels = usize::from(format.channels);
+        let reader = PcmReader {
+            fifo: Arc::new(Mutex::new(Fifo::new(channels))),
+            channels,
+        };
+        if let Err(e) = self.output.start(reader.clone()) {
             self.cleanup();
             return Err(e);
         }
-        self.started = true;
+        self.reader = Some(reader);
         Ok(())
     }
 
     fn submit(&mut self, packet: &[u8]) {
-        if !self.started {
+        let Some(reader) = &self.reader else {
             return;
-        }
+        };
         self.output.maintain();
         let decoded = match self.decoder.decode(packet) {
             Ok(decoded) if !decoded.samples.is_empty() => decoded,
@@ -97,22 +111,13 @@ impl<D: AudioDecoder, O: PcmOutput> AudioSink for PlaybackSink<D, O> {
                 return;
             }
         };
-        let stereo = if decoded.channels == CHANNELS {
-            decoded.samples
-        } else {
-            downmix_to_stereo(decoded.samples, decoded.channels, &mut self.stereo);
-            &self.stereo
-        };
-        lock(&self.fifo.0).push(stereo);
+        lock(&reader.fifo).push(decoded.samples, decoded.channels);
     }
 
     fn cleanup(&mut self) {
-        self.started = false;
+        self.reader = None;
         self.output.stop();
         self.decoder.cleanup();
-        let mut fifo = lock(&self.fifo.0);
-        fifo.samples.clear();
-        fifo.priming = true;
     }
 }
 
