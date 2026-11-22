@@ -1,34 +1,64 @@
-//! The small sample FIFO between a network thread that decodes audio
-//! packets and the audio API's callback that plays them.
-//!
-//! The FIFO is kept short: when it grows past [`MAX_LATENCY_MS`] the oldest
-//! samples are dropped, so clock drift between host and device never turns
-//! into growing delay; after an underrun it refills to [`TARGET_LATENCY_MS`]
-//! before playing again.
+//! Bounded PCM FIFO between the network decoder and the audio device.
+//! Latency is measured in frames, so it stays constant across channel layouts.
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, TryLockError};
 
-/// Target and maximum buffered audio.
 pub const TARGET_LATENCY_MS: usize = 30;
 pub const MAX_LATENCY_MS: usize = 80;
 pub const SAMPLE_RATE: u32 = 48_000;
-pub const CHANNELS: usize = 2;
+pub const MAX_CHANNELS: usize = 8;
+const TARGET_FRAMES: usize = TARGET_LATENCY_MS * SAMPLE_RATE as usize / 1_000;
+const MAX_FRAMES: usize = MAX_LATENCY_MS * SAMPLE_RATE as usize / 1_000;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Fifo {
-    pub samples: VecDeque<f32>,
-    /// Waiting to refill to the target after an underrun.
-    pub priming: bool,
+    samples: VecDeque<f32>,
+    channels: usize,
+    priming: bool,
 }
 
 pub fn lock(fifo: &Mutex<Fifo>) -> std::sync::MutexGuard<'_, Fifo> {
     fifo.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Fills `out` (interleaved, `channels` per frame) from the stereo FIFO.
-pub fn fill<T: Copy>(fifo: &Mutex<Fifo>, out: &mut [T], channels: usize, convert: impl Fn(f32) -> T, silence: T) {
-    let mut f = match fifo.try_lock() {
+impl Fifo {
+    pub fn new(channels: usize) -> Self {
+        Self {
+            samples: VecDeque::with_capacity((MAX_FRAMES + 5_760) * channels),
+            channels,
+            priming: true,
+        }
+    }
+
+    /// Buffers complete frames in GameStream order (FL FR FC LFE BL BR SL SR).
+    pub fn push(&mut self, samples: &[f32], channels: usize) {
+        if !matches!(channels, 1 | 2 | 6 | 8) {
+            return;
+        }
+        if channels != self.channels {
+            self.samples.clear();
+            self.channels = channels;
+            self.priming = true;
+        }
+        let len = samples.len() - samples.len() % channels;
+        self.samples.extend(&samples[..len]);
+        if self.samples.len() > MAX_FRAMES * channels {
+            self.samples.drain(..self.samples.len() - TARGET_FRAMES * channels);
+        }
+    }
+}
+
+/// Reads complete PCM frames without blocking playback on the producer.
+pub fn fill<T: Copy>(
+    fifo: &Mutex<Fifo>,
+    out: &mut [T],
+    stride: usize,
+    channels: usize,
+    convert: impl Fn(f32) -> T,
+    silence: T,
+) {
+    let mut fifo = match fifo.try_lock() {
         Ok(fifo) => fifo,
         Err(TryLockError::Poisoned(error)) => error.into_inner(),
         Err(TryLockError::WouldBlock) => {
@@ -36,77 +66,82 @@ pub fn fill<T: Copy>(fifo: &Mutex<Fifo>, out: &mut [T], channels: usize, convert
             return;
         }
     };
-    let target = TARGET_LATENCY_MS * SAMPLE_RATE as usize / 1000 * CHANNELS;
-    if f.priming && f.samples.len() < target {
+    let source = fifo.channels;
+    if stride < channels
+        || !matches!(channels, 1 | 2 | 6 | 8)
+        || (fifo.priming && fifo.samples.len() < TARGET_FRAMES * source)
+    {
         out.fill(silence);
         return;
     }
-    f.priming = false;
-    for frame in out.chunks_mut(channels) {
-        if f.samples.len() < CHANNELS {
-            f.priming = true;
+    fifo.priming = false;
+    let mut frames = out.chunks_exact_mut(stride);
+    for frame in &mut frames {
+        if fifo.samples.len() < source {
+            fifo.priming = true;
             frame.fill(silence);
             continue;
         }
-        let (l, r) = (
-            f.samples.pop_front().unwrap_or(0.0),
-            f.samples.pop_front().unwrap_or(0.0),
-        );
-        match frame.len() {
-            1 => frame[0] = convert((l + r) * 0.5),
+        let (frame, unused) = frame.split_at_mut(channels);
+        unused.fill(silence);
+        if source == channels {
+            for dst in frame {
+                *dst = convert(fifo.samples.pop_front().unwrap());
+            }
+            continue;
+        }
+        let mut input = [0.0; MAX_CHANNELS];
+        for sample in &mut input[..source] {
+            *sample = fifo.samples.pop_front().unwrap();
+        }
+        mix_frame(input, source, frame, &convert, silence);
+    }
+    frames.into_remainder().fill(silence);
+}
+
+fn mix_frame<T: Copy>(
+    input: [f32; MAX_CHANNELS],
+    source: usize,
+    out: &mut [T],
+    convert: &impl Fn(f32) -> T,
+    silence: T,
+) {
+    const SURROUND_GAIN: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    let [fl, fr, centre, lfe, bl, br, sl, sr] = input;
+    out.fill(silence);
+    if out.len() <= 2 {
+        let (left, right) = match source {
+            1 => (fl, fl),
+            2 => (fl, fr),
             _ => {
-                frame[0] = convert(l);
-                frame[1] = convert(r);
-                for extra in &mut frame[2..] {
-                    *extra = silence;
-                }
+                // Keep centre and surround content without clipping. Stereo
+                // bass management is left to the playback system.
+                let sum = 1.0 + SURROUND_GAIN * if source == 8 { 3.0 } else { 2.0 };
+                (
+                    (fl + SURROUND_GAIN * (centre + bl + sl)) / sum,
+                    (fr + SURROUND_GAIN * (centre + br + sr)) / sum,
+                )
             }
+        };
+        if out.len() == 1 {
+            out[0] = convert((left + right) * 0.5);
+        } else {
+            out[0] = convert(left);
+            out[1] = convert(right);
         }
-    }
-}
-
-impl Fifo {
-    pub fn new() -> Self {
-        Self {
-            samples: VecDeque::new(),
-            priming: true,
+    } else if source == 8 {
+        // On a 5.1 route, combine the rear and side pairs.
+        let left = (bl + SURROUND_GAIN * sl) / (1.0 + SURROUND_GAIN);
+        let right = (br + SURROUND_GAIN * sr) / (1.0 + SURROUND_GAIN);
+        for (dst, sample) in out.iter_mut().zip([fl, fr, centre, lfe, left, right]) {
+            *dst = convert(sample);
         }
-    }
-
-    /// Appends interleaved stereo samples, trimming back to the target
-    /// latency when the buffer has grown too long.
-    pub fn push(&mut self, stereo: &[f32]) {
-        self.samples.extend(stereo);
-        let max = MAX_LATENCY_MS * SAMPLE_RATE as usize / 1000 * CHANNELS;
-        if self.samples.len() > max {
-            let excess = self.samples.len() - TARGET_LATENCY_MS * SAMPLE_RATE as usize / 1000 * CHANNELS;
-            self.samples.drain(..excess - excess % CHANNELS);
-        }
-    }
-}
-
-/// Mixes `channels`-channel interleaved samples down to stereo, in the
-/// GameStream channel order (FL FR FC LFE BL BR SL SR). Stereo passes
-/// through; mono is duplicated.
-pub fn downmix_to_stereo(input: &[f32], channels: usize, out: &mut Vec<f32>) {
-    out.clear();
-    match channels {
-        0 => {}
-        1 => input.iter().for_each(|&s| out.extend([s, s])),
-        2 => out.extend_from_slice(input),
-        n => {
-            const SIDE: f32 = std::f32::consts::FRAC_1_SQRT_2;
-            // Centre and the surrounds at -3 dB; scaled so a full-scale
-            // signal on every channel can't clip. LFE is left out.
-            let gain = 1.0 / (1.0 + SIDE * if n >= 8 { 3.0 } else { 2.0 });
-            for frame in input.chunks_exact(n) {
-                let at = |i: usize| frame.get(i).copied().unwrap_or(0.0);
-                let (centre, back_l, back_r) = (at(2), at(4), at(5));
-                let (side_l, side_r) = (at(6), at(7));
-                let l = at(0) + SIDE * (centre + back_l + side_l);
-                let r = at(1) + SIDE * (centre + back_r + side_r);
-                out.extend([l * gain, r * gain]);
-            }
+    } else {
+        for (dst, sample) in out
+            .iter_mut()
+            .zip([fl, if source == 1 { fl } else { fr }, centre, lfe, bl, br])
+        {
+            *dst = convert(sample);
         }
     }
 }
@@ -116,58 +151,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fifo_primes_then_plays_and_handles_mono() {
-        let fifo = Mutex::new(Fifo::new());
-        let mut out = [9.0f32; 8];
-        fill(&fifo, &mut out, 2, |s| s, 0.0);
-        assert_eq!(out, [0.0; 8], "silence while priming");
+    fn fifo_primes_then_preserves_all_surround_channels() {
+        for channels in [6, 8] {
+            let source = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+            let frame = &source[..channels];
+            let fifo = Mutex::new(Fifo::new(channels));
+            let mut out = vec![1.0; channels + 1];
+            fill(&fifo, &mut out, channels, channels, |sample| sample, 0.0);
+            assert!(out.iter().all(|&sample| sample == 0.0));
 
-        let target = TARGET_LATENCY_MS * SAMPLE_RATE as usize / 1000 * CHANNELS;
-        lock(&fifo)
-            .samples
-            .extend((0..target).map(|i| if i % 2 == 0 { 0.5 } else { -0.5 }));
-        fill(&fifo, &mut out, 2, |s| s, 0.0);
-        assert_eq!(out, [0.5, -0.5, 0.5, -0.5, 0.5, -0.5, 0.5, -0.5]);
-
-        let mut mono = [1.0f32; 2];
-        fill(&fifo, &mut mono, 1, |s| s, 0.0);
-        assert_eq!(mono, [0.0, 0.0]);
+            lock(&fifo).push(&frame.repeat(TARGET_FRAMES), channels);
+            fill(&fifo, &mut out, channels, channels, |sample| sample, 0.0);
+            assert_eq!(&out[..channels], frame);
+            assert_eq!(out[channels], 0.0);
+            fill(&fifo, &mut out, channels, channels, |sample| sample, 0.0);
+            assert_eq!(
+                &out[..channels],
+                frame,
+                "a partial device buffer cannot shift channel positions"
+            );
+        }
     }
 
     #[test]
     fn callback_does_not_wait_for_a_busy_producer() {
-        let fifo = Mutex::new(Fifo::new());
+        let fifo = Mutex::new(Fifo::new(2));
         let _producer = lock(&fifo);
         let mut out = [1.0f32; 4];
-        fill(&fifo, &mut out, 2, |sample| sample, 0.0);
+        fill(&fifo, &mut out, 2, 2, |sample| sample, 0.0);
         assert_eq!(out, [0.0; 4]);
     }
 
     #[test]
-    fn push_trims_to_the_target() {
-        let mut f = Fifo::new();
-        let max = MAX_LATENCY_MS * SAMPLE_RATE as usize / 1000 * CHANNELS;
-        f.push(&vec![0.1; max + 100]);
-        assert_eq!(
-            f.samples.len(),
-            TARGET_LATENCY_MS * SAMPLE_RATE as usize / 1000 * CHANNELS
-        );
+    fn push_trims_to_the_target_in_whole_frames() {
+        let channels = 8;
+        let mut fifo = Fifo::new(channels);
+        fifo.push(&[0.1; (MAX_FRAMES + 12) * 8 + 1], channels);
+        assert_eq!(fifo.samples.len(), TARGET_FRAMES * channels);
     }
 
     #[test]
-    fn downmixes_surround() {
-        let mut out = Vec::new();
-        downmix_to_stereo(&[0.5, -0.5], 2, &mut out);
-        assert_eq!(out, [0.5, -0.5]);
-        downmix_to_stereo(&[0.25], 1, &mut out);
-        assert_eq!(out, [0.25, 0.25]);
-        // 5.1: only the centre speaks; it lands equally left and right.
-        downmix_to_stereo(&[0.0, 0.0, 1.0, 1.0, 0.0, 0.0], 6, &mut out);
-        assert!(out[0] > 0.0 && (out[0] - out[1]).abs() < 1e-6);
-        // Full scale everywhere never clips.
-        downmix_to_stereo(&[1.0; 6], 6, &mut out);
-        assert!(out.iter().all(|&s| s <= 1.0), "{out:?}");
-        downmix_to_stereo(&[1.0; 8], 8, &mut out);
-        assert!(out.iter().all(|&s| s <= 1.0), "{out:?}");
+    fn surround_fallback_preserves_centre_and_combines_surrounds() {
+        let fifo = Mutex::new(Fifo::new(8));
+        let source = [0.0, 0.0, 1.0, 0.5, 0.1, 0.2, 0.3, 0.4];
+        lock(&fifo).push(&source.repeat(TARGET_FRAMES), 8);
+        let mut surround = [0.0; 6];
+        fill(&fifo, &mut surround, 6, 6, |sample| sample, 0.0);
+        assert_eq!(&surround[..4], &source[..4]);
+        assert!((0.1..0.3).contains(&surround[4]));
+        assert!((0.2..0.4).contains(&surround[5]));
+        let mut stereo = [0.0; 2];
+        fill(&fifo, &mut stereo, 2, 2, |sample| sample, 0.0);
+        assert!(stereo[1] > stereo[0] && stereo[0] > 0.0);
+        for channels in [6, 8] {
+            let mut stereo = [0.0; 2];
+            let mut full_scale = [0.0; MAX_CHANNELS];
+            full_scale[..channels].fill(1.0);
+            mix_frame(full_scale, channels, &mut stereo, &|sample| sample, 0.0);
+            assert!(stereo.iter().all(|&sample| sample <= 1.0));
+        }
     }
 }

@@ -120,9 +120,8 @@ fall back to planes or RGBA. Queue overflow and decoder errors use the same
 keyframe recovery policy. Backends include OpenH264 (planes for the GPU, or
 RGBA through the SIMD converters in `color`), Android MediaCodec, Linux
 VA-API (`vaapi`, feature `vaapi`: cros-codecs' stateless decoders over libva,
-decoding into exported surfaces it shares as DMA-BUFs), Opus + cpal
-playback, Android audio, and null and dump sinks. Surround playback is
-planned.
+decoding into exported surfaces it shares as DMA-BUFs), desktop and Android
+Opus playback, and null and dump sinks.
 
 The GUI and CLI use `video_decoder::select_decoder_for_renderer` (or
 `select_decoder`, without a renderer) to pair a decoder with the formats it
@@ -135,10 +134,12 @@ is disabled or unavailable. [VIDEO.md](VIDEO.md) follows a frame through all
 of this.
 
 Audio playback uses a shared `PlaybackSink` to connect an `AudioDecoder`
-to a `PcmOutput`. Desktop composes libopus with cpal, and Android composes
-MediaCodec with AAudio. The sink owns the FIFO, stereo downmix, and session
-lifecycle. Output callbacks only read PCM through a `PcmReader`, which
-keeps the same buffering and underrun behavior with either decoder.
+to a `PcmOutput`. Libopus and MediaCodec decode multistream packets into
+GameStream speaker order. On Linux, ALSA playback maps PCM to the speaker
+positions on the default device, with cpal as the stereo fallback. AAudio
+opens a positional 5.1 or 7.1 stream when the Android API and route allow it.
+The FIFO preserves the decoded channels and measures latency in frames.
+`PcmReader` mixes channels when the output accepts fewer than the host sends.
 
 ### hestia-frontend
 The graphical client without a UI toolkit, so the toolkit can be swapped

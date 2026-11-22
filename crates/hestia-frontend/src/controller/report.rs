@@ -70,9 +70,11 @@ pub(super) fn begin(title: &str, host_name: &str, device: &DeviceInfo) -> Shared
         "Client",
         "audio output",
         if cfg!(target_os = "android") {
-            "AAudio, Opus via MediaCodec (surround mixed to stereo)"
+            "AAudio, Opus via MediaCodec"
+        } else if cfg!(target_os = "linux") {
+            "Opus via libopus, ALSA surround or cpal"
         } else {
-            "Opus via cpal (stereo)"
+            "Opus via libopus, cpal"
         },
     );
     r.event(format!("launching {title}"));

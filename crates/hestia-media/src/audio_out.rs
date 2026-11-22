@@ -1,4 +1,4 @@
-//! PCM playback through the system audio API (cpal).
+//! Desktop PCM playback, with position-aware surround on Linux.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,6 +48,23 @@ impl Drop for CpalOutput {
 }
 
 fn run_output(reader: PcmReader, stop: Arc<AtomicBool>, ready: mpsc::Sender<Result<(), String>>) {
+    #[cfg(target_os = "linux")]
+    if reader.channels() > 2 {
+        match crate::alsa_surround::SurroundOutput::open(reader.channels()) {
+            Ok(output) => {
+                let _ = ready.send(Ok(()));
+                match output.play(&reader, &stop) {
+                    Ok(()) => return,
+                    Err(e) => warn!("ALSA surround output stopped, trying stereo: {e}"),
+                }
+            }
+            Err(e) => info!("surround unavailable on the default ALSA device, trying stereo: {e}"),
+        }
+    }
+
+    if stop.load(Ordering::Relaxed) {
+        return;
+    }
     let host = cpal::default_host();
     let Some(device) = host.default_output_device() else {
         let _ = ready.send(Err("no audio output device".into()));
@@ -57,13 +74,14 @@ fn run_output(reader: PcmReader, stop: Arc<AtomicBool>, ready: mpsc::Sender<Resu
     let config = device
         .supported_output_configs()
         .ok()
-        .and_then(|mut configs| {
-            configs.find(|c| {
-                c.channels() >= 1
-                    && c.min_sample_rate() <= wanted
-                    && c.max_sample_rate() >= wanted
-                    && matches!(c.sample_format(), cpal::SampleFormat::F32 | cpal::SampleFormat::I16)
-            })
+        .and_then(|configs| {
+            configs
+                .filter(|c| {
+                    c.min_sample_rate() <= wanted
+                        && c.max_sample_rate() >= wanted
+                        && matches!(c.sample_format(), cpal::SampleFormat::F32 | cpal::SampleFormat::I16)
+                })
+                .min_by_key(|c| (c.channels().abs_diff(2), c.sample_format() != cpal::SampleFormat::F32))
         })
         .map(|c| c.with_sample_rate(wanted));
     let Some(config) = config else {
@@ -80,7 +98,7 @@ fn run_output(reader: PcmReader, stop: Arc<AtomicBool>, ready: mpsc::Sender<Resu
             device.build_output_stream(
                 &stream_config,
                 move |out: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                    reader.read(out, channels, |s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16, 0)
+                    reader.read_stereo(out, channels, |s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16, 0)
                 },
                 on_error,
                 None,
@@ -90,7 +108,7 @@ fn run_output(reader: PcmReader, stop: Arc<AtomicBool>, ready: mpsc::Sender<Resu
             let reader = reader.clone();
             device.build_output_stream(
                 &stream_config,
-                move |out: &mut [f32], _: &cpal::OutputCallbackInfo| reader.read(out, channels, |s| s, 0.0),
+                move |out: &mut [f32], _: &cpal::OutputCallbackInfo| reader.read_stereo(out, channels, |s| s, 0.0),
                 on_error,
                 None,
             )
@@ -107,8 +125,9 @@ fn run_output(reader: PcmReader, stop: Arc<AtomicBool>, ready: mpsc::Sender<Resu
         }
     };
     info!(
-        "audio output: {} ({channels} ch, {format:?})",
-        device.name().unwrap_or_else(|_| "default".into())
+        "audio output: cpal {} (host {} ch, device {channels} ch, {format:?})",
+        device.name().unwrap_or_else(|_| "default".into()),
+        reader.channels()
     );
     let _ = ready.send(Ok(()));
     // cpal streams are not Send on every platform: keep it on this thread.

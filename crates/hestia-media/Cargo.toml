@@ -12,8 +12,8 @@ authors.workspace = true
 default = ["openh264"]
 # Software H.264 decoder (Cisco OpenH264, compiled from source).
 openh264 = ["dep:openh264"]
-# Opus decode + playback via cpal (needs libopus and ALSA headers on Linux).
-audio = ["dep:opus", "dep:cpal"]
+# Opus decode + desktop playback (needs libopus and ALSA headers on Linux).
+audio = ["dep:opus", "dep:cpal", "dep:alsa"]
 # Hardware H.264/HEVC/AV1 decoding through VA-API (Linux only; builds
 # against libva's headers and links libva, libva-drm and libgbm).
 vaapi = ["dep:cros-codecs"]
@@ -27,8 +27,11 @@ opus = { workspace = true, optional = true }
 cpal = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+alsa = { version = "0.10", optional = true }
 cros-codecs = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 # AMediaCodec + AImageReader (hardware video, Opus) and AAudio (playback).
-ndk = { version = "0.9", default-features = false, features = ["media", "audio", "api-level-26"] }
+ndk = { version = "0.9", default-features = false, features = ["media", "api-level-26"] }
+ndk-sys = { version = "0.6", features = ["audio"] }
+libloading = "0.8"

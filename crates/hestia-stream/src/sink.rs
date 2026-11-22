@@ -83,6 +83,7 @@ pub struct AudioFormat {
     pub streams: u8,
     pub coupled_streams: u8,
     pub samples_per_frame: u32,
+    /// Opus indices in playback order: FL FR FC LFE BL BR SL SR.
     pub mapping: [u8; 8],
 }
 

@@ -9,7 +9,7 @@ use ndk::media::media_codec::{
 };
 use ndk::media::media_format::MediaFormat;
 
-use crate::audio_fifo::{CHANNELS, SAMPLE_RATE};
+use crate::audio_fifo::SAMPLE_RATE;
 use crate::audio_playback::{AudioDecoder, DecodedAudio};
 
 /// How long a packet may wait for a free decoder input buffer.
@@ -110,7 +110,11 @@ impl Decoder {
                 Ok(DequeuedOutputBufferInfoResult::OutputFormatChanged) => {
                     let format = self.codec.output_format();
                     if let Some(channels) = format.i32("channel-count").filter(|&c| c > 0) {
-                        self.channels = channels as usize;
+                        let channels = channels as usize;
+                        if self.channels != channels {
+                            out.clear();
+                            self.channels = channels;
+                        }
                     }
                     info!(
                         "Opus decoder output: {} ch, {} Hz",
@@ -167,10 +171,10 @@ impl AudioDecoder for MediaCodecOpusDecoder {
         self.pcm.clear();
         if packet.is_empty() {
             // Lost packet: a packet's worth of silence keeps the timing.
-            self.pcm.resize(self.frame_samples * CHANNELS, 0.0);
+            self.pcm.resize(self.frame_samples * decoder.channels, 0.0);
             return Ok(DecodedAudio {
                 samples: &self.pcm,
-                channels: CHANNELS,
+                channels: decoder.channels,
             });
         }
         let result = decoder
