@@ -194,9 +194,10 @@ fn fill_sample_data(ui: &AppWindow) {
     ui.set_pair_busy(true);
 }
 
-/// Lets timers fire and animations (page fades, dialogs, focus) finish.
+/// Lets timers fire and animations (page arrivals, dialogs, the splash
+/// fading out) finish.
 fn settle() {
-    for _ in 0..8 {
+    for _ in 0..12 {
         slint::platform::update_timers_and_animations();
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -221,6 +222,14 @@ fn render(window: &MinimalSoftwareWindow, size: PhysicalSize) -> Vec<Rgb8Pixel> 
         renderer.render(&mut pixels, w);
     });
     pixels
+}
+
+/// Draws a frame so a new screen is built (as the app would on its next
+/// frame), then lets it arrive: pages focus their first control a moment
+/// after they're built when the remote is in use.
+fn show(window: &MinimalSoftwareWindow, size: PhysicalSize) {
+    render(window, size);
+    settle();
 }
 
 fn save(window: &MinimalSoftwareWindow, size: PhysicalSize, path: &Path) {
@@ -308,20 +317,20 @@ fn main() {
     window.set_size(size);
 
     ui.set_screen(0);
-    settle();
+    show(&window, size);
     press(&window, Key::DownArrow, 1);
     save(&window, size, &out.join("tv-hosts.png"));
 
     // From here on the remote has been used, so pages open with the focus
     // already placed (Resume on the host's page).
     ui.set_screen(1);
-    settle();
+    show(&window, size);
     // Down from Resume to the first poster.
     press(&window, Key::DownArrow, 1);
     save(&window, size, &out.join("tv-apps.png"));
 
     ui.set_screen(3);
-    settle();
+    show(&window, size);
     // Down from Preset to the bitrate slider.
     press(&window, Key::DownArrow, 4);
     save(&window, size, &out.join("tv-settings.png"));
@@ -332,12 +341,12 @@ fn main() {
     press(&window, Key::Escape, 1);
 
     ui.set_screen(5);
-    settle();
+    show(&window, size);
     press(&window, Key::DownArrow, 2);
     save(&window, size, &out.join("tv-tools.png"));
 
     ui.set_screen(4);
-    settle();
+    show(&window, size);
     ui.set_stream_menu_open(true);
     settle();
     press(&window, Key::DownArrow, 2);

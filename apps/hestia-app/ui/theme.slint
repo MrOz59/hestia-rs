@@ -2,6 +2,28 @@
 // accent and focus that glows like an ember, so a TV remote, a keyboard or
 // a game controller always shows where it is. Every control here works with
 // touch, the mouse and the arrow keys / D-pad alike.
+//
+// Motion and effects stay cheap on TV boxes and phones alike. The rules,
+// from how Slint's renderers (Skia on Android, FemtoVG on the desktop)
+// draw:
+// * A drop shadow is a texture, one per element whose shadow colour isn't
+//   transparent, even when it hides behind the element. Only the focused
+//   control has a shadow colour.
+// * That texture is drawn again whenever the shadow's blur, colour or size,
+//   or the element's position, background or border, changes. So a blur
+//   never animates, and something that moves while it casts a shadow moves
+//   a parent (`slot`), never the shadowed element itself.
+// * `opacity` below 1 on an element with children draws it through an
+//   offscreen layer, every frame. Fades use a veil (a plain rectangle in
+//   the colour underneath) or a childless element; disabled controls dim
+//   their colours.
+// * Translation and `transform-scale` are free: they need no layout and no
+//   new textures. Motion here is made of them.
+// * Over the stream, everything redraws with every picture: overlays there
+//   only move, without shadows or fades.
+// * Nothing animates continuously; `Loader` steps on a slow timer.
+// * Android's "Remove animations" turns every `animate` off (Slint reads
+//   it); timers then only flip states.
 
 import "../fonts/Outfit-Regular.ttf";
 import "../fonts/Outfit-Medium.ttf";
@@ -197,7 +219,9 @@ export component ActionButton inherits Focusable {
     in property <string> text;
     in property <string> icon;
     in property <int> kind: 0;
-    property <color> fg: root.kind == 1 ? Theme.on-accent : (root.kind == 2 ? Theme.danger : Theme.text);
+    property <color> fg: !root.enabled
+        ? (root.kind == 1 ? Theme.accent.transparentize(0.4) : (root.kind == 2 ? Theme.danger.transparentize(0.5) : Theme.faint))
+        : (root.kind == 1 ? Theme.on-accent : (root.kind == 2 ? Theme.danger : Theme.text));
     property <bool> lit: root.hovered || root.focused;
 
     accessible-role: button;
@@ -207,22 +231,24 @@ export component ActionButton inherits Focusable {
     preferred-width: content.preferred-width;
     horizontal-stretch: 0;
     border-radius: Theme.radius-sm;
-    opacity: root.enabled ? 1.0 : 0.4;
-    background: root.kind == 1
-        ? (root.pressed ? Theme.accent-pressed : (root.lit ? Theme.accent-hover : Theme.accent))
-        : root.kind == 2
-            ? (root.pressed || root.lit ? Theme.danger.transparentize(0.74) : Theme.danger.transparentize(0.88))
-            : root.kind == 3
-                ? (root.pressed ? Theme.card-hover : (root.lit ? Theme.card : Theme.card.transparentize(1)))
-                : (root.pressed ? Theme.border : (root.lit ? Theme.card-hover : Theme.card));
+    background: !root.enabled
+        ? (root.kind == 1 ? Theme.accent.transparentize(0.82) : (root.kind == 2 ? Theme.danger.transparentize(0.94) : (root.kind == 3 ? Theme.card.transparentize(1) : Theme.card.transparentize(0.45))))
+        : root.kind == 1
+            ? (root.pressed ? Theme.accent-pressed : (root.lit ? Theme.accent-hover : Theme.accent))
+            : root.kind == 2
+                ? (root.pressed || root.lit ? Theme.danger.transparentize(0.74) : Theme.danger.transparentize(0.88))
+                : root.kind == 3
+                    ? (root.pressed ? Theme.card-hover : (root.lit ? Theme.card : Theme.card.transparentize(1)))
+                    : (root.pressed ? Theme.border : (root.lit ? Theme.card-hover : Theme.card));
     border-width: root.focused ? 2px : (root.kind == 0 || root.kind == 2 ? 1px : 0px);
     border-color: root.focused
         ? (root.kind == 1 ? Theme.text : Theme.accent)
-        : (root.kind == 2 ? Theme.danger.transparentize(0.6) : Theme.border);
-    drop-shadow-blur: root.focused ? 18px : 0px;
-    drop-shadow-color: Theme.glow;
+        : (root.kind == 2 ? Theme.danger.transparentize(root.enabled ? 0.6 : 0.8) : Theme.border.transparentize(root.enabled ? 0 : 0.5));
+    drop-shadow-blur: 18px;
+    drop-shadow-color: root.focused ? Theme.glow : transparent;
+    transform-scale: root.pressed && root.enabled ? 0.96 : 1;
     animate background, border-color { duration: 120ms; }
-    animate drop-shadow-blur { duration: 160ms; }
+    animate transform-scale { duration: 110ms; easing: ease-out-quad; }
 
     content := HorizontalLayout {
         padding-left: root.icon != "" && root.text != "" ? 14px : 16px;
@@ -263,22 +289,22 @@ export component IconButton inherits Focusable {
     height: Theme.control-height;
     horizontal-stretch: 0;
     border-radius: self.height / 2;
-    opacity: root.enabled ? 1.0 : 0.4;
     background: root.kind == 1
-        ? (root.pressed ? Theme.accent-pressed : (root.lit ? Theme.accent-hover : Theme.accent))
+        ? (root.pressed ? Theme.accent-pressed : (root.lit ? Theme.accent-hover : Theme.accent.transparentize(root.enabled ? 0 : 0.8)))
         : (root.pressed ? Theme.border : (root.lit ? Theme.card-hover : Theme.card.transparentize(1)));
     border-width: root.focused ? 2px : 0px;
     border-color: root.kind == 1 ? Theme.text : Theme.accent;
-    drop-shadow-blur: root.focused ? 18px : 0px;
-    drop-shadow-color: Theme.glow;
+    drop-shadow-blur: 18px;
+    drop-shadow-color: root.focused ? Theme.glow : transparent;
+    transform-scale: root.pressed && root.enabled ? 0.9 : 1;
     animate background { duration: 120ms; }
-    animate drop-shadow-blur { duration: 160ms; }
+    animate transform-scale { duration: 110ms; easing: ease-out-quad; }
 
     Icon {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         name: root.icon;
-        tint: root.tint;
+        tint: root.enabled ? root.tint : Theme.faint;
     }
 }
 
@@ -317,12 +343,23 @@ export component Chip inherits Rectangle {
     }
 }
 
-// Three embers pulsing: work in progress.
+// Three embers pulsing: work in progress. A timer steps the pulse 18 times
+// a second: `animation-tick()` would redraw the window at the display's full
+// rate (120 Hz on many phones) for as long as it shows, and a pairing
+// dialog can wait for minutes.
 export component Loader inherits Rectangle {
     in property <length> dot: 8px;
     in property <color> tint: Theme.accent;
     property <length> step: root.dot * 1.8;
-    property <float> phase: Math.mod(animation-tick() / 1ms, 1100) / 1100;
+    property <int> tick;
+    property <float> phase: root.tick / 20;
+    Timer {
+        interval: 55ms;
+        running: true;
+        triggered => {
+            root.tick = Math.mod(root.tick + 1, 20);
+        }
+    }
     width: root.dot + 2 * root.step;
     height: root.dot;
     horizontal-stretch: 0;
@@ -407,12 +444,11 @@ export component TextField inherits Rectangle {
     min-height: root.multiline ? 104px : Theme.control-height;
     preferred-height: root.multiline ? 104px : Theme.control-height;
     border-radius: Theme.radius-sm;
-    background: Theme.bg;
-    opacity: root.enabled ? 1.0 : 0.5;
+    background: root.enabled ? Theme.bg : Theme.bg.transparentize(0.5);
     border-width: root.focused ? 2px : 1px;
-    border-color: input.has-focus ? Theme.accent : (fs.has-focus ? Theme.accent : (area.has-hover ? Theme.faint : Theme.border));
-    drop-shadow-blur: fs.has-focus ? 18px : 0px;
-    drop-shadow-color: Theme.glow;
+    border-color: input.has-focus ? Theme.accent : (fs.has-focus ? Theme.accent : (area.has-hover ? Theme.faint : Theme.border.transparentize(root.enabled ? 0 : 0.5)));
+    drop-shadow-blur: 18px;
+    drop-shadow-color: fs.has-focus ? Theme.glow : transparent;
     animate border-color { duration: 120ms; }
 
     fs := FocusScope {
@@ -478,7 +514,7 @@ export component TextField inherits Rectangle {
             input-type: root.input-type;
             single-line: !root.multiline;
             wrap: root.multiline ? TextWrap.word-wrap : TextWrap.no-wrap;
-            color: Theme.text;
+            color: root.enabled ? Theme.text : Theme.faint;
             font-size: Theme.body-size;
             vertical-alignment: root.multiline ? TextVerticalAlignment.top : TextVerticalAlignment.center;
             selection-background-color: Theme.accent.transparentize(0.55);
@@ -497,7 +533,10 @@ export component TextField inherits Rectangle {
 }
 
 // Modal card over a scrim: centred on wide screens, a sheet on phones.
-// It fades and rises in; tapping the scrim calls `dismissed`.
+// It rises and grows into place while the scrim darkens and the contents
+// fade in; tapping the scrim calls `dismissed`. The card's shadow sits on an
+// element that never moves inside the animated `slot`, so its texture is
+// rendered once, not on every frame of the motion.
 export component Modal inherits Rectangle {
     in property <length> card-width: 440px;
     // Keep the focus on the dialog itself (nothing glows) until an arrow
@@ -512,7 +551,7 @@ export component Modal inherits Rectangle {
     property <bool> sheet: Theme.compact;
 
     background: root.shown ? Theme.scrim : Theme.scrim.transparentize(1);
-    animate background { duration: 180ms; }
+    animate background { duration: 200ms; easing: ease-out-quad; }
     Timer {
         interval: 16ms;
         running: !root.shown;
@@ -548,34 +587,96 @@ export component Modal inherits Rectangle {
         }
     }
 
-    card := Rectangle {
+    slot := Rectangle {
         width: root.sheet ? root.width : Math.min(root.card-width, root.width - 48px);
         height: Math.min(content.preferred-height, root.height - (root.sheet ? 24px : 48px));
         x: (root.width - self.width) / 2;
         y: root.sheet
-            ? root.height - self.height + (root.shown ? 0px : 40px)
-            : (root.height - self.height) / 2 + (root.shown ? 0px : 24px);
-        opacity: root.shown ? 1 : 0;
-        animate y { duration: 220ms; easing: cubic-bezier(0.2, 0.9, 0.3, 1); }
-        animate opacity { duration: 160ms; }
-        border-radius: Theme.radius + 4px;
-        background: Theme.surface;
-        border-width: 1px;
-        border-color: Theme.border;
-        drop-shadow-blur: 40px;
-        drop-shadow-offset-y: 12px;
-        drop-shadow-color: #000000a0;
-        clip: true;
+            ? root.height - self.height + (root.shown ? 0px : Math.min(self.height, 120px))
+            : (root.height - self.height) / 2 + (root.shown ? 0px : 18px);
+        transform-scale: root.shown || root.sheet ? 1 : 0.94;
+        animate y { duration: 300ms; easing: cubic-bezier(0.2, 0.9, 0.25, 1); }
+        animate transform-scale { duration: 300ms; easing: cubic-bezier(0.2, 0.9, 0.25, 1); }
 
-        // Swallow taps so they don't reach the scrim.
-        TouchArea { }
+        card := Rectangle {
+            border-radius: Theme.radius + 4px;
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: Theme.border;
+            drop-shadow-blur: 40px;
+            drop-shadow-offset-y: 12px;
+            drop-shadow-color: #000000a0;
+            clip: true;
 
-        content := VerticalLayout {
-            padding: Theme.compact ? 20px : 26px;
-            padding-bottom: Theme.compact ? 28px : 26px;
-            spacing: 14px;
-            @children
+            // Swallow taps so they don't reach the scrim.
+            TouchArea { }
+
+            content := VerticalLayout {
+                padding: Theme.compact ? 20px : 26px;
+                padding-bottom: Theme.compact ? 28px : 26px;
+                spacing: 14px;
+                @children
+            }
+
+            // The contents fade in under a veil of the card's own colour: a
+            // plain rectangle, where `opacity` on the card would render it
+            // through an offscreen layer.
+            Rectangle {
+                x: 1px;
+                y: 1px;
+                width: parent.width - 2px;
+                height: parent.height - 2px;
+                border-radius: Theme.radius + 3px;
+                background: Theme.surface;
+                opacity: root.shown ? 0 : 1;
+                visible: self.opacity > 0;
+                animate opacity { duration: 220ms; delay: 40ms; easing: ease-out-quad; }
+            }
         }
+    }
+}
+
+// A page. It slides a little in from the side it comes from (`enter-dir`:
+// 1 forward, from the right; -1 back, from the left; 0 in place) under a
+// veil of the background that lifts. Moving a page costs nothing but the
+// redraw, and the veil is a single rectangle, where fading the whole page
+// with `opacity` would render it through a full-screen offscreen layer on
+// every frame of the fade.
+//
+// Arriving with the remote or a keyboard, the page focuses its first
+// control (`focus-first`). That happens here, after the page is built: a
+// change made in an `init` doesn't reach the change handlers of controls
+// built before it, so they would never take the focus.
+export component Page inherits Rectangle {
+    in property <int> enter-dir;
+    callback focus-first();
+    property <int> dir;
+    property <bool> arrived;
+
+    init => {
+        root.dir = root.enter-dir;
+    }
+    // A frame or two after creation, so the first frame draws the start.
+    Timer {
+        interval: 30ms;
+        running: !root.arrived;
+        triggered => {
+            root.arrived = true;
+            if (Nav.keyboard) {
+                root.focus-first();
+            }
+        }
+    }
+    x: root.arrived ? 0px : root.dir * (Theme.compact ? 28px : 48px);
+    animate x { duration: 340ms; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+
+    Rectangle {
+        // Above everything the page adds, overlays included.
+        z: 1000;
+        background: Theme.bg;
+        opacity: root.arrived ? 0 : 1;
+        visible: self.opacity > 0;
+        animate opacity { duration: 240ms; easing: ease-out-quad; }
     }
 }
 

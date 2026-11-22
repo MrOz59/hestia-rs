@@ -246,6 +246,16 @@ export component AppWindow inherits Window {
         root.stream-keyboard(root.stream-keyboard-open);
     }
 
+    // Page transitions: a page slides in from the right going deeper and
+    // from the left coming back. `page-depth` is the depth of the page shown
+    // last: each page reads it as it's created, then its `init` below sets
+    // it. Hosts 0; apps and settings 1; launching, tools and the report 2;
+    // the stream 3, which pages after it don't slide away from.
+    property <int> page-depth: 0;
+    pure function slide-dir(depth: int) -> int {
+        return root.page-depth >= 3 ? 0 : (depth > root.page-depth ? 1 : (depth < root.page-depth ? -1 : 0));
+    }
+
     // Pages hold the focus themselves (remote navigation) and take it on
     // creation; after a dialog closes they get it back.
     property <int> nav-refocus;
@@ -341,6 +351,10 @@ export component AppWindow inherits Window {
             width: 100%;
             height: 100%;
             refocus: root.nav-refocus;
+            enter-dir: root.slide-dir(0);
+            init => {
+                root.page-depth = 0;
+            }
             hosts: root.hosts;
             scanning: root.scanning;
             open-host(id) => {
@@ -363,6 +377,10 @@ export component AppWindow inherits Window {
             width: 100%;
             height: 100%;
             refocus: root.nav-refocus;
+            enter-dir: root.slide-dir(1);
+            init => {
+                root.page-depth = 1;
+            }
             host-name: root.host-name;
             host-detail: root.host-detail;
             chips: root.host-chips;
@@ -396,6 +414,10 @@ export component AppWindow inherits Window {
             width: 100%;
             height: 100%;
             refocus: root.nav-refocus;
+            enter-dir: root.slide-dir(2);
+            init => {
+                root.page-depth = 2;
+            }
             title: root.session-title;
             subtitle: root.session-subtitle;
             lines: root.session-lines;
@@ -411,6 +433,9 @@ export component AppWindow inherits Window {
         if root.screen == 4: StreamView {
             width: 100%;
             height: 100%;
+            init => {
+                root.page-depth = 3;
+            }
             frame: root.stream-frame;
             stats: root.stream-stats;
             status: root.stream-status;
@@ -494,6 +519,10 @@ export component AppWindow inherits Window {
             width: 100%;
             height: 100%;
             refocus: root.nav-refocus;
+            enter-dir: root.slide-dir(2);
+            init => {
+                root.page-depth = 2;
+            }
             title: root.report-title;
             summary: root.report-summary;
             path: root.report-path;
@@ -516,6 +545,10 @@ export component AppWindow inherits Window {
             width: 100%;
             height: 100%;
             refocus: root.nav-refocus;
+            enter-dir: root.slide-dir(2);
+            init => {
+                root.page-depth = 2;
+            }
             host-name: root.host-name;
             loading: root.tools-loading;
             busy: root.tools-busy;
@@ -560,6 +593,10 @@ export component AppWindow inherits Window {
             width: 100%;
             height: 100%;
             refocus: root.nav-refocus;
+            enter-dir: root.slide-dir(1);
+            init => {
+                root.page-depth = 1;
+            }
             resolution-options: root.cfg-resolution-options;
             fps-options: root.cfg-fps-options;
             preset <=> root.cfg-preset;
@@ -948,6 +985,9 @@ export component AppWindow inherits Window {
         // ---------------------------------------------------------------
         // Toast
         // ---------------------------------------------------------------
+        // The box slides up; the card inside it never moves relative to it,
+        // so its shadow texture is drawn once. The text fades in under a veil
+        // of the card's colour instead of an `opacity` layer.
         if root.toast != "": toast-box := Rectangle {
             property <bool> shown;
             Timer {
@@ -959,19 +999,20 @@ export component AppWindow inherits Window {
             }
             x: (root.width - self.width) / 2;
             // Above the floating "Add host" button on phones.
-            y: root.height - self.height - (Theme.compact && root.screen == 0 ? 100px : 28px) + (self.shown ? 0px : 16px);
+            y: root.height - self.height - (Theme.compact && root.screen == 0 ? 100px : 28px) + (self.shown ? 0px : 24px);
             width: Math.min(toast-row.preferred-width, root.width - 32px);
             height: toast-row.preferred-height;
-            opacity: self.shown ? 1 : 0;
-            animate y { duration: 200ms; easing: ease-out; }
-            animate opacity { duration: 160ms; }
-            border-radius: 14px;
-            background: Theme.card-hover;
-            border-width: 1px;
-            border-color: Theme.border;
-            drop-shadow-blur: 24px;
-            drop-shadow-offset-y: 6px;
-            drop-shadow-color: #00000090;
+            animate y { duration: 260ms; easing: cubic-bezier(0.2, 0.9, 0.25, 1); }
+
+            Rectangle {
+                border-radius: 14px;
+                background: Theme.card-hover;
+                border-width: 1px;
+                border-color: Theme.border;
+                drop-shadow-blur: 24px;
+                drop-shadow-offset-y: 6px;
+                drop-shadow-color: #00000090;
+            }
             toast-row := HorizontalLayout {
                 padding-left: 16px;
                 padding-right: 18px;
@@ -995,54 +1036,86 @@ export component AppWindow inherits Window {
                     wrap: word-wrap;
                 }
             }
+            Rectangle {
+                x: 1px;
+                y: 1px;
+                width: parent.width - 2px;
+                height: parent.height - 2px;
+                border-radius: 13px;
+                background: Theme.card-hover;
+                opacity: toast-box.shown ? 0 : 1;
+                visible: self.opacity > 0;
+                animate opacity { duration: 200ms; delay: 60ms; easing: ease-out-quad; }
+            }
         }
 
         // ---------------------------------------------------------------
         // Startup overlay
         // ---------------------------------------------------------------
-        if root.starting: Rectangle {
+        // Fades out once the app is ready. The background and the glow are
+        // plain rectangles (their opacity costs no layer); only the small
+        // block in the middle fades as one.
+        splash := Rectangle {
             width: 100%;
             height: 100%;
-            background: Theme.bg;
-            TouchArea { }
+            visible: root.starting || splash-bg.opacity > 0;
+            splash-bg := Rectangle {
+                background: Theme.bg;
+                opacity: root.starting ? 1 : 0;
+                animate opacity { duration: 360ms; delay: 80ms; easing: ease-out-quad; }
+            }
+            TouchArea {
+                enabled: root.starting;
+            }
             Rectangle {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2 - 60px;
                 width: 520px;
                 height: 520px;
                 background: @radial-gradient(circle, Theme.accent.transparentize(0.84) 0%, Theme.accent.transparentize(1) 65%);
+                opacity: splash-bg.opacity;
             }
-            VerticalLayout {
-                alignment: center;
-                spacing: 18px;
-                HorizontalLayout {
-                    alignment: center;
-                    Icon {
-                        width: 64px;
-                        height: 64px;
-                        name: "flame";
-                        tint: Theme.accent;
+            splash-block := Rectangle {
+                width: Math.min(parent.width - 48px, 420px);
+                height: splash-content.preferred-height;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2 - (root.starting ? 0px : 16px);
+                opacity: root.starting ? 1 : 0;
+                animate opacity { duration: 220ms; easing: ease-out-quad; }
+                animate y { duration: 360ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+                splash-content := VerticalLayout {
+                    spacing: 18px;
+                    HorizontalLayout {
+                        alignment: center;
+                        Icon {
+                            width: 64px;
+                            height: 64px;
+                            name: "flame";
+                            tint: Theme.accent;
+                        }
                     }
-                }
-                Text {
-                    text: "Hestia";
-                    color: Theme.text;
-                    font-size: 40px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                }
-                HorizontalLayout {
-                    alignment: center;
-                    Loader {
-                        dot: 8px;
+                    Text {
+                        text: "Hestia";
+                        color: Theme.text;
+                        font-size: 40px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
                     }
-                }
-                Text {
-                    text: root.starting-text;
-                    color: Theme.muted;
-                    font-size: Theme.body-size;
-                    horizontal-alignment: center;
-                    wrap: word-wrap;
+                    // Only while starting: its timer would keep redrawing.
+                    HorizontalLayout {
+                        alignment: center;
+                        height: 8px;
+                        if root.starting: Loader {
+                            dot: 8px;
+                        }
+                    }
+                    Text {
+                        text: root.starting-text;
+                        color: Theme.muted;
+                        font-size: Theme.body-size;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
                 }
             }
         }
