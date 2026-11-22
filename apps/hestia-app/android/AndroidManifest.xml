@@ -26,23 +26,31 @@
         android:label="Hestia RS"
         android:icon="@mipmap/ic_launcher"
         android:banner="@drawable/banner"
-        android:hasCode="false"
         android:extractNativeLibs="true"
         android:appCategory="game">
 
         <!-- Rotation, keyboards and display changes must not recreate the
              activity (that would restart the native app mid-stream). -->
         <activity
+            android:name=".HestiaActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:supportsPictureInPicture="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|touchscreen">
+            <meta-data android:name="android.app.lib_name" android:value="hestia_app" />
+        </activity>
+        <!-- Keep the launcher component from earlier APKs. NativeActivity
+             reads the native library name from the intent's component. -->
+        <activity-alias
             android:name="android.app.NativeActivity"
             android:exported="true"
-            android:launchMode="singleTask"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|touchscreen">
+            android:targetActivity=".HestiaActivity">
             <meta-data android:name="android.app.lib_name" android:value="hestia_app" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
     </application>
 </manifest>

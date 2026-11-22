@@ -165,6 +165,7 @@ component QuickTile inherits Focusable {
 // the view tells it when it has the input.
 export component StreamView inherits Rectangle {
     in property <image> frame;
+    in property <bool> picture-in-picture: false;
     in property <string> stats;
     // Shown over the video while there is no picture yet.
     in property <string> status;
@@ -228,7 +229,9 @@ export component StreamView inherits Rectangle {
     in-out property <bool> menu-open: false;
     property <float> frame-w: root.frame.width > 0 ? root.frame.width : 16;
     property <float> frame-h: root.frame.height > 0 ? root.frame.height : 9;
-    property <float> scale: root.video-scale == 1
+    property <float> picture-zoom: root.picture-in-picture ? 1 : root.zoom;
+    property <bool> stretch-picture: !root.picture-in-picture && root.video-scale == 2;
+    property <float> scale: !root.picture-in-picture && root.video-scale == 1
         ? max(root.width / 1px / root.frame-w, root.height / 1px / root.frame-h)
         : min(root.width / 1px / root.frame-w, root.height / 1px / root.frame-h);
     property <[{id: string, label: string}]> keys: [
@@ -274,7 +277,10 @@ export component StreamView inherits Rectangle {
             root.menu-focus = -1;
             focus.focus();
         }
-        root.input-focus(!root.menu-open && focus.has-focus);
+        root.input-focus(!root.picture-in-picture && !root.menu-open && focus.has-focus);
+    }
+    changed picture-in-picture => {
+        root.input-focus(!root.picture-in-picture && !root.menu-open && focus.has-focus);
     }
     pure function menu-ok(i: int) -> bool {
         return i >= 3 && i <= 13 && ((i != 4 && i != 5) || root.clipboard-actions) && (i != 13 || root.mouse-capture-available);
@@ -347,12 +353,15 @@ export component StreamView inherits Rectangle {
         }
         // Window focus comes and goes, the menu's entries take the focus.
         focus-gained => {
-            root.input-focus(!root.menu-open);
+            root.input-focus(!root.picture-in-picture && !root.menu-open);
         }
         focus-lost => {
             root.input-focus(false);
         }
         key-pressed(event) => {
+            if (root.picture-in-picture) {
+                return accept;
+            }
             // Android back: close the keyboard bar, else toggle the menu.
             if (event.text == Key.Back) {
                 if (root.keyboard-open) {
@@ -371,7 +380,7 @@ export component StreamView inherits Rectangle {
             accept
         }
         key-released(event) => {
-            if (event.text == Key.Back) {
+            if (root.picture-in-picture || event.text == Key.Back) {
                 return accept;
             }
             root.key-event(event.text, false, false, event.modifiers.control, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta);
@@ -379,12 +388,14 @@ export component StreamView inherits Rectangle {
         }
 
         video := Rectangle {
-            width: (root.video-scale == 2 ? parent.width : root.frame-w * root.scale * 1px) * root.zoom;
-            height: (root.video-scale == 2 ? parent.height : root.frame-h * root.scale * 1px) * root.zoom;
-            x: (parent.width - self.width) / 2 + root.pan-x * 1px;
+            width: (root.stretch-picture ? parent.width : root.frame-w * root.scale * 1px) * root.picture-zoom;
+            height: (root.stretch-picture ? parent.height : root.frame-h * root.scale * 1px) * root.picture-zoom;
+            x: (parent.width - self.width) / 2 + (root.picture-in-picture ? 0 : root.pan-x * 1px);
             // Portrait with the on-screen controller: the picture goes to
             // the top, the controller under it (same ratio as the layout).
-            y: (root.pad-visible && parent.height >= parent.width * 1.3 ? (self.height / root.zoom - self.height) / 2 : (parent.height - self.height) / 2) + root.pan-y * 1px;
+            y: (!root.picture-in-picture && root.pad-visible && parent.height >= parent.width * 1.3
+                ? (self.height / root.picture-zoom - self.height) / 2
+                : (parent.height - self.height) / 2) + (root.picture-in-picture ? 0 : root.pan-y * 1px);
 
             Image {
                 width: 100%;
@@ -397,6 +408,7 @@ export component StreamView inherits Rectangle {
         // The whole view takes input: in trackpad mode the black bars are
         // part of the pad, and absolute positions are clamped to the video.
         TouchArea {
+            enabled: !root.picture-in-picture;
             mouse-cursor: none;
             pointer-event(event) => {
                 root.pointer(
@@ -424,7 +436,7 @@ export component StreamView inherits Rectangle {
     }
 
     // On-screen controller (drawn only; touches reach the area above).
-    if root.pad-visible: Rectangle {
+    if !root.picture-in-picture && root.pad-visible: Rectangle {
         width: 100%;
         height: 100%;
         for c in root.pad-controls: Rectangle {
@@ -531,7 +543,7 @@ export component StreamView inherits Rectangle {
         }
     }
 
-    if root.show-stats && root.stats != "" && !root.keyboard-open: Rectangle {
+    if !root.picture-in-picture && root.show-stats && root.stats != "" && !root.keyboard-open: Rectangle {
         x: 12px;
         // Under the menu button when the controller puts it in the middle.
         y: root.pad-visible && root.show-menu-button ? Theme.control-height + 20px : 12px;
@@ -558,7 +570,7 @@ export component StreamView inherits Rectangle {
     // Rises from below the edge. Over the video everything redraws with
     // each picture, so overlays here only move: an `opacity` fade would be
     // an offscreen layer on every frame, a shadow one more texture to draw.
-    if root.banner != "" && !root.keyboard-open: banner-box := Rectangle {
+    if !root.picture-in-picture && root.banner != "" && !root.keyboard-open: banner-box := Rectangle {
         property <bool> shown;
         Timer {
             interval: 16ms;
@@ -604,7 +616,7 @@ export component StreamView inherits Rectangle {
     // Shortcut keys while the keyboard is open: a slim row at the top, so
     // the on-screen keyboard (which types straight into the host) can't
     // cover it.
-    if root.keyboard-open: key-box := Rectangle {
+    if !root.picture-in-picture && root.keyboard-open: key-box := Rectangle {
         property <bool> shown;
         Timer {
             interval: 16ms;
@@ -655,7 +667,7 @@ export component StreamView inherits Rectangle {
     // Menu handle, top right: only when asked for in Settings (Back or
     // Escape open the menu otherwise). With the on-screen controller it
     // moves to the top centre, off the triggers.
-    if root.show-menu-button && !root.menu-open: Rectangle {
+    if !root.picture-in-picture && root.show-menu-button && !root.menu-open: Rectangle {
         x: root.pad-visible && !root.keyboard-open ? (parent.width - self.width) / 2 : parent.width - self.width - 12px;
         y: 12px;
         width: Theme.control-height;
@@ -689,7 +701,7 @@ export component StreamView inherits Rectangle {
     // drawer is off screen. No shadow and no fade: they would cost on every
     // video frame, and the dimming already sets the drawer apart.
     Rectangle {
-        visible: root.menu-open || panel.x < root.width;
+        visible: !root.picture-in-picture && (root.menu-open || panel.x < root.width);
         background: root.menu-open ? #0000007a : #00000000;
         animate background { duration: 240ms; easing: ease-out-quad; }
         TouchArea {
@@ -704,7 +716,7 @@ export component StreamView inherits Rectangle {
         height: root.height - 20px;
         x: root.menu-open ? root.width - self.width - 10px : root.width + 2px;
         y: 10px;
-        visible: root.menu-open || self.x < root.width;
+        visible: !root.picture-in-picture && (root.menu-open || self.x < root.width);
         animate x { duration: 320ms; easing: cubic-bezier(0.2, 0.9, 0.25, 1); }
         border-radius: Theme.radius + 2px;
         background: Theme.surface;

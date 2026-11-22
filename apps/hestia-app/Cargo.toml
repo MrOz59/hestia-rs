@@ -43,6 +43,7 @@ slint = { workspace = true, features = ["unstable-winit-030"] }
 [target.'cfg(target_os = "android")'.dependencies]
 slint = { workspace = true, features = ["backend-android-activity-06"] }
 android_logger.workspace = true
+jni = "0.21"
 # The (patched) backend Slint uses, for its input hook (game controllers)
 # and the TV remote's focus navigation.
 i-slint-backend-android-activity = "=1.19.0"
@@ -57,9 +58,8 @@ image.workspace = true
 slint-build.workspace = true
 
 # Used by `cargo apk build -p hestia-app --lib` for quick local arm64
-# builds. Release APKs (universal and per ABI, Android TV banner and
-# launcher entry) come from scripts/android-package.sh with
-# android/AndroidManifest.xml; keep the two in step.
+# builds. scripts/android-package.sh builds APKs with the PiP activity,
+# Android TV launcher and banner from android/AndroidManifest.xml.
 [package.metadata.android]
 package = "com.mroz59.hestia.rs"
 apk_name = "hestia-rs"

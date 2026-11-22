@@ -6,7 +6,7 @@ use super::android::with_helper;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod controllers {
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Mutex, RwLock};
 
     use hestia_core::stream::input::GamepadState;
 
@@ -14,14 +14,15 @@ mod controllers {
 
     pub(super) static ACTIVE: AtomicBool = AtomicBool::new(false);
     pub(super) static STATE: Mutex<Controllers> = Mutex::new(Controllers::new());
-    pub(super) static SINK: OnceLock<Box<dyn Fn(GamepadState) + Send + Sync>> = OnceLock::new();
+    type GamepadSink = Box<dyn Fn(GamepadState) + Send + Sync>;
+    pub(super) static SINK: RwLock<Option<GamepadSink>> = RwLock::new(None);
 
     pub(super) fn state() -> std::sync::MutexGuard<'static, Controllers> {
         STATE.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     pub(super) fn send(update: Option<GamepadState>) {
-        if let (Some(state), Some(sink)) = (update, SINK.get()) {
+        if let (Some(state), Some(sink)) = (update, SINK.read().unwrap().as_ref()) {
             sink(state);
         }
     }
@@ -42,7 +43,24 @@ mod controllers {
 /// Where controller state goes (the controller sends it to the stream).
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub fn set_gamepad_sink(sink: impl Fn(hestia_core::stream::input::GamepadState) + Send + Sync + 'static) {
-    let _ = controllers::SINK.set(Box::new(sink));
+    *controllers::SINK.write().unwrap() = Some(Box::new(sink));
+}
+
+/// Releases controller buttons and frees their slots when Android enters PiP.
+#[cfg(target_os = "android")]
+pub(crate) fn release_android_gamepads() {
+    let mut controllers = controllers::state();
+    let devices: Vec<_> = (0..crate::gamepad::MAX_CONTROLLERS as u8)
+        .filter_map(|index| controllers.device_of(index))
+        .collect();
+    for &device in &devices {
+        controllers::send(controllers.remove(device));
+    }
+    drop(controllers);
+    for device in devices {
+        rumble_device(device, 0, 0);
+    }
+    rumble_device(-1, 0, 0);
 }
 
 /// Controllers drive the host only while streaming; otherwise their d-pad

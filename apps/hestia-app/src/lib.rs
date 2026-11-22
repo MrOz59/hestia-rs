@@ -7,6 +7,8 @@
 //! presentation — is `hestia-frontend`, which knows no toolkit; see
 //! `docs/FRONTENDS.md` for writing another shell.
 
+#[cfg(target_os = "android")]
+mod android_pip;
 #[cfg(not(target_os = "android"))]
 mod desktop_input;
 #[cfg(not(target_os = "android"))]
@@ -34,7 +36,15 @@ pub fn pad_preview(width: f32, height: f32) -> Vec<PadControl> {
 }
 
 /// Builds the window and runs the event loop until it closes.
+#[cfg(not(target_os = "android"))]
 pub fn run(data_dir: PathBuf) -> Result<(), slint::PlatformError> {
+    run_window(data_dir)
+}
+
+fn run_window(
+    data_dir: PathBuf,
+    #[cfg(target_os = "android")] app: &slint::android::AndroidApp,
+) -> Result<(), slint::PlatformError> {
     // Desktop: keys by position, every finger, mouse capture (winit, below
     // Slint). Must come before the window.
     #[cfg(not(target_os = "android"))]
@@ -49,13 +59,18 @@ pub fn run(data_dir: PathBuf) -> Result<(), slint::PlatformError> {
     gl_video::install(&ui, gpu_window.clone());
     let controller = Controller::new(Arc::new(slint_ui::SlintUi::new(&ui)), gpu_window);
     slint_ui::wire(&ui, &controller);
+    #[cfg(target_os = "android")]
+    let _pip = android_pip::install(app, &ui, &controller);
     #[cfg(not(target_os = "android"))]
     desktop_input::connect(&controller);
     // Desktop: game controllers straight from evdev.
     #[cfg(target_os = "linux")]
     hestia_frontend::desktop_pads::start();
     controller.start(data_dir);
-    ui.run()
+    let result = ui.run();
+    #[cfg(target_os = "android")]
+    controller.stream_disconnect();
+    result
 }
 
 #[cfg(target_os = "android")]
@@ -73,15 +88,17 @@ fn android_main(app: slint::android::AndroidApp) {
     hestia_core::nvhttp::http::set_route_hook(hestia_frontend::platform::route_for);
     // Game controllers, keyboards by position, every finger and pens reach
     // the host through the (patched) backend's hook.
-    i_slint_backend_android_activity::set_input_hook(hestia_frontend::platform::android_input_hook);
+    i_slint_backend_android_activity::set_input_hook(|event| {
+        android_pip::blocks_input() || hestia_frontend::platform::android_input_hook(event)
+    });
     let data_dir = app
         .internal_data_path()
         .unwrap_or_else(|| PathBuf::from("/data/local/tmp/hestia-rs"));
-    if let Err(e) = slint::android::init(app) {
+    if let Err(e) = slint::android::init(app.clone()) {
         log::error!("failed to initialise Slint on Android: {e}");
         return;
     }
-    if let Err(e) = run(data_dir) {
+    if let Err(e) = run_window(data_dir, &app) {
         log::error!("Hestia exited with an error: {e}");
     }
 }

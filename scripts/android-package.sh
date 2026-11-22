@@ -6,7 +6,7 @@
 #   scripts/android-package.sh <libs-dir> <out-dir> <version-code> <version-name>
 #
 # <libs-dir>/<abi>/libhestia_app.so for any of arm64-v8a, armeabi-v7a,
-# x86_64, x86. Needs ANDROID_HOME (build-tools 34, platform 34) and, to
+# x86_64, x86. Needs a JDK, ANDROID_HOME (build-tools 34, platform 34) and, to
 # sign, ANDROID_KEYSTORE (path) + ANDROID_KEYSTORE_PASSWORD; the key alias
 # is ANDROID_KEY_ALIAS when the keystore holds more than one, and the key's
 # own password ANDROID_KEY_PASSWORD when it differs from the store's.
@@ -36,13 +36,20 @@ if [ ${#abis[@]} -eq 0 ]; then
 fi
 echo "ABIs: ${abis[*]}"
 
-# Resources and manifest (no Java: the helper dex is embedded in the .so).
+# The launch activity must be available to the Android framework before it
+# loads the native library. The two JNI helper dex files stay inside the .so.
+mkdir -p "$work/classes"
+javac --release 8 -classpath "$android_jar" -d "$work/classes" "$android/java/HestiaActivity.java"
+"$build_tools/d8" --lib "$android_jar" --min-api 26 --output "$work" \
+    "$work/classes/com/mroz59/hestia/rs/HestiaActivity.class"
+
 "$build_tools/aapt2" compile --dir "$android/res" -o "$work/res.zip"
 "$build_tools/aapt2" link -o "$work/base.apk" -I "$android_jar" \
     --manifest "$android/AndroidManifest.xml" \
     --min-sdk-version 26 --target-sdk-version 34 \
     --version-code "$version_code" --version-name "$version_name" \
     "$work/res.zip"
+(cd "$work" && zip -q -0 base.apk classes.dex)
 
 sign() {
     local unsigned=$1 signed=$2

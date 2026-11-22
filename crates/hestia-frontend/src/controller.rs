@@ -13,6 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -175,16 +176,27 @@ impl Controller {
     pub fn start(self: &Shared, data_dir: PathBuf) {
         // Keyboard text and game controllers reach the stream from the
         // platform layer, not from the toolkit.
-        let c = self.clone();
-        platform::set_ime_sink(move |event| c.stream_ime(event));
-        let c = self.clone();
-        platform::set_gamepad_sink(move |state| c.stream_gamepad(state));
+        let c = Arc::downgrade(self);
+        platform::set_ime_sink(move |event| {
+            if let Some(c) = c.upgrade() {
+                c.stream_ime(event);
+            }
+        });
+        let c = Arc::downgrade(self);
+        platform::set_gamepad_sink(move |state| {
+            if let Some(c) = c.upgrade() {
+                c.stream_gamepad(state);
+            }
+        });
         // Physical keys by position, and every finger and pen, below the
         // toolkit (Android; the desktop shell calls the intents itself).
-        let c = self.clone();
-        platform::set_key_sink(move |code, pressed, repeat| c.stream_physical_key(code, pressed, repeat));
-        let c = self.clone();
-        platform::set_pointer_sink(move |pointer| c.stream_raw_pointer(pointer));
+        let c = Arc::downgrade(self);
+        platform::set_key_sink(move |code, pressed, repeat| {
+            c.upgrade()
+                .is_some_and(|c| c.stream_physical_key(code, pressed, repeat))
+        });
+        let c = Arc::downgrade(self);
+        platform::set_pointer_sink(move |pointer| c.upgrade().is_some_and(|c| c.stream_raw_pointer(pointer)));
         self.ui(|ui| {
             ui.set_stream_soft_keyboard(platform::has_soft_keyboard());
             ui.set_stream_pointer_capture_available(platform::has_pointer_capture());
@@ -227,7 +239,7 @@ impl Controller {
     }
 
     fn start_discovery(self: &Shared) {
-        let c = self.clone();
+        let controller = Arc::downgrade(self);
         spawn("hestia-discovery", move || {
             let (browser, rx) = match hestia_core::discovery::Browser::start() {
                 Ok(v) => v,
@@ -236,8 +248,18 @@ impl Controller {
                     return;
                 }
             };
-            c.set_scanning_for(Duration::from_secs(5));
-            while let Ok(found) = rx.recv() {
+            if let Some(c) = controller.upgrade() {
+                c.set_scanning_for(Duration::from_secs(5));
+            }
+            // Android can destroy and reopen the Activity in the same
+            // process when PiP is dismissed. Stop the old window's browser.
+            while controller.strong_count() > 0 {
+                let found = match rx.recv_timeout(Duration::from_secs(1)) {
+                    Ok(found) => found,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                };
+                let Some(c) = controller.upgrade() else { break };
                 let Some(core) = c.core() else { break };
                 match core.note_discovered(&found) {
                     Ok(id) => {

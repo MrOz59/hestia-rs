@@ -2,26 +2,26 @@
 //! and pen of a touch screen (see [`crate::input`]), game controllers; and
 //! whether the pointer can be captured.
 
-use std::sync::OnceLock;
+use std::sync::RwLock;
 
 use crate::input::RawPointer;
 
 type KeySink = Box<dyn Fn(u32, bool, bool) -> bool + Send + Sync>;
 type PointerSink = Box<dyn Fn(RawPointer) -> bool + Send + Sync>;
 
-static KEY_SINK: OnceLock<KeySink> = OnceLock::new();
-static POINTER_SINK: OnceLock<PointerSink> = OnceLock::new();
+static KEY_SINK: RwLock<Option<KeySink>> = RwLock::new(None);
+static POINTER_SINK: RwLock<Option<PointerSink>> = RwLock::new(None);
 
 /// Where physical keys go: `(Linux key code, pressed, repeat)`, returning
 /// true when taken (the controller's `stream_physical_key`).
 pub fn set_key_sink(sink: impl Fn(u32, bool, bool) -> bool + Send + Sync + 'static) {
-    let _ = KEY_SINK.set(Box::new(sink));
+    *KEY_SINK.write().unwrap() = Some(Box::new(sink));
 }
 
 /// Where fingers and pens go, returning true when the toolkit must not see
 /// the event (the controller's `stream_raw_pointer`).
 pub fn set_pointer_sink(sink: impl Fn(RawPointer) -> bool + Send + Sync + 'static) {
-    let _ = POINTER_SINK.set(Box::new(sink));
+    *POINTER_SINK.write().unwrap() = Some(Box::new(sink));
 }
 
 /// Whether the window can lock the pointer and report relative motion
@@ -32,12 +32,16 @@ pub fn has_pointer_capture() -> bool {
 
 #[cfg(target_os = "android")]
 fn physical_key(code: u32, pressed: bool, repeat: bool) -> bool {
-    KEY_SINK.get().is_some_and(|sink| sink(code, pressed, repeat))
+    KEY_SINK
+        .read()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|sink| sink(code, pressed, repeat))
 }
 
 #[cfg(target_os = "android")]
 fn raw_pointer(pointer: RawPointer) -> bool {
-    POINTER_SINK.get().is_some_and(|sink| sink(pointer))
+    POINTER_SINK.read().unwrap().as_ref().is_some_and(|sink| sink(pointer))
 }
 
 /// Sees every input event before the toolkit (Slint: the patched backend's

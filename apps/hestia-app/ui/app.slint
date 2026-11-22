@@ -11,7 +11,7 @@ export component AppWindow inherits Window {
     preferred-height: 760px;
     min-width: 340px;
     min-height: 400px;
-    background: Theme.bg;
+    background: root.stream-picture-in-picture ? black : Theme.bg;
     default-font-family: Theme.font;
     default-font-size: Theme.body-size;
     forward-focus: keys;
@@ -124,6 +124,20 @@ export component AppWindow inherits Window {
 
     // Stream
     in property <image> stream-frame;
+    in property <bool> stream-picture-in-picture: false;
+    property <float> stream-picture-aspect: root.stream-frame.height > 0
+        ? 1.0 * root.stream-frame.width / root.stream-frame.height : 0;
+    callback stream-pip-config(bool, float);
+    changed screen => {
+        if root.is-android {
+            root.stream-pip-config(root.screen == 4, root.stream-picture-aspect);
+        }
+    }
+    changed stream-picture-aspect => {
+        if root.is-android && root.screen == 4 && root.stream-picture-aspect > 0 {
+            root.stream-pip-config(true, root.stream-picture-aspect);
+        }
+    }
     in property <string> stream-stats;
     in property <string> stream-status;
     in-out property <bool> stream-show-stats: true;
@@ -309,6 +323,7 @@ export component AppWindow inherits Window {
     // (Escape, the Android back button) bubble up to it wherever the focus
     // is. Unhandled Back on the hosts screen lets Android close the app.
     keys := FocusScope {
+        visible: !root.stream-picture-in-picture || root.screen == 4;
         // The pages keep clear of the status and navigation bars and a
         // display cutout: Android draws the window under them, and Slint
         // reports their size here (zero in full screen). The stream uses the
@@ -437,6 +452,7 @@ export component AppWindow inherits Window {
                 root.page-depth = 3;
             }
             frame: root.stream-frame;
+            picture-in-picture: root.stream-picture-in-picture;
             stats: root.stream-stats;
             status: root.stream-status;
             title: root.session-title;
@@ -988,7 +1004,7 @@ export component AppWindow inherits Window {
         // The box slides up; the card inside it never moves relative to it,
         // so its shadow texture is drawn once. The text fades in under a veil
         // of the card's colour instead of an `opacity` layer.
-        if root.toast != "": toast-box := Rectangle {
+        if !root.stream-picture-in-picture && root.toast != "": toast-box := Rectangle {
             property <bool> shown;
             Timer {
                 interval: 16ms;
