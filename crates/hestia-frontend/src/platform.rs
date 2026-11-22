@@ -16,6 +16,8 @@ mod reports;
 pub use android::{set_android_app, video_decoders};
 pub use clipboard::{clipboard_stamp, clipboard_text, set_clipboard_text};
 pub use display::{device_summary, native_display, set_stream_mode};
+#[cfg(target_os = "android")]
+pub(crate) use gamepads::release_android_gamepads;
 pub use gamepads::{
     gamepad_gone, gamepad_state, onscreen_gamepad, onscreen_gamepad_off, rumble, set_gamepad_sink,
     set_gamepads_streaming,

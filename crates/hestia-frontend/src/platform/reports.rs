@@ -3,14 +3,14 @@
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "android")]
-use super::android::{ANDROID_APP, with_activity};
+use super::android::{android_app, with_activity};
 
 /// Where stream reports are saved. On Android that is the app's external
 /// files directory (`Android/data/com.mroz59.hestia.rs/files/reports`,
 /// reachable over USB); elsewhere `<data dir>/reports`.
 pub fn reports_dir(data_dir: &Path) -> PathBuf {
     #[cfg(target_os = "android")]
-    if let Some(dir) = ANDROID_APP.get().and_then(|app| app.external_data_path()) {
+    if let Some(dir) = android_app().and_then(|app| app.external_data_path()) {
         return dir.join("reports");
     }
     data_dir.join("reports")

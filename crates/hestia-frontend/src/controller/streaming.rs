@@ -738,6 +738,18 @@ impl Controller {
         }
     }
 
+    /// Returns Android controllers to neutral while the stream is in PiP.
+    #[cfg(target_os = "android")]
+    pub fn release_android_stream_gamepads(self: &Shared) {
+        {
+            let mut guard = self.active_stream();
+            let Some(active) = guard.as_mut() else { return };
+            active.input.reset_pad();
+        }
+        platform::release_android_gamepads();
+        self.push_pad_view();
+    }
+
     /// Menu → Mouse, or Ctrl+Alt+Shift+Z: the host gets relative motion from
     /// a captured pointer (games, 3D apps) or follows where the mouse points.
     pub fn toggle_mouse_capture(self: &Shared) {

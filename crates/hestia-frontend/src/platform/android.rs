@@ -1,16 +1,20 @@
 //! Android activity, JNI, and the shared Java helper.
 
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use super::keyboard::ime_event;
 use crate::stream_input::ImeEvent;
 
-pub(super) static ANDROID_APP: OnceLock<android_activity::AndroidApp> = OnceLock::new();
+static ANDROID_APP: RwLock<Option<android_activity::AndroidApp>> = RwLock::new(None);
 
 /// The activity every Android service here goes through (JNI, the Java
 /// helper); the shell hands it over before starting the controller.
 pub fn set_android_app(app: android_activity::AndroidApp) {
-    let _ = ANDROID_APP.set(app);
+    *ANDROID_APP.write().unwrap() = Some(app);
+}
+
+pub(super) fn android_app() -> Option<android_activity::AndroidApp> {
+    ANDROID_APP.read().unwrap().clone()
 }
 
 /// Runs `f` with a JNI environment and the Activity, clearing any Java
@@ -21,7 +25,7 @@ pub(super) fn with_activity(
     use jni::JavaVM;
     use jni::objects::JObject;
 
-    let app = ANDROID_APP.get().ok_or("Android context not available")?;
+    let app = android_app().ok_or("Android context not available")?;
     // SAFETY: android-activity hands out the process' JavaVM and a global
     // reference to the Activity, both valid for the life of the app.
     let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }.map_err(|e| e.to_string())?;
@@ -35,7 +39,7 @@ pub(super) fn with_activity(
     result.map_err(|e| e.to_string())
 }
 
-static HELPER: std::sync::OnceLock<jni::objects::GlobalRef> = std::sync::OnceLock::new();
+static HELPER: OnceLock<jni::objects::GlobalRef> = OnceLock::new();
 
 /// Runs `f` with HestiaHelper's class, loading it on first use.
 pub(super) fn with_helper(

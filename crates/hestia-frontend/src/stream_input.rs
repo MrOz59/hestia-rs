@@ -255,6 +255,12 @@ impl StreamInput {
         &self.pad
     }
 
+    #[cfg(target_os = "android")]
+    pub(crate) fn reset_pad(&mut self) {
+        self.pad.resize(self.view.0, self.view.1);
+        self.pad.take_click();
+    }
+
     pub(crate) fn visible_pad_state(&self) -> Option<PadState> {
         self.pad_visible.then(|| self.pad.state())
     }

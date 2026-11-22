@@ -130,6 +130,9 @@ a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
 - Picture scale (fit, fill or stretch), pinch zoom up to 4× with two-finger
   pan, full screen, orientation (Android: landscape, portrait or the
   device's), an optional menu button.
+- On supported Android phones and tablets, going Home while streaming opens
+  a picture-in-picture window with video and audio. Expanding it returns to
+  the same stream. Closing it disconnects and leaves the game running on the host.
 - Statistics overlay, "Fix picture" (asks for a fresh keyframe), disconnect
   or quit the app.
 
@@ -288,9 +291,11 @@ Android refuses text relocations.
 ```sh
 rustup target add aarch64-linux-android
 cargo install cargo-ndk cargo-apk
-# native library only
-cargo ndk -t arm64-v8a --platform 26 build --release -p hestia-app --lib
-# or a quick arm64 APK
+# native library and APK with picture-in-picture (set ANDROID_KEYSTORE and
+# ANDROID_KEYSTORE_PASSWORD to sign it for installation)
+cargo ndk -t arm64-v8a --platform 26 -o target/android-libs build --release -p hestia-app --lib
+scripts/android-package.sh target/android-libs target/android-apks 1 0.1.0-dev
+# or a quick arm64 APK with the stock NativeActivity
 cargo apk build --release -p hestia-app --lib
 ```
 
@@ -301,7 +306,8 @@ arm64-v8a, armeabi-v7a, x86_64 and x86 and makes one universal APK plus one
 per ABI. CI builds the four ABIs (the 32-bit ones compile Skia from source,
 which has no prebuilt binaries for them), checks that each library has no
 unresolved C++ runtime symbols, packages them, and installs the universal
-APK on an Android 16 emulator, both fresh and over the previous nightly.
+APK on an Android 16 emulator and checks that the PiP activity starts, both
+fresh and after updating from the previous nightly.
 
 ## CLI
 
