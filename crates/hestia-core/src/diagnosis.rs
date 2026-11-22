@@ -1,15 +1,12 @@
 //! Turns a second of stream statistics into a plain-language verdict: is
 //! the stream healthy, and if not, is it the network, the decoder, the
-//! presentation or the host? Same scoring as Hestia desktop's
-//! `statsdiagnostics.cpp`: every cause gets a score normalised so that 1.0
-//! is "at its threshold", and the highest score at or above 1.0 wins.
+//! presentation or the host? A session tracks consecutive throughput deficits
+//! and checks the assembler's recovery state before scoring competing causes.
 
 /// A window needs this many frames before it is judged.
 const MIN_FRAMES_TO_JUDGE: f64 = 10.0;
 /// Drop percentage above which loss is a real problem.
 const DROP_PERCENT_THRESHOLD: f64 = 2.0;
-/// Decode struggling once it uses this much of the frame time.
-const DECODE_BUDGET_FRACTION: f64 = 0.6;
 /// Host processing latency considered high.
 const HOST_LATENCY_HIGH_MS: f64 = 30.0;
 
@@ -18,6 +15,7 @@ pub enum Bottleneck {
     #[default]
     None,
     Network,
+    WaitingForIdr,
     Decode,
     Render,
     Host,
@@ -27,6 +25,7 @@ impl Bottleneck {
     pub fn label(self) -> &'static str {
         match self {
             Self::None => "ok",
+            Self::WaitingForIdr => "waiting for IDR",
             Self::Network => "network",
             Self::Decode => "decode",
             Self::Render => "display",
@@ -39,9 +38,10 @@ impl Bottleneck {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Window {
     pub target_fps: u32,
-    /// Frames that arrived complete from the network.
+    /// Complete frames forwarded to the decoder.
     pub received_fps: f64,
     pub decoded_fps: f64,
+    pub skipped_waiting_idr_fps: f64,
     /// Average decode (+ conversion) time per decoded frame.
     pub decode_ms: f64,
     /// Frames lost on the network, as a share of all frames.
@@ -62,7 +62,28 @@ pub struct Diagnosis {
     pub key_metric: String,
 }
 
+#[derive(Default)]
+pub struct DiagnosisTracker {
+    previous_deficit: bool,
+}
+
+impl DiagnosisTracker {
+    pub fn sample(&mut self, w: &Window) -> Diagnosis {
+        let deficit = w.received_fps >= MIN_FRAMES_TO_JUDGE && w.decoded_fps < w.received_fps * 0.95;
+        let sustained = self.previous_deficit && deficit;
+        self.previous_deficit = deficit;
+        classify(w, sustained)
+    }
+}
+
 pub fn diagnose(w: &Window) -> Diagnosis {
+    DiagnosisTracker::default().sample(w)
+}
+
+fn classify(w: &Window, sustained_deficit: bool) -> Diagnosis {
+    if w.skipped_waiting_idr_fps > 0.0 && w.received_fps < MIN_FRAMES_TO_JUDGE {
+        return waiting_for_idr(w);
+    }
     // Frames arrive but none come out: the decoder is failing, not slow.
     if w.decoded_fps < 0.5 && w.received_fps >= MIN_FRAMES_TO_JUDGE {
         return Diagnosis {
@@ -71,16 +92,16 @@ pub fn diagnose(w: &Window) -> Diagnosis {
             key_metric: format!("0 of {:.0} fps decoded", w.received_fps),
         };
     }
-    if w.decoded_fps < MIN_FRAMES_TO_JUDGE {
+    if w.decoded_fps < MIN_FRAMES_TO_JUDGE && !sustained_deficit {
         return Diagnosis::default();
     }
     let budget_ms = 1000.0 / f64::from(if w.target_fps > 0 { w.target_fps } else { 60 });
 
     let network = w.network_drop_pct / DROP_PERCENT_THRESHOLD;
-    let mut decode = w.decode_ms / (budget_ms * DECODE_BUDGET_FRACTION);
+    let mut decode = 0.0_f64;
     // Decoded throughput short of what arrived is a strong decode signal.
-    if w.received_fps > 0.0 && w.decoded_fps < w.received_fps * 0.95 {
-        decode = decode.max(1.5);
+    if sustained_deficit {
+        decode = (w.decode_ms / budget_ms).max(1.5);
     }
     let render = w.display_drop_pct / DROP_PERCENT_THRESHOLD;
     let host = w.host_ms.unwrap_or(0.0) / HOST_LATENCY_HIGH_MS;
@@ -92,6 +113,11 @@ pub fn diagnose(w: &Window) -> Diagnosis {
         dominant = Bottleneck::Network;
     }
     for (score, cause) in [
+        (
+            (w.skipped_waiting_idr_fps * 100.0 / (w.received_fps + w.skipped_waiting_idr_fps).max(1.0))
+                / DROP_PERCENT_THRESHOLD,
+            Bottleneck::WaitingForIdr,
+        ),
         (decode, Bottleneck::Decode),
         (render, Bottleneck::Render),
         (host, Bottleneck::Host),
@@ -108,6 +134,7 @@ pub fn diagnose(w: &Window) -> Diagnosis {
             summary: "Stream is healthy.",
             key_metric: String::new(),
         },
+        Bottleneck::WaitingForIdr => waiting_for_idr(w),
         Bottleneck::Network => Diagnosis {
             bottleneck: dominant,
             summary: "The network is dropping frames. Lower the bitrate, or move closer to the access point / use a wired connection.",
@@ -116,11 +143,7 @@ pub fn diagnose(w: &Window) -> Diagnosis {
         Bottleneck::Decode => Diagnosis {
             bottleneck: dominant,
             summary: "The decoder is falling behind. Lower the resolution or frame rate.",
-            key_metric: if w.received_fps > 0.0 && w.decoded_fps < w.received_fps * 0.95 {
-                format!("decoding {:.0} of {:.0} fps", w.decoded_fps, w.received_fps)
-            } else {
-                format!("decode {:.1} ms/frame", w.decode_ms)
-            },
+            key_metric: format!("decoding {:.0} of {:.0} fps", w.decoded_fps, w.received_fps),
         },
         Bottleneck::Render => Diagnosis {
             bottleneck: dominant,
@@ -132,6 +155,14 @@ pub fn diagnose(w: &Window) -> Diagnosis {
             summary: "The host is slow to produce frames. This is a server-side bottleneck, not this device.",
             key_metric: format!("host {:.1} ms/frame", w.host_ms.unwrap_or(0.0)),
         },
+    }
+}
+
+fn waiting_for_idr(w: &Window) -> Diagnosis {
+    Diagnosis {
+        bottleneck: Bottleneck::WaitingForIdr,
+        summary: "Video is waiting for a keyframe to resume.",
+        key_metric: format!("{:.1} complete frames/s skipped", w.skipped_waiting_idr_fps),
     }
 }
 
@@ -174,6 +205,7 @@ impl SpikeHistory {
             return None;
         }
         let causes = [
+            Bottleneck::WaitingForIdr,
             Bottleneck::Network,
             Bottleneck::Decode,
             Bottleneck::Render,
@@ -204,6 +236,7 @@ mod tests {
             received_fps: 60.0,
             decoded_fps: 60.0,
             decode_ms: 3.0,
+            skipped_waiting_idr_fps: 0.0,
             network_drop_pct: 0.0,
             display_drop_pct: 0.0,
             host_ms: Some(4.0),
@@ -249,20 +282,26 @@ mod tests {
         assert_eq!(net.bottleneck, Bottleneck::Network);
         assert_eq!(net.key_metric, "5.0% network drops");
 
-        // 60 fps budget 16.7 ms; 60% = 10 ms → 14 ms is 1.4.
-        let slow = diagnose(&Window {
+        let mut tracker = DiagnosisTracker::default();
+        let steady = Window {
             decode_ms: 14.0,
             ..healthy()
-        });
-        assert_eq!(slow.bottleneck, Bottleneck::Decode);
-        assert_eq!(slow.key_metric, "decode 14.0 ms/frame");
-
-        let behind = diagnose(&Window {
+        };
+        assert_eq!(tracker.sample(&steady).bottleneck, Bottleneck::None);
+        let behind = Window {
             decoded_fps: 45.0,
-            ..healthy()
-        });
-        assert_eq!(behind.bottleneck, Bottleneck::Decode);
-        assert_eq!(behind.key_metric, "decoding 45 of 60 fps");
+            ..steady
+        };
+        assert_eq!(tracker.sample(&behind).bottleneck, Bottleneck::None);
+        assert_eq!(tracker.sample(&behind).bottleneck, Bottleneck::Decode);
+        assert_eq!(tracker.sample(&steady).bottleneck, Bottleneck::None);
+        let stalled = Window {
+            received_fps: 0.0,
+            decoded_fps: 0.0,
+            skipped_waiting_idr_fps: 60.0,
+            ..steady
+        };
+        assert_eq!(tracker.sample(&stalled).bottleneck, Bottleneck::WaitingForIdr);
 
         let display = diagnose(&Window {
             display_drop_pct: 8.0,

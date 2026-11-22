@@ -128,6 +128,7 @@ struct Listener {
     /// "1920×1080 H264" etc.
     label: String,
     last: Mutex<Option<Totals>>,
+    diagnosis: Mutex<diagnosis::DiagnosisTracker>,
     report: SharedReport,
     present: Arc<Presentation>,
     target_fps: u32,
@@ -197,6 +198,7 @@ impl Listener {
         let secs = prev.at.elapsed().as_secs_f64().max(0.001);
         let delta = |a: u64, b: u64| a.saturating_sub(b);
         let received = delta(now.stats.frames, prev.stats.frames);
+        let skipped = delta(now.stats.dropped_waiting_idr, prev.stats.dropped_waiting_idr);
         let lost = delta(now.stats.lost_frames, prev.stats.lost_frames);
         let decoded = delta(now.decoded, prev.decoded);
         let superseded = delta(now.superseded, prev.superseded);
@@ -219,15 +221,17 @@ impl Listener {
             } else {
                 delta(now.decode_us, prev.decode_us) as f64 / decoded as f64 / 1000.0
             },
-            network_drop_pct: percent(lost, received + lost),
+            skipped_waiting_idr_fps: skipped as f64 / secs,
+            network_drop_pct: percent(lost, received + skipped + lost),
             // Frames the screen skipped. The decoder's own drops (it fell
             // behind) show up as decoded < received, a decode problem.
             display_drop_pct: percent(superseded, decoded),
             host_ms,
         };
-        let verdict = diagnosis::diagnose(&window);
+        let verdict = self.diagnosis.lock().unwrap_or_else(|p| p.into_inner()).sample(&window);
         let sample = StatsSample {
             fps: window.received_fps,
+            assembled_fps: (received + skipped) as f64 / secs,
             mbps: delta(now.stats.bytes, prev.stats.bytes) as f64 * 8.0 / secs / 1e6,
             rtt_ms: now.stats.rtt_ms,
             rtt_variance_ms: now.stats.rtt_variance_ms,
@@ -323,6 +327,20 @@ impl SessionListener for Listener {
 }
 
 impl Controller {
+    #[cfg(target_os = "android")]
+    pub fn picture_in_picture_changed(&self, in_pip: bool, dismissed: bool) {
+        if let Some(stream) = self.active_stream().as_ref() {
+            let mode = if dismissed {
+                "dismissed"
+            } else if in_pip {
+                "entered"
+            } else {
+                "expanded"
+            };
+            stream.present.gpu.pip.transition(mode, !dismissed, &stream.report);
+        }
+    }
+
     fn active_stream(&self) -> std::sync::MutexGuard<'_, Option<ActiveStream>> {
         self.stream.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -372,6 +390,7 @@ impl Controller {
             decode: decode.clone(),
             label: size.clone(),
             last: Mutex::new(None),
+            diagnosis: Mutex::default(),
             report: session_report.clone(),
             present: present.clone(),
             target_fps: config.fps,
@@ -574,6 +593,10 @@ impl Controller {
                     ("GPU picture ready to draw submission", &gpu.ready_to_draw),
                     ("first packet to GPU draw submission", &gpu.receive_to_draw),
                     ("IDR request to first GPU draw submission", &gpu.recovery.latency),
+                    (
+                        "assembly loss to first recovered GPU draw submission",
+                        &gpu.loss_to_draw.latency,
+                    ),
                 ] {
                     if let Some(summary) = histogram.summary() {
                         r.field("Video latency", stage, summary);

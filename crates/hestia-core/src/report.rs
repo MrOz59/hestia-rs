@@ -29,6 +29,10 @@ pub struct VideoTransportStats {
     lost_frames: u64,
     dropped_waiting_idr: u64,
     recovered: u64,
+    fec_reports_sent: u64,
+    loss_sends: u64,
+    loss_to_send_us: u64,
+    max_loss_to_send_us: u64,
     loss_requests: u64,
     decoder_requests: u64,
     silence_requests: u64,
@@ -48,6 +52,10 @@ impl From<&VideoCounters> for VideoTransportStats {
             lost_frames: video.lost_frames.load(Ordering::Relaxed),
             dropped_waiting_idr: video.dropped_waiting_idr.load(Ordering::Relaxed),
             recovered: video.recovered.load(Ordering::Relaxed),
+            fec_reports_sent: video.fec_reports_sent.load(Ordering::Relaxed),
+            loss_sends: recovery.loss_sends.load(Ordering::Relaxed),
+            loss_to_send_us: recovery.loss_to_send_us.load(Ordering::Relaxed),
+            max_loss_to_send_us: recovery.max_loss_to_send_us.load(Ordering::Relaxed),
             loss_requests: recovery.loss_requests.load(Ordering::Relaxed),
             decoder_requests: recovery.decoder_requests.load(Ordering::Relaxed),
             silence_requests: recovery.silence_requests.load(Ordering::Relaxed),
@@ -64,6 +72,7 @@ impl From<&VideoCounters> for VideoTransportStats {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct StatsSample {
     pub fps: f64,
+    pub assembled_fps: f64,
     pub mbps: f64,
     pub rtt_ms: u32,
     pub rtt_variance_ms: u32,
@@ -168,9 +177,10 @@ fn stats_row(at: Duration, s: &StatsSample) -> String {
         .map(|v| format!(" | <- {}", v.to_uppercase()))
         .unwrap_or_default();
     format!(
-        "{} | {:5.1} fps | {:6.2} Mbps | rtt {:3}±{:<3} | fec {:5} | lost {:4} | waiting IDR {:4} | IDR requests {:3}{decode}{host}{verdict}",
+        "{} | {:5.1} fps forwarded / {:.1} assembled | {:6.2} Mbps | rtt {:3}±{:<3} | fec {:5} | lost {:4} | waiting IDR {:4} | IDR requests {:3}{decode}{host}{verdict}",
         elapsed(at),
         s.fps,
+        s.assembled_fps,
         s.mbps,
         s.rtt_ms,
         s.rtt_variance_ms,
@@ -209,10 +219,12 @@ impl StreamReport {
     pub fn video_transport(&mut self, video: &VideoTransportStats) {
         let values = [
             ("UDP packets received", video.packets),
-            ("frames assembled and submitted", video.frames),
+            ("complete frames assembled", video.frames + video.dropped_waiting_idr),
+            ("frames forwarded to decoder", video.frames),
             ("frames lost during assembly", video.lost_frames),
             ("complete frames skipped waiting for IDR", video.dropped_waiting_idr),
             ("packets recovered by FEC", video.recovered),
+            ("FEC block reports sent to host", video.fec_reports_sent),
             ("IDR requests from assembly loss", video.loss_requests),
             ("IDR requests from decoder", video.decoder_requests),
             ("IDR probes after video silence", video.silence_requests),
@@ -222,6 +234,15 @@ impl StreamReport {
         ];
         for (label, value) in values {
             self.field("Video transport and recovery", label, value);
+        }
+        if video.loss_sends > 0 {
+            let mean = video.loss_to_send_us as f64 / video.loss_sends as f64 / 1000.0;
+            let max = video.max_loss_to_send_us as f64 / 1000.0;
+            self.field(
+                "Video transport and recovery",
+                "assembly loss to first IDR control send",
+                format!("mean {mean:.2} ms / max {max:.2} ms ({} samples)", video.loss_sends),
+            );
         }
         let recovered = video.keyframes_received;
         if recovered > 0 {
@@ -315,11 +336,16 @@ impl StreamReport {
                 avg(|s| s.rtt_ms as f64),
                 steady.iter().map(|s| s.rtt_ms).max().unwrap_or(0)
             ));
+            let no_assembled = steady.iter().filter(|s| s.assembled_fps == 0.0).count();
             let no_video = steady.iter().filter(|s| s.fps == 0.0).count();
             let no_decode = steady.iter().filter(|s| s.decoded_fps == Some(0.0)).count();
             let decode_samples = steady.iter().filter(|s| s.decoded_fps.is_some()).count();
             out.push(format!(
-                "No assembled video: {no_video}/{} sampled windows",
+                "No assembled video: {no_assembled}/{} sampled windows",
+                steady.len()
+            ));
+            out.push(format!(
+                "No video forwarded: {no_video}/{} sampled windows",
                 steady.len()
             ));
             if decode_samples > 0 {
@@ -575,6 +601,7 @@ mod tests {
     fn sample(fps: f64, rtt: u32, lost: u64) -> StatsSample {
         StatsSample {
             fps,
+            assembled_fps: fps,
             mbps: 20.0,
             rtt_ms: rtt,
             rtt_variance_ms: 1,
@@ -625,6 +652,20 @@ mod tests {
         }
         assert!(!text.contains("ignored"));
         assert!(r.summary_lines()[0].starts_with("Result: the app was closed"));
+    }
+
+    #[test]
+    fn suppressed_frames_still_count_as_assembled() {
+        let mut r = StreamReport::new("IDR stall", 0);
+        let mut second = sample(0.0, 17, 0);
+        second.assembled_fps = 60.0;
+        second.dropped_waiting_idr = 60;
+        second.verdict = Some("waiting for IDR");
+        r.sample(second);
+        let text = r.render_with_logs(&[]);
+        assert!(text.contains("No assembled video: 0/1"));
+        assert!(text.contains("No video forwarded: 1/1"));
+        assert!(text.contains("1 s waiting for IDR"));
     }
 
     #[test]
@@ -680,7 +721,7 @@ mod tests {
         }
         let text = r.render_with_logs(&[]);
         assert!(text.contains("400 rows omitted"));
-        assert_eq!(text.matches(" fps | ").count(), MAX_STAT_ROWS);
+        assert_eq!(text.matches(" fps forwarded / ").count(), MAX_STAT_ROWS);
     }
 
     #[test]

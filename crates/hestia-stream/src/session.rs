@@ -96,8 +96,11 @@ impl StreamSession {
             negotiated.packet_size
         };
         let video_feedback = feedback.clone();
+        let queued_fec_reports = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let queued_fec = queued_fec_reports.clone();
         let video = VideoReceiver::start_with_events(
             VideoConfig {
+                report_fec: negotiated.supports_fec_status,
                 remote: SocketAddr::new(ip, negotiated.video_port),
                 ping_payload: negotiated.video_ping_payload,
                 packet_size: announced_packet_size,
@@ -110,6 +113,14 @@ impl StreamSession {
             },
             video_sink,
             move |event| {
+                // Only this video receiver enqueues block reports. Limit diagnostic traffic
+                // while keeping IDR requests and session events independent of that budget.
+                if matches!(event, VideoFeedback::FecStatus(_)) {
+                    if queued_fec.load(Ordering::Relaxed) >= 16 {
+                        return;
+                    }
+                    queued_fec.fetch_add(1, Ordering::Relaxed);
+                }
                 let _ = video_feedback.send(SessionFeedback::Video(event));
             },
         )
@@ -153,6 +164,7 @@ impl StreamSession {
             std::thread::Builder::new()
                 .name("hestia-session".into())
                 .spawn(move || {
+                    let mut last_loss_sent = None;
                     let mut last_stats = Instant::now();
                     while !stop.load(Ordering::Relaxed) {
                         let wait = STATS_INTERVAL.saturating_sub(last_stats.elapsed());
@@ -162,10 +174,25 @@ impl StreamSession {
                         }
                         let (reason, graceful) = match event {
                             // The video loop keeps one IDR request in flight.
-                            Ok(SessionFeedback::Video(VideoFeedback::NeedIdr)) => {
+                            Ok(SessionFeedback::Video(VideoFeedback::NeedIdr { loss_detected_at })) => {
                                 if let Err(e) = control.request_idr() {
                                     counters.recovery.send_errors.fetch_add(1, Ordering::Relaxed);
                                     warn!("could not request a video keyframe: {e}");
+                                } else if let Some(loss) = loss_detected_at
+                                    && Some(loss) != last_loss_sent
+                                {
+                                    last_loss_sent = Some(loss);
+                                    let us = loss.elapsed().as_micros() as u64;
+                                    counters.recovery.loss_to_send_us.fetch_add(us, Ordering::Relaxed);
+                                    counters.recovery.max_loss_to_send_us.fetch_max(us, Ordering::Relaxed);
+                                    counters.recovery.loss_sends.fetch_add(1, Ordering::Relaxed);
+                                }
+                                (None, false)
+                            }
+                            Ok(SessionFeedback::Video(VideoFeedback::FecStatus(status))) => {
+                                queued_fec_reports.fetch_sub(1, Ordering::Relaxed);
+                                if control.report_fec(status).is_ok() {
+                                    counters.fec_reports_sent.fetch_add(1, Ordering::Relaxed);
                                 }
                                 (None, false)
                             }
@@ -419,6 +446,17 @@ mod tests {
             "START A/B first"
         );
         assert!(types.contains(&crate::control::PT_PERIODIC_PING));
+        let reports: Vec<_> = messages.iter().filter(|(ty, _)| *ty == 0x5502).collect();
+        assert_eq!(reports.len(), frames.len());
+        for (index, (_, payload)) in reports.iter().enumerate() {
+            assert_eq!(payload.len(), 21);
+            assert_eq!(u32::from_be_bytes(payload[..4].try_into().unwrap()), index as u32 + 1);
+            assert_eq!(
+                u16::from_be_bytes(payload[10..12].try_into().unwrap()),
+                u16::from_be_bytes(payload[14..16].try_into().unwrap()) + 1
+            );
+            assert_eq!(&payload[16..18], &[0, 1]);
+        }
         assert!(
             messages
                 .iter()

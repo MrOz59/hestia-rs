@@ -36,6 +36,7 @@ pub const PT_RUMBLE: u16 = 0x010b;
 pub const PT_TERMINATION: u16 = 0x0109;
 pub const PT_HDR_MODE: u16 = 0x010e;
 pub const PT_RUMBLE_TRIGGERS: u16 = 0x5500;
+const PT_FRAME_FEC_STATUS: u16 = 0x5502;
 const PT_ENCRYPTED: u16 = 0x0001;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -186,6 +187,10 @@ impl ControlStream {
     /// Sends an already-encoded input packet (see [`crate::input`]).
     pub fn send_input(&self, packet: &[u8], channel: u8) -> io::Result<()> {
         self.send(PT_INPUT, packet, channel, Delivery::Reliable)
+    }
+
+    pub(crate) fn report_fec(&self, status: crate::video::FrameFecStatus) -> io::Result<()> {
+        self.send(PT_FRAME_FEC_STATUS, &status.0, CHANNEL_GENERIC, Delivery::Unsequenced)
     }
 
     pub fn round_trip(&self) -> (u32, u32) {

@@ -68,6 +68,7 @@ mod tests {
             data: vec![0; 10],
             received_at: Instant::now(),
             idr_requested_at: None,
+            loss_detected_at: None,
             host_latency: None,
         });
         assert_eq!(counters.video_frames.load(Ordering::Relaxed), 1);

@@ -19,7 +19,6 @@
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 #[cfg(target_os = "linux")]
@@ -154,8 +153,7 @@ impl Renderer {
                 let stats = &presentation.gpu;
                 stats.ready_to_draw.record(now.duration_since(frame.decoded_at));
                 stats.receive_to_draw.record(now.duration_since(frame.received_at));
-                stats.recovery.record(frame.idr_requested_at, now);
-                stats.drawn.fetch_add(1, Ordering::Relaxed);
+                stats.record_draw(frame.idr_requested_at, frame.loss_detected_at, now);
                 if matches!(frame.buffer, FrameBuffer::Native(NativePicture::Planar(_))) {
                     // The upload copied the planes: give them back to the decoder.
                     drop(frame);

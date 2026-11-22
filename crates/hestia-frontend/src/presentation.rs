@@ -29,6 +29,73 @@ pub struct GpuVideoStats {
     pub ready_to_draw: LatencyHistogram,
     pub receive_to_draw: LatencyHistogram,
     pub recovery: RecoveryLatency,
+    pub loss_to_draw: RecoveryLatency,
+    #[cfg(target_os = "android")]
+    pub(crate) pip: PipDraw,
+}
+
+/// Only the first GPU submission after a PiP transition takes the report lock.
+#[cfg(any(target_os = "android", test))]
+#[derive(Default)]
+pub(crate) struct PipDraw {
+    armed: std::sync::atomic::AtomicBool,
+    pending: Mutex<Option<PipDrawEvent>>,
+}
+
+#[cfg(any(target_os = "android", test))]
+struct PipDrawEvent {
+    mode: &'static str,
+    started: Instant,
+    report: Arc<Mutex<hestia_core::report::StreamReport>>,
+}
+
+#[cfg(any(target_os = "android", test))]
+impl PipDraw {
+    pub(crate) fn transition(
+        &self,
+        mode: &'static str,
+        await_draw: bool,
+        report: &Arc<Mutex<hestia_core::report::StreamReport>>,
+    ) {
+        let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+        let started = Instant::now();
+        report
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .event(format!("Android PiP {mode}"));
+        *pending = await_draw.then(|| PipDrawEvent {
+            mode,
+            started,
+            report: report.clone(),
+        });
+        self.armed.store(await_draw, Ordering::Release);
+    }
+
+    fn draw(&self, now: Instant) {
+        if !self.armed.load(Ordering::Acquire) {
+            return;
+        }
+        let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+        if pending.as_ref().is_some_and(|event| now >= event.started) {
+            let event = pending.take().unwrap();
+            self.armed.store(false, Ordering::Release);
+            let ms = now.duration_since(event.started).as_secs_f64() * 1000.0;
+            event.report.lock().unwrap_or_else(|p| p.into_inner()).event(format!(
+                "first GPU draw submission after PiP {} ({ms:.2} ms)",
+                event.mode
+            ));
+        }
+    }
+}
+
+impl GpuVideoStats {
+    pub fn record_draw(&self, requested_at: Option<Instant>, loss_at: Option<Instant>, now: Instant) {
+        self.recovery.record(requested_at, now);
+        self.loss_to_draw.record(loss_at, now);
+        self.drawn.fetch_add(1, Ordering::Relaxed);
+        #[cfg(target_os = "android")]
+        self.pip.draw(now);
+    }
 }
 
 /// One stream's link to the window and its presentation metrics.
@@ -161,5 +228,31 @@ impl FramePresenter for UiPresenter {
             }
             presentation.pictures.recycle_cpu(frame);
         }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hestia_core::report::StreamReport;
+
+    #[test]
+    fn pip_only_counts_draws_after_the_latest_transition() {
+        let report = Arc::new(Mutex::new(StreamReport::new("PiP", 0)));
+        let pip = PipDraw::default();
+        let earlier = Instant::now();
+        pip.transition("entered", true, &report);
+        pip.draw(earlier - std::time::Duration::from_millis(1));
+        pip.transition("expanded", true, &report);
+        pip.draw(Instant::now());
+        pip.draw(Instant::now());
+        pip.transition("entered", true, &report);
+        pip.transition("dismissed", false, &report);
+        pip.draw(Instant::now());
+        let text = report.lock().unwrap().render_with_logs(&[]);
+        assert_eq!(text.matches("Android PiP entered").count(), 2);
+        assert!(text.contains("Android PiP dismissed"));
+        assert!(text.contains("first GPU draw submission after PiP expanded"));
+        assert_eq!(text.matches("first GPU draw submission after PiP").count(), 1);
     }
 }

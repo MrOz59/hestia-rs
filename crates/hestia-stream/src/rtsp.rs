@@ -305,6 +305,7 @@ pub struct Negotiated {
     pub audio_encrypted: bool,
     pub packet_size: u32,
     pub host_feature_flags: u32,
+    pub supports_fec_status: bool,
 }
 
 struct RtspClient {
@@ -521,6 +522,9 @@ pub fn handshake(cfg: &HandshakeConfig) -> Result<Negotiated, RtspError> {
         audio_encrypted: encryption & sdp::SS_ENC_AUDIO != 0,
         packet_size,
         host_feature_flags: host_sdp.feature_flags(),
+        // Sunshine-family protocol extension, independent of host input feature bits.
+        supports_fec_status: host_sdp.raw.lines().any(|line| line.trim().starts_with("a=x-ss-"))
+            || video.get("X-SS-Ping-Payload").is_some(),
     };
 
     let announce = sdp::build_announce(&AnnounceParams {

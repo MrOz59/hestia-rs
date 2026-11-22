@@ -31,6 +31,7 @@ pub struct EncodedFrame {
     pub received_at: Instant,
     /// First request in the last recovery that supplied a complete keyframe.
     pub idr_requested_at: Option<Instant>,
+    pub loss_detected_at: Option<Instant>,
     /// Host-side capture→send latency, when the host reports it.
     pub host_latency: Option<Duration>,
 }
