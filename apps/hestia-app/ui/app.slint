@@ -294,8 +294,15 @@ export component AppWindow inherits Window {
     // (Escape, the Android back button) bubble up to it wherever the focus
     // is. Unhandled Back on the hosts screen lets Android close the app.
     keys := FocusScope {
-        width: 100%;
-        height: 100%;
+        // The pages keep clear of the status and navigation bars and a
+        // display cutout: Android draws the window under them, and Slint
+        // reports their size here (zero in full screen). The stream uses the
+        // whole screen.
+        property <bool> full-bleed: root.screen == 4;
+        x: self.full-bleed ? 0 : root.safe-area-insets.left;
+        y: self.full-bleed ? 0 : root.safe-area-insets.top;
+        width: self.full-bleed ? root.width : root.width - root.safe-area-insets.left - root.safe-area-insets.right;
+        height: self.full-bleed ? root.height : root.height - root.safe-area-insets.top - root.safe-area-insets.bottom;
         // Every key press, before anyone handles it.
         capture-key-pressed(event) => {
             Nav.keyboard = true;
