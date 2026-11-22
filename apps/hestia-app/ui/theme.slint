@@ -642,8 +642,14 @@ export component Modal inherits Rectangle {
 // redraw, and the veil is a single rectangle, where fading the whole page
 // with `opacity` would render it through a full-screen offscreen layer on
 // every frame of the fade.
+//
+// Arriving with the remote or a keyboard, the page focuses its first
+// control (`focus-first`). That happens here, after the page is built: a
+// change made in an `init` doesn't reach the change handlers of controls
+// built before it, so they would never take the focus.
 export component Page inherits Rectangle {
     in property <int> enter-dir;
+    callback focus-first();
     property <int> dir;
     property <bool> arrived;
 
@@ -656,6 +662,9 @@ export component Page inherits Rectangle {
         running: !root.arrived;
         triggered => {
             root.arrived = true;
+            if (Nav.keyboard) {
+                root.focus-first();
+            }
         }
     }
     x: root.arrived ? 0px : root.dir * (Theme.compact ? 28px : 48px);

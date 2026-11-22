@@ -171,6 +171,11 @@ export component HostsPage inherits Page {
     // Add host (-4, the floating button on phones), or the empty page's
     // buttons (10, 11).
     property <int> nav: -1;
+    focus-first => {
+        if (root.nav == -1) {
+            root.nav = root.hosts.length > 0 ? 0 : 10;
+        }
+    }
     in property <int> refocus;
     changed refocus => {
         home-scope.focus();
@@ -248,10 +253,6 @@ export component HostsPage inherits Page {
         height: 0px;
         init => {
             self.focus();
-            // Arrived with the remote / keyboard: focus right away.
-            if (Nav.keyboard) {
-                root.nav = root.hosts.length > 0 ? 0 : 10;
-            }
         }
         key-pressed(event) => {
             if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
@@ -749,6 +750,11 @@ export component AppsPage inherits Page {
     // Forget (-5); the stream profile (-7); Resume (-6) and Quit (-4) on
     // the running app.
     property <int> nav: -1;
+    focus-first => {
+        if (root.nav == -1) {
+            root.nav = root.app-running ? -6 : (root.apps.length > 0 ? 0 : -2);
+        }
+    }
     in property <int> refocus;
     changed refocus => {
         home-scope.focus();
@@ -849,10 +855,6 @@ export component AppsPage inherits Page {
         height: 0px;
         init => {
             self.focus();
-            // Arrived with the remote / keyboard: focus right away.
-            if (Nav.keyboard) {
-                root.nav = root.app-running ? -6 : (root.apps.length > 0 ? 0 : -2);
-            }
         }
         key-pressed(event) => {
             if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
@@ -1178,6 +1180,11 @@ export component SessionPage inherits Page {
 
     // Focus: 0 Back / Cancel, 1 Quit app.
     property <int> nav: -1;
+    focus-first => {
+        if (root.nav == -1) {
+            root.nav = 0;
+        }
+    }
     in property <int> refocus;
     changed refocus => {
         home-scope.focus();
@@ -1200,10 +1207,6 @@ export component SessionPage inherits Page {
         height: 0px;
         init => {
             self.focus();
-            // Arrived with the remote / keyboard: focus right away.
-            if (Nav.keyboard) {
-                root.nav = 0;
-            }
         }
         key-pressed(event) => {
             if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
@@ -1369,6 +1372,11 @@ export component SettingsPage inherits Page {
     // order: 0…18, the saved profiles (100…), 20…23. 8 and 10 only exist
     // on Android.
     property <int> nav: -1;
+    focus-first => {
+        if (root.nav == -1) {
+            root.nav = 0;
+        }
+    }
     in property <int> refocus;
     changed refocus => {
         home-scope.focus();
@@ -1464,10 +1472,6 @@ export component SettingsPage inherits Page {
         height: 0px;
         init => {
             self.focus();
-            // Arrived with the remote / keyboard: focus right away.
-            if (Nav.keyboard) {
-                root.nav = 0;
-            }
         }
         key-pressed(event) => {
             if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
@@ -2006,6 +2010,11 @@ export component ToolsPage inherits Page {
     // (100…, or the note 3), the clipboard box (4), Send (5) and Get (6),
     // this device (7) and the diagnostics fields (8).
     property <int> nav: -1;
+    focus-first => {
+        if (root.nav == -1) {
+            root.nav = 9;
+        }
+    }
     in property <int> refocus;
     changed refocus => {
         home-scope.focus();
@@ -2062,10 +2071,6 @@ export component ToolsPage inherits Page {
         height: 0px;
         init => {
             self.focus();
-            // Arrived with the remote / keyboard: focus right away.
-            if (Nav.keyboard) {
-                root.nav = 9;
-            }
         }
         key-pressed(event) => {
             if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
@@ -2429,6 +2434,11 @@ export component ReportPage inherits Page {
     // Focus: header Back (-2) and Done (-3); the summary (0), Share (1),
     // Send to host (2) and the log lines (3).
     property <int> nav: -1;
+    focus-first => {
+        if (root.nav == -1) {
+            root.nav = 1;
+        }
+    }
     in property <int> refocus;
     changed refocus => {
         home-scope.focus();
@@ -2472,10 +2482,6 @@ export component ReportPage inherits Page {
         height: 0px;
         init => {
             self.focus();
-            // Arrived with the remote / keyboard: focus right away.
-            if (Nav.keyboard) {
-                root.nav = 1;
-            }
         }
         key-pressed(event) => {
             if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
