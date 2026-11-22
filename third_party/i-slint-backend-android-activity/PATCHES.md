@@ -15,7 +15,13 @@
    A and B buttons map to Return and Escape (upstream: nothing), and the
    application can make the D-pad's up/down send Shift+Tab/Tab so form
    screens can be navigated with a remote.
+4. **Mice are mice** (`androidwindowadapter.rs`: `is_mouse`, at the top of
+   the motion-event handling). Android frames a mouse button's
+   `ButtonPress`/`ButtonRelease` with `Down`/`Up`, and upstream turns those
+   into a touch as well, so every click was pressed twice and a drag moved
+   a finger. For a mouse pointer, `Down`, `Up` and `Cancel` are dropped
+   (the button events carry the press) and `Move` is a pointer move.
 
 Everything else is unchanged. To update: copy the new upstream directory,
-reapply these three changes, and bump the pinned slint version in the root
+reapply these four changes, and bump the pinned slint version in the root
 Cargo.toml together with `version` here.

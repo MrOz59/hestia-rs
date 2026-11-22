@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -62,6 +62,9 @@ pub struct Controller {
     gpu_window: Arc<GpuWindow>,
     /// What a finger does in the stream (`TouchMode` index; persisted).
     touch_mode: AtomicU8,
+    /// The platform hands every finger over itself
+    /// ([`Controller::stream_raw_pointer`]), below the toolkit.
+    raw_touch: AtomicBool,
     /// The report screen's content.
     last_report: Mutex<Option<report::LastReport>>,
 }
@@ -87,6 +90,7 @@ impl Controller {
             stream_generation: AtomicU64::new(0),
             gpu_window,
             touch_mode: AtomicU8::new(0),
+            raw_touch: AtomicBool::new(false),
             last_report: Mutex::new(None),
         })
     }
@@ -175,7 +179,16 @@ impl Controller {
         platform::set_ime_sink(move |event| c.stream_ime(event));
         let c = self.clone();
         platform::set_gamepad_sink(move |state| c.stream_gamepad(state));
-        self.ui(|ui| ui.set_stream_soft_keyboard(platform::has_soft_keyboard()));
+        // Physical keys by position, and every finger and pen, below the
+        // toolkit (Android; the desktop shell calls the intents itself).
+        let c = self.clone();
+        platform::set_key_sink(move |code, pressed, repeat| c.stream_physical_key(code, pressed, repeat));
+        let c = self.clone();
+        platform::set_pointer_sink(move |pointer| c.stream_raw_pointer(pointer));
+        self.ui(|ui| {
+            ui.set_stream_soft_keyboard(platform::has_soft_keyboard());
+            ui.set_stream_pointer_capture_available(platform::has_pointer_capture());
+        });
         let c = self.clone();
         spawn("hestia-init", move || {
             c.ui(|ui| ui.set_starting_text("Loading this device's identity…".into()));

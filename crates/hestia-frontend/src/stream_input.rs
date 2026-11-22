@@ -3,8 +3,9 @@
 use std::time::Instant;
 
 use hestia_core::stream::InputEvent;
-use hestia_core::stream::input::{Modifiers, MouseButton, TouchPhase};
+use hestia_core::stream::input::{Modifiers, MouseButton, PenTool, TouchPhase, vk};
 
+use crate::input::{PointerPhase, PointerTool, RawPointer, TouchRouter};
 use crate::keymap::{self, Mapped};
 use crate::touch::{self, Trackpad};
 use crate::typing;
@@ -61,6 +62,88 @@ pub(crate) enum ImeEvent {
     DeleteBefore(usize),
 }
 
+/// Keys and mouse buttons the host holds down because of us. When the
+/// stream loses the keyboard (another window, the menu) their releases go
+/// elsewhere, so they are all let go at once instead of repeating or
+/// staying pressed on the host.
+#[derive(Debug, Default)]
+pub(crate) struct Held {
+    keys: Vec<u16>,
+    buttons: Vec<MouseButton>,
+}
+
+impl Held {
+    /// Notes what `event` presses or releases.
+    pub(crate) fn track(&mut self, event: &InputEvent) {
+        match *event {
+            InputEvent::Key { key, pressed, .. } => {
+                self.keys.retain(|&k| k != key);
+                if pressed {
+                    self.keys.push(key);
+                }
+            }
+            InputEvent::MouseButton { button, pressed } => {
+                self.buttons.retain(|&b| b != button);
+                if pressed {
+                    self.buttons.push(button);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The modifiers held right now.
+    pub(crate) fn modifiers(&self) -> Modifiers {
+        let held = |keys: &[u16]| self.keys.iter().any(|k| keys.contains(k));
+        Modifiers {
+            shift: held(&[vk::SHIFT, vk::LSHIFT, vk::RSHIFT]),
+            ctrl: held(&[vk::CONTROL, vk::LCONTROL, vk::RCONTROL]),
+            alt: held(&[vk::MENU, vk::LMENU, vk::RMENU]),
+            meta: held(&[vk::LWIN, vk::RWIN]),
+        }
+    }
+
+    /// Releases for everything held: keys, then modifiers, then buttons.
+    pub(crate) fn release_all(&mut self) -> Vec<InputEvent> {
+        let mut keys = std::mem::take(&mut self.keys);
+        keys.sort_by_key(|&k| vk::is_modifier(k));
+        let buttons = std::mem::take(&mut self.buttons);
+        keys.into_iter()
+            .map(|key| InputEvent::Key {
+                key,
+                pressed: false,
+                modifiers: Modifiers::default(),
+            })
+            .chain(
+                buttons
+                    .into_iter()
+                    .map(|button| InputEvent::MouseButton { button, pressed: false }),
+            )
+            .collect()
+    }
+}
+
+/// Where the video is in the stream view, in logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct VideoRect {
+    pub(crate) origin: (f32, f32),
+    pub(crate) size: (f32, f32),
+}
+
+impl VideoRect {
+    /// `point` (in the view) relative to the video.
+    pub(crate) fn local(&self, (x, y): (f32, f32)) -> (f32, f32) {
+        (x - self.origin.0, y - self.origin.1)
+    }
+
+    pub(crate) fn picture(&self) -> Picture {
+        Picture {
+            centre: (self.origin.0 + self.size.0 / 2.0, self.origin.1 + self.size.1 / 2.0),
+            size: self.size,
+        }
+    }
+}
+
 pub(crate) struct StreamInput {
     width: u32,
     trackpad: Trackpad,
@@ -70,6 +153,20 @@ pub(crate) struct StreamInput {
     pad_visible: bool,
     view: (f32, f32),
     zoom: Zoom,
+    /// Logical pixels to physical ones (raw pointers come in physical).
+    scale: f32,
+    video: VideoRect,
+    /// The platform hands over every finger itself ([`RawPointer`]s); the
+    /// toolkit's touches only say which touch is the stream's.
+    pub(crate) raw_touch: bool,
+    pub(crate) router: TouchRouter,
+    /// The stream view has the keyboard (window focused, menu closed).
+    pub(crate) focused: bool,
+    /// Pointer capture asked for: the host gets relative motion.
+    pub(crate) capture: bool,
+    motion_remainder: (f64, f64),
+    /// The host takes pen and touch events.
+    pub(crate) pen_and_touch: bool,
 }
 
 impl StreamInput {
@@ -85,6 +182,17 @@ impl StreamInput {
             pad_visible,
             view,
             zoom: Zoom::default(),
+            scale: 1.0,
+            video: VideoRect {
+                origin: (0.0, 0.0),
+                size: view,
+            },
+            raw_touch: false,
+            router: TouchRouter::default(),
+            focused: true,
+            capture: false,
+            motion_remainder: (0.0, 0.0),
+            pen_and_touch: false,
         }
     }
 
@@ -92,13 +200,49 @@ impl StreamInput {
         self.view
     }
 
-    pub(crate) fn resize(&mut self, width: f32, height: f32) -> bool {
+    pub(crate) fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    pub(crate) fn resize(&mut self, width: f32, height: f32, scale: f32) -> bool {
+        if scale.is_finite() && scale > 0.0 {
+            self.scale = scale;
+        }
         if self.view == (width, height) {
             return false;
         }
         self.view = (width, height);
         self.pad.resize(width, height);
         self.pad_visible
+    }
+
+    /// The toolkit's latest word on where the video is.
+    pub(crate) fn set_video(&mut self, video: VideoRect) {
+        self.video = video;
+    }
+
+    pub(crate) fn video(&self) -> VideoRect {
+        self.video
+    }
+
+    /// A raw pointer's position in the stream view (logical pixels).
+    pub(crate) fn view_point(&self, pointer: &RawPointer) -> (f32, f32) {
+        (pointer.x / self.scale, pointer.y / self.scale)
+    }
+
+    /// Pointer capture is on and the stream has the input: relative motion.
+    pub(crate) fn captured(&self) -> bool {
+        self.capture && self.focused
+    }
+
+    /// Relative mouse motion while captured, with sub-pixel motion carried over.
+    pub(crate) fn relative_motion(&mut self, dx: f64, dy: f64) -> Option<InputEvent> {
+        let (fx, fy) = (dx + self.motion_remainder.0, dy + self.motion_remainder.1);
+        let (ix, iy) = (fx.trunc(), fy.trunc());
+        self.motion_remainder = (fx - ix, fy - iy);
+        let clamp = |v: f64| v.clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+        let (dx, dy) = (clamp(ix), clamp(iy));
+        (dx != 0 || dy != 0).then_some(InputEvent::MouseMove { dx, dy })
     }
 
     pub(crate) fn toggle_pad(&mut self) -> bool {
@@ -323,11 +467,8 @@ pub(crate) fn absolute_pointer(
         height: height.round().min(i16::MAX as f32) as i16,
     };
     let button = match button {
-        1 => Some(MouseButton::Left),
-        2 => Some(MouseButton::Middle),
-        3 => Some(MouseButton::Right),
         _ if touch => Some(MouseButton::Left),
-        _ => None,
+        button => mouse_button(button),
     };
     let click = match (button, kind) {
         (Some(button), 0 | 1) => Some(InputEvent::MouseButton {
@@ -339,11 +480,37 @@ pub(crate) fn absolute_pointer(
     [Some(position), click].into_iter().flatten()
 }
 
+/// A mouse button by the number the frontend gives it: 1 left, 2 middle,
+/// 3 right, 4 back, 5 forward.
+pub(crate) fn mouse_button(button: i32) -> Option<MouseButton> {
+    Some(match button {
+        1 => MouseButton::Left,
+        2 => MouseButton::Middle,
+        3 => MouseButton::Right,
+        4 => MouseButton::X1,
+        5 => MouseButton::X2,
+        _ => return None,
+    })
+}
+
+/// A captured mouse's button (no position: the host's cursor is where the
+/// relative motion put it).
+pub(crate) fn captured_button(kind: i32, button: i32) -> Option<InputEvent> {
+    match (mouse_button(button), kind) {
+        (Some(button), 0 | 1) => Some(InputEvent::MouseButton {
+            button,
+            pressed: kind == 0,
+        }),
+        _ => None,
+    }
+}
+
 pub(crate) fn native_touch(
     kind: i32,
     finger: i32,
     (x, y): (f32, f32),
     (width, height): (f32, f32),
+    pressure: Option<f32>,
 ) -> Option<InputEvent> {
     if width < 1.0 || height < 1.0 {
         return None;
@@ -354,12 +521,51 @@ pub(crate) fn native_touch(
         2 => TouchPhase::Move,
         _ => TouchPhase::Cancel,
     };
+    let pressure = match kind {
+        1 => 0.0,
+        // Some screens report 0 for a light touch: a touch is never weightless.
+        _ => pressure.map_or(1.0, |p| p.clamp(0.01, 1.0)),
+    };
     Some(InputEvent::Touch {
         pointer_id: finger as u32,
         phase,
         x: (x / width).clamp(0.0, 1.0),
         y: (y / height).clamp(0.0, 1.0),
-        pressure: if kind == 1 { 0.0 } else { 1.0 },
+        pressure,
+    })
+}
+
+/// A pen on (or over) the video. `(x, y)` is relative to the video.
+pub(crate) fn pen(pointer: &RawPointer, (x, y): (f32, f32), (width, height): (f32, f32)) -> Option<InputEvent> {
+    if width < 1.0 || height < 1.0 || !pointer.tool.is_pen() {
+        return None;
+    }
+    let phase = match pointer.phase {
+        PointerPhase::Down => TouchPhase::Down,
+        PointerPhase::Move => TouchPhase::Move,
+        PointerPhase::Up => TouchPhase::Up,
+        PointerPhase::Cancel => TouchPhase::Cancel,
+        PointerPhase::Hover => TouchPhase::Hover,
+        PointerPhase::HoverLeave => TouchPhase::HoverLeave,
+    };
+    let pressure = match pointer.phase {
+        PointerPhase::Down | PointerPhase::Move => pointer.pressure.map_or(1.0, |p| p.clamp(0.01, 1.0)),
+        PointerPhase::Hover => pointer.distance.unwrap_or(0.0).clamp(0.0, 1.0),
+        _ => 0.0,
+    };
+    Some(InputEvent::Pen {
+        tool: if pointer.tool == PointerTool::Eraser {
+            PenTool::Eraser
+        } else {
+            PenTool::Pen
+        },
+        phase,
+        x: (x / width).clamp(0.0, 1.0),
+        y: (y / height).clamp(0.0, 1.0),
+        pressure,
+        tilt: pointer.tilt.filter(|t| t.is_finite()).map(|t| t.clamp(0.0, 90.0)),
+        rotation: pointer.rotation.filter(|r| r.is_finite()).map(|r| r.rem_euclid(360.0)),
+        buttons: pointer.buttons,
     })
 }
 
@@ -424,5 +630,171 @@ mod tests {
             GestureAction::Consumed
         ));
         input.long_press(token, now + touch::LONG_PRESS, |_| panic!("stale click"));
+    }
+
+    fn key(key: u16, pressed: bool) -> InputEvent {
+        InputEvent::Key {
+            key,
+            pressed,
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    #[test]
+    fn held_keys_and_buttons_are_released_together() {
+        let mut held = Held::default();
+        for e in [
+            key(vk::LSHIFT, true),
+            key(b'W' as u16, true),
+            key(b'A' as u16, true),
+            key(b'A' as u16, false),
+            InputEvent::MouseButton {
+                button: MouseButton::Left,
+                pressed: true,
+            },
+            InputEvent::MouseMove { dx: 1, dy: 1 },
+        ] {
+            held.track(&e);
+        }
+        assert!(held.modifiers().shift);
+        assert!(!held.modifiers().ctrl);
+        let released = held.release_all();
+        assert_eq!(
+            released,
+            vec![
+                key(b'W' as u16, false),
+                key(vk::LSHIFT, false),
+                InputEvent::MouseButton {
+                    button: MouseButton::Left,
+                    pressed: false
+                },
+            ]
+        );
+        assert!(held.release_all().is_empty(), "nothing twice");
+        assert_eq!(held.modifiers(), Modifiers::default());
+    }
+
+    #[test]
+    fn right_alt_counts_as_alt() {
+        let mut held = Held::default();
+        held.track(&key(vk::RMENU, true));
+        held.track(&key(vk::RCONTROL, true));
+        let m = held.modifiers();
+        assert!(m.alt && m.ctrl && !m.shift && !m.meta);
+    }
+
+    #[test]
+    fn relative_motion_keeps_fractions() {
+        let mut input = StreamInput::new(1920, (200.0, 100.0), false);
+        assert_eq!(input.relative_motion(0.6, -0.4), None);
+        assert_eq!(
+            input.relative_motion(0.6, -0.8),
+            Some(InputEvent::MouseMove { dx: 1, dy: -1 })
+        );
+        assert_eq!(
+            input.relative_motion(1e9, 0.0),
+            Some(InputEvent::MouseMove { dx: i16::MAX, dy: 0 })
+        );
+    }
+
+    #[test]
+    fn captured_flags_need_focus() {
+        let mut input = StreamInput::new(1920, (200.0, 100.0), false);
+        input.capture = true;
+        assert!(input.captured());
+        input.focused = false;
+        assert!(!input.captured());
+    }
+
+    #[test]
+    fn raw_pointers_are_scaled_to_the_view() {
+        let mut input = StreamInput::new(1920, (200.0, 100.0), false);
+        input.resize(200.0, 100.0, 2.0);
+        let p = RawPointer::finger(0, PointerPhase::Down, 50.0, 30.0);
+        assert_eq!(input.view_point(&p), (25.0, 15.0));
+        input.resize(200.0, 100.0, f32::NAN);
+        assert_eq!(input.scale(), 2.0, "a bad scale is ignored");
+        let video = VideoRect {
+            origin: (20.0, 10.0),
+            size: (160.0, 90.0),
+        };
+        assert_eq!(video.local((25.0, 15.0)), (5.0, 5.0));
+        assert_eq!(video.picture().centre, (100.0, 55.0));
+    }
+
+    #[test]
+    fn pens_carry_pressure_tilt_and_buttons() {
+        let mut p = RawPointer {
+            tool: PointerTool::Pen,
+            pressure: Some(0.4),
+            tilt: Some(120.0),
+            rotation: Some(-30.0),
+            buttons: hestia_core::stream::input::pen_buttons::PRIMARY,
+            ..RawPointer::finger(3, PointerPhase::Move, 0.0, 0.0)
+        };
+        let event = pen(&p, (50.0, 25.0), (100.0, 100.0)).unwrap();
+        assert_eq!(
+            event,
+            InputEvent::Pen {
+                tool: PenTool::Pen,
+                phase: TouchPhase::Move,
+                x: 0.5,
+                y: 0.25,
+                pressure: 0.4,
+                tilt: Some(90.0),
+                rotation: Some(330.0),
+                buttons: 1,
+            }
+        );
+        p.phase = PointerPhase::Hover;
+        p.distance = Some(0.3);
+        p.tool = PointerTool::Eraser;
+        assert!(matches!(
+            pen(&p, (0.0, 0.0), (100.0, 100.0)),
+            Some(InputEvent::Pen {
+                tool: PenTool::Eraser,
+                phase: TouchPhase::Hover,
+                pressure: 0.3,
+                ..
+            })
+        ));
+        p.tool = PointerTool::Finger;
+        assert!(pen(&p, (0.0, 0.0), (100.0, 100.0)).is_none(), "fingers aren't pens");
+    }
+
+    #[test]
+    fn native_touches_carry_pressure() {
+        let t = |kind, pressure| match native_touch(kind, 1, (10.0, 10.0), (100.0, 100.0), pressure) {
+            Some(InputEvent::Touch { pressure, .. }) => pressure,
+            _ => panic!("no touch"),
+        };
+        assert_eq!(t(0, None), 1.0);
+        assert_eq!(t(2, Some(0.5)), 0.5);
+        assert_eq!(t(2, Some(0.0)), 0.01);
+        assert_eq!(t(1, Some(0.7)), 0.0, "lifted");
+    }
+
+    #[test]
+    fn back_and_forward_buttons() {
+        assert_eq!(mouse_button(4), Some(MouseButton::X1));
+        assert_eq!(mouse_button(5), Some(MouseButton::X2));
+        assert_eq!(mouse_button(0), None);
+        assert_eq!(
+            captured_button(0, 3),
+            Some(InputEvent::MouseButton {
+                button: MouseButton::Right,
+                pressed: true
+            })
+        );
+        assert_eq!(captured_button(2, 1), None, "moves don't click");
+        let mut events = absolute_pointer(1, 5, (1.0, 1.0), (10.0, 10.0), false);
+        events.next();
+        assert_eq!(
+            events.next(),
+            Some(InputEvent::MouseButton {
+                button: MouseButton::X2,
+                pressed: false
+            })
+        );
     }
 }

@@ -155,9 +155,12 @@ component QuickTile inherits Focusable {
 }
 
 // Full-window video with input capture. Keyboard, mouse and touch go to the
-// host; Ctrl+Alt+Shift+Q disconnects, Ctrl+Alt+Shift+S toggles statistics.
-// Touch acts as a trackpad (relative cursor, tap = click, hold = right
-// click, tap-then-drag = drag) unless direct mode is chosen.
+// host; Ctrl+Alt+Shift+Q disconnects, Ctrl+Alt+Shift+S toggles statistics,
+// Ctrl+Alt+Shift+Z captures the mouse (desktop). Touch acts as a trackpad
+// (relative cursor, tap = click, hold = right click, tap-then-drag = drag)
+// unless direct mode is chosen. Physical keys and every finger are also read
+// below Slint by the app (keys by position, fingers each with its own id);
+// the view tells it when it has the input.
 export component StreamView inherits Rectangle {
     in property <image> frame;
     in property <string> stats;
@@ -198,12 +201,19 @@ export component StreamView inherits Rectangle {
     in property <bool> soft-keyboard: false;
     // Short-lived note at the bottom (e.g. how Hermes serves the stream).
     in property <string> banner;
+    // Mouse capture (desktop): the host gets relative motion, for games.
+    in property <bool> mouse-capture-available: false;
+    in property <bool> mouse-capture: false;
+    callback toggle-mouse-capture();
+    // The view has the keyboard and mouse: its window is focused and the
+    // menu is closed. Losing them lets go of whatever the host holds.
+    callback input-focus(bool);
 
     // text, pressed, repeat, ctrl, alt, shift, meta
     callback key-event(string, bool, bool, bool, bool, bool, bool);
     // kind (0 down, 1 up, 2 move, 3 cancel), button (1 left, 2 middle,
-    // 3 right), x, y relative to the video, video width, height, finger id
-    // (0 = mouse), x, y relative to the view
+    // 3 right, 4 back, 5 forward), x, y relative to the video, video width,
+    // height, finger id (0 = mouse), x, y relative to the view
     callback pointer(int, int, float, float, float, float, int, float, float);
     callback scrolled(float, float);
     callback special-key(string);
@@ -251,8 +261,8 @@ export component StreamView inherits Rectangle {
 
     // TV remote / keyboard in the menu: the focused entry, -1 until an
     // arrow key is pressed. 0 close, 1 Disconnect, 2 Quit app, 3 keyboard,
-    // 4 / 5 clipboard (Hermes), 6 touch, 7 controller, 8 zoom, 9 picture,
-    // 10 statistics, 11 fix picture, 12 full screen.
+    // 4 / 5 clipboard (Hermes), 6 touch, 13 mouse (desktop), 7 controller,
+    // 8 zoom, 9 picture, 10 statistics, 11 fix picture, 12 full screen.
     property <int> menu-focus: -1;
     // Quit asks for a second press.
     property <bool> quit-armed;
@@ -262,14 +272,33 @@ export component StreamView inherits Rectangle {
             root.menu-focus = -1;
             focus.focus();
         }
+        root.input-focus(!root.menu-open && focus.has-focus);
     }
     pure function menu-ok(i: int) -> bool {
-        return i >= 3 && i <= 12 && ((i != 4 && i != 5) || root.clipboard-actions);
+        return i >= 3 && i <= 13 && ((i != 4 && i != 5) || root.clipboard-actions) && (i != 13 || root.mouse-capture-available);
     }
+    // The rows in the order they're shown (Mouse comes after Touch); -1
+    // past the last one.
+    pure function menu-next(i: int) -> int {
+        return i == 6 ? 13 : (i == 13 ? 7 : (i == 12 ? -1 : i + 1));
+    }
+    pure function menu-prev(i: int) -> int {
+        return i == 7 ? 13 : (i == 13 ? 6 : i - 1);
+    }
+    pure function menu-once(from: int, dir: int) -> int {
+        return dir > 0 ? root.menu-next(from) : root.menu-prev(from);
+    }
+    pure function menu-twice(from: int, dir: int) -> int {
+        return root.menu-once(root.menu-once(from, dir), dir);
+    }
+    pure function menu-thrice(from: int, dir: int) -> int {
+        return root.menu-once(root.menu-twice(from, dir), dir);
+    }
+    // The next row that is shown, skipping up to two hidden ones.
     pure function menu-step(from: int, dir: int) -> int {
-        return root.menu-ok(from + dir) ? from + dir
-            : root.menu-ok(from + 2 * dir) ? from + 2 * dir
-            : root.menu-ok(from + 3 * dir) ? from + 3 * dir : from;
+        return root.menu-ok(root.menu-once(from, dir)) ? root.menu-once(from, dir)
+            : root.menu-ok(root.menu-twice(from, dir)) ? root.menu-twice(from, dir)
+            : root.menu-ok(root.menu-thrice(from, dir)) ? root.menu-thrice(from, dir) : from;
     }
     function menu-move(from: int, key: string) -> bool {
         if (key == Key.Back || key == Key.Escape) {
@@ -313,6 +342,13 @@ export component StreamView inherits Rectangle {
         height: 100%;
         init => {
             self.focus();
+        }
+        // Window focus comes and goes, the menu's entries take the focus.
+        focus-gained => {
+            root.input-focus(!root.menu-open);
+        }
+        focus-lost => {
+            root.input-focus(false);
         }
         key-pressed(event) => {
             // Android back: close the keyboard bar, else toggle the menu.
@@ -367,7 +403,9 @@ export component StreamView inherits Rectangle {
                         : event.kind == PointerEventKind.move ? 2 : 3,
                     event.button == PointerEventButton.left ? 1
                         : event.button == PointerEventButton.middle ? 2
-                        : event.button == PointerEventButton.right ? 3 : 0,
+                        : event.button == PointerEventButton.right ? 3
+                        : event.button == PointerEventButton.back ? 4
+                        : event.button == PointerEventButton.forward ? 5 : 0,
                     (self.mouse-x - video.x) / 1px,
                     (self.mouse-y - video.y) / 1px,
                     video.width / 1px,
@@ -803,6 +841,23 @@ export component StreamView inherits Rectangle {
                         root.cycle-touch-mode();
                     }
                 }
+                if root.mouse-capture-available: QuickRow {
+                    icon: "mouse";
+                    text: "Capture mouse";
+                    value: "Ctrl+Alt+Shift+Z";
+                    state: root.mouse-capture ? 1 : 0;
+                    want-focus: root.menu-focus == 13;
+                    nav(key) => {
+                        return root.menu-move(13, key);
+                    }
+                    entered => {
+                        root.menu-focus = 13;
+                    }
+                    clicked => {
+                        root.toggle-mouse-capture();
+                        root.menu-open = false;
+                    }
+                }
                 QuickRow {
                     icon: "gamepad";
                     text: "On-screen controller";
@@ -898,7 +953,7 @@ export component StreamView inherits Rectangle {
                     }
                 }
                 if !Theme.compact: Text {
-                    text: "Ctrl+Alt+Shift+Q disconnects, Ctrl+Alt+Shift+S shows statistics";
+                    text: "Ctrl+Alt+Shift+Q disconnects, Ctrl+Alt+Shift+S shows statistics, Ctrl+Alt+Shift+Z captures the mouse";
                     color: Theme.faint;
                     font-size: Theme.caption-size;
                     horizontal-alignment: center;

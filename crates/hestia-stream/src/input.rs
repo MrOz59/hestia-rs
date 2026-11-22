@@ -45,11 +45,14 @@ impl MouseButton {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TouchPhase {
+    /// Moving above the screen without touching it (pens).
     Hover,
     Down,
     Up,
     Move,
     Cancel,
+    /// Left the hover range (pens).
+    HoverLeave,
 }
 
 impl TouchPhase {
@@ -60,6 +63,7 @@ impl TouchPhase {
             Self::Up => 0x02,
             Self::Move => 0x03,
             Self::Cancel => 0x04,
+            Self::HoverLeave => 0x06,
         }
     }
 }
@@ -69,6 +73,13 @@ impl TouchPhase {
 pub enum PenTool {
     Pen,
     Eraser,
+}
+
+/// Pen button bits.
+pub mod pen_buttons {
+    /// The barrel button (S Pen's side button).
+    pub const PRIMARY: u8 = 0x01;
+    pub const SECONDARY: u8 = 0x02;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -108,17 +119,22 @@ pub enum InputEvent {
         y: f32,
         pressure: f32,
     },
+    /// Normalised coordinates (0.0–1.0), like [`InputEvent::Touch`].
     Pen {
         tool: PenTool,
         phase: TouchPhase,
         x: f32,
         y: f32,
+        /// Pressure (0.0–1.0) while touching; distance from the screen
+        /// (0.0–1.0, 0 when unknown) while hovering.
         pressure: f32,
-        /// Degrees from perpendicular (0–90).
-        tilt: f32,
-        /// Degrees around the screen normal (0–359).
-        rotation: f32,
-        barrel_button: bool,
+        /// Degrees from perpendicular (0–90), if the pen reports it.
+        tilt: Option<f32>,
+        /// Degrees around the screen normal, clockwise from up (0–359), if
+        /// the pen reports it.
+        rotation: Option<f32>,
+        /// Bitmask of `pen_buttons::*` held.
+        buttons: u8,
     },
     Gamepad(GamepadState),
 }
@@ -191,6 +207,8 @@ const SS_PEN: u32 = 0x5500_0003;
 const MULTI_CONTROLLER: u32 = 0x0c;
 /// "Rotation unknown" marker.
 const ROTATION_UNKNOWN: u16 = 0xffff;
+/// "Tilt unknown" marker.
+const TILT_UNKNOWN: u8 = 0xff;
 const MAX_TEXT_CHUNK: usize = 32;
 
 pub fn encode(event: &InputEvent) -> Vec<EncodedInput> {
@@ -303,7 +321,7 @@ pub fn encode(event: &InputEvent) -> Vec<EncodedInput> {
             pressure,
             tilt,
             rotation,
-            barrel_button,
+            buttons,
         } => {
             let mut body = Vec::with_capacity(28);
             body.push(phase.code());
@@ -311,13 +329,14 @@ pub fn encode(event: &InputEvent) -> Vec<EncodedInput> {
                 PenTool::Pen => 0x01,
                 PenTool::Eraser => 0x02,
             });
-            body.push(if *barrel_button { 0x01 } else { 0 });
+            body.push(*buttons & (pen_buttons::PRIMARY | pen_buttons::SECONDARY));
             body.push(0);
             for f in [*x, *y, *pressure] {
                 body.extend_from_slice(&f.to_le_bytes());
             }
-            body.extend_from_slice(&((rotation.rem_euclid(360.0)) as u16).to_le_bytes());
-            body.push(tilt.clamp(0.0, 90.0) as u8);
+            let rotation = rotation.map_or(ROTATION_UNKNOWN, |r| (r.rem_euclid(360.0) as u16).min(359));
+            body.extend_from_slice(&rotation.to_le_bytes());
+            body.push(tilt.map_or(TILT_UNKNOWN, |t| t.clamp(0.0, 90.0) as u8));
             body.push(0);
             for f in [0.0f32, 0.0] {
                 body.extend_from_slice(&f.to_le_bytes());
@@ -370,7 +389,19 @@ pub mod vk {
     pub const LWIN: u16 = 0x5b;
     pub const RWIN: u16 = 0x5c;
     pub const APPS: u16 = 0x5d;
+    /// Keypad 0; keypad 1–9 follow.
+    pub const NUMPAD0: u16 = 0x60;
+    pub const MULTIPLY: u16 = 0x6a;
+    pub const ADD: u16 = 0x6b;
+    /// Keypad comma.
+    pub const SEPARATOR: u16 = 0x6c;
+    pub const SUBTRACT: u16 = 0x6d;
+    pub const DECIMAL: u16 = 0x6e;
+    pub const DIVIDE: u16 = 0x6f;
+    /// F1; F2–F24 follow.
     pub const F1: u16 = 0x70;
+    pub const NUMLOCK: u16 = 0x90;
+    pub const SCROLL: u16 = 0x91;
     pub const LSHIFT: u16 = 0xa0;
     pub const RSHIFT: u16 = 0xa1;
     pub const LCONTROL: u16 = 0xa2;
@@ -388,6 +419,19 @@ pub mod vk {
     pub const OEM_5: u16 = 0xdc; // \|
     pub const OEM_6: u16 = 0xdd; // ]}
     pub const OEM_7: u16 = 0xde; // '"
+    /// The extra key of ISO keyboards, next to the left Shift (`<>`, `\|`).
+    pub const OEM_102: u16 = 0xe2;
+    /// The extra key of Brazilian (ABNT2) and Japanese keyboards, next to the
+    /// right Shift (`/?`, `\_`).
+    pub const ABNT_C1: u16 = 0xc1;
+
+    /// Whether `key` is one of the modifier keys.
+    pub fn is_modifier(key: u16) -> bool {
+        matches!(
+            key,
+            SHIFT | CONTROL | MENU | LSHIFT | RSHIFT | LCONTROL | RCONTROL | LMENU | RMENU | LWIN | RWIN
+        )
+    }
 
     /// Maps a printable US-layout character to its key and whether Shift is implied.
     pub fn from_char(c: char) -> Option<(u16, bool)> {
@@ -495,9 +539,9 @@ mod tests {
             x: 0.1,
             y: 0.2,
             pressure: 0.3,
-            tilt: 10.0,
-            rotation: 45.0,
-            barrel_button: false,
+            tilt: Some(10.0),
+            rotation: Some(45.0),
+            buttons: 0,
         })[0];
         assert_eq!(pen.bytes.len(), 4 + 4 + 28);
         let pad = &encode(&InputEvent::Gamepad(GamepadState::default()))[0];
@@ -505,5 +549,38 @@ mod tests {
         assert_eq!(pad.channel, CHANNEL_GAMEPAD_BASE);
         let text = encode(&InputEvent::Text("ç".repeat(20)));
         assert_eq!(text.len(), 2, "40 bytes of UTF-8 split into two packets");
+    }
+
+    #[test]
+    fn pen_layout() {
+        let pen = &encode(&InputEvent::Pen {
+            tool: PenTool::Eraser,
+            phase: TouchPhase::Down,
+            x: 0.25,
+            y: 0.5,
+            pressure: 1.0,
+            tilt: Some(30.0),
+            rotation: Some(-90.0),
+            buttons: pen_buttons::PRIMARY | 0x80,
+        })[0];
+        assert_eq!(pen.channel, CHANNEL_PEN);
+        // After size and magic: event type, tool, buttons, padding.
+        assert_eq!(&pen.bytes[8..12], &[0x01, 0x02, 0x01, 0]);
+        assert_eq!(&pen.bytes[12..16], &0.25f32.to_le_bytes());
+        // Rotation 270° LE, tilt 30.
+        assert_eq!(&pen.bytes[24..28], &[0x0e, 0x01, 30, 0]);
+
+        let hover = &encode(&InputEvent::Pen {
+            tool: PenTool::Pen,
+            phase: TouchPhase::HoverLeave,
+            x: 0.0,
+            y: 0.0,
+            pressure: 0.0,
+            tilt: None,
+            rotation: None,
+            buttons: 0,
+        })[0];
+        assert_eq!(hover.bytes[8], 0x06);
+        assert_eq!(&hover.bytes[24..27], &[0xff, 0xff, 0xff], "rotation and tilt unknown");
     }
 }

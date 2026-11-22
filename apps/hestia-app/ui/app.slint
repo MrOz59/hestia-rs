@@ -159,6 +159,11 @@ export component AppWindow inherits Window {
     callback stream-toggle-fullscreen();
     callback stream-disconnect();
     callback stream-quit();
+    in property <bool> stream-pointer-capture-available: false;
+    in property <bool> stream-mouse-capture: false;
+    callback stream-toggle-mouse-capture();
+    // The stream view has the keyboard and mouse (window focused, menu closed).
+    callback stream-input-focus(bool);
 
     // Settings
     in-out property <[string]> cfg-resolution-options: ["1280 × 720", "1920 × 1080", "2560 × 1440", "3840 × 2160"];
@@ -474,6 +479,14 @@ export component AppWindow inherits Window {
             }
             quit-app => {
                 root.stream-quit();
+            }
+            mouse-capture-available: root.stream-pointer-capture-available;
+            mouse-capture: root.stream-mouse-capture;
+            toggle-mouse-capture => {
+                root.stream-toggle-mouse-capture();
+            }
+            input-focus(on) => {
+                root.stream-input-focus(on);
             }
         }
 
