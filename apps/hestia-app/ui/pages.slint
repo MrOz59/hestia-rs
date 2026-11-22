@@ -4,7 +4,7 @@
 // control reports back through `entered` so Tab and the mouse keep it in
 // step. `refocus` (bumped by the window when a dialog closes) resets it.
 
-import { Theme, Nav, Icon, Focusable, ActionButton, IconButton, Chip, Loader, TextField, Modal, DialogTitle, DialogText } from "theme.slint";
+import { Theme, Nav, Icon, Focusable, Page, ActionButton, IconButton, Chip, Loader, TextField, Modal, DialogTitle, DialogText } from "theme.slint";
 import { Group, SwitchRow, ChoiceRow, SliderRow, ActionRow, InfoRow, FieldRow, ProfileRow, OptionSheet, TopBar, EmptyState } from "controls.slint";
 
 export struct HostCard {
@@ -61,10 +61,13 @@ component HostTile inherits Focusable {
     background: root.pressed ? Theme.border : (root.focused || root.hovered ? Theme.card-hover : Theme.card);
     border-width: root.focused ? 2px : 1px;
     border-color: root.focused ? Theme.accent : (root.ready ? Theme.accent.transparentize(0.72) : Theme.border.transparentize(0.3));
-    drop-shadow-blur: root.focused ? 26px : 0px;
-    drop-shadow-color: Theme.glow;
-    animate background, border-color { duration: 120ms; }
-    animate drop-shadow-blur { duration: 160ms; }
+    // The glow's texture comes from the background and border, so those
+    // change at once; the card's motion is the lift.
+    drop-shadow-blur: 26px;
+    drop-shadow-color: root.focused ? Theme.glow : transparent;
+    z: root.focused ? 1 : 0;
+    transform-scale: root.pressed ? 0.98 : (root.focused ? 1.03 : 1);
+    animate transform-scale { duration: 240ms; easing: ease-out-back; }
 
     VerticalLayout {
         padding: Theme.compact ? 16px : 18px;
@@ -156,7 +159,7 @@ component HostTile inherits Focusable {
     }
 }
 
-export component HostsPage inherits Rectangle {
+export component HostsPage inherits Page {
     in property <[HostCard]> hosts;
     in property <bool> scanning;
     callback open-host(string);
@@ -173,17 +176,6 @@ export component HostsPage inherits Rectangle {
         home-scope.focus();
         root.nav = -1;
     }
-
-    property <bool> shown;
-    Timer {
-        interval: 16ms;
-        running: !root.shown;
-        triggered => {
-            root.shown = true;
-        }
-    }
-    opacity: root.shown ? 1 : 0;
-    animate opacity { duration: 200ms; easing: ease-out; }
 
     property <length> pad: Theme.page-padding;
     property <length> gap: Theme.gap;
@@ -482,24 +474,34 @@ component AppTile inherits Focusable {
     accessible-label: root.app.title;
     border-radius: 14px;
     background: Theme.card;
-    drop-shadow-blur: root.focused ? 30px : 0px;
-    drop-shadow-color: Theme.glow;
-    animate drop-shadow-blur { duration: 160ms; }
+    drop-shadow-blur: 30px;
+    drop-shadow-color: root.focused ? Theme.glow : transparent;
+    // The focused poster comes forward, above its neighbours; a press gives.
+    z: root.focused ? 2 : (root.hovered ? 1 : 0);
+    transform-scale: root.pressed ? 0.97 : (root.focused ? 1.06 : (root.hovered ? 1.03 : 1));
+    animate transform-scale { duration: 260ms; easing: ease-out-back; }
 
     Rectangle {
         border-radius: 14px;
         clip: true;
 
-        if root.app.has-art: Image {
-            // A slow push-in on the focused poster.
-            property <length> grow: root.lit ? 8px : 0px;
-            x: -self.grow;
-            y: -self.grow;
-            width: parent.width + 2 * self.grow;
-            height: parent.height + 2 * self.grow;
+        // Box art fades in when it arrives (an image has no children, so its
+        // opacity costs no layer).
+        if root.app.has-art: art := Image {
+            property <bool> shown;
+            Timer {
+                interval: 16ms;
+                running: !art.shown;
+                triggered => {
+                    art.shown = true;
+                }
+            }
+            width: parent.width;
+            height: parent.height;
             source: root.app.art;
             image-fit: cover;
-            animate x, y, width, height { duration: 280ms; easing: ease-out; }
+            opacity: self.shown ? 1 : 0;
+            animate opacity { duration: 280ms; easing: ease-out-quad; }
         }
 
         if !root.app.has-art: Rectangle {
@@ -725,7 +727,7 @@ component NowPlaying inherits Rectangle {
     }
 }
 
-export component AppsPage inherits Rectangle {
+export component AppsPage inherits Page {
     in property <string> host-name;
     in property <string> host-detail;
     in property <[string]> chips;
@@ -766,17 +768,6 @@ export component AppsPage inherits Rectangle {
     pure function at(i: int) -> bool {
         return !root.overlay && root.nav == i;
     }
-
-    property <bool> shown;
-    Timer {
-        interval: 16ms;
-        running: !root.shown;
-        triggered => {
-            root.shown = true;
-        }
-    }
-    opacity: root.shown ? 1 : 0;
-    animate opacity { duration: 200ms; easing: ease-out; }
 
     property <length> pad: Theme.page-padding;
     property <length> gap: Theme.compact ? 12px : 16px;
@@ -1177,7 +1168,7 @@ export component AppsPage inherits Rectangle {
 // Launching / errors
 // ---------------------------------------------------------------------------
 
-export component SessionPage inherits Rectangle {
+export component SessionPage inherits Page {
     in property <string> title;
     in property <string> subtitle;
     in property <[string]> lines;
@@ -1203,17 +1194,6 @@ export component SessionPage inherits Rectangle {
         }
         return false;
     }
-
-    property <bool> shown;
-    Timer {
-        interval: 16ms;
-        running: !root.shown;
-        triggered => {
-            root.shown = true;
-        }
-    }
-    opacity: root.shown ? 1 : 0;
-    animate opacity { duration: 200ms; easing: ease-out; }
 
     home-scope := FocusScope {
         width: 0px;
@@ -1337,7 +1317,7 @@ export component SessionPage inherits Rectangle {
 // Settings
 // ---------------------------------------------------------------------------
 
-export component SettingsPage inherits Rectangle {
+export component SettingsPage inherits Page {
     in property <[string]> resolution-options;
     in property <[string]> fps-options;
     in-out property <int> preset;
@@ -1478,17 +1458,6 @@ export component SettingsPage inherits Rectangle {
             root.audio = i;
         }
     }
-
-    property <bool> shown;
-    Timer {
-        interval: 16ms;
-        running: !root.shown;
-        triggered => {
-            root.shown = true;
-        }
-    }
-    opacity: root.shown ? 1 : 0;
-    animate opacity { duration: 200ms; easing: ease-out; }
 
     home-scope := FocusScope {
         width: 0px;
@@ -2007,7 +1976,7 @@ export component SettingsPage inherits Rectangle {
 
 // Hermes host tools: readiness, display recovery, server commands,
 // clipboard, this client's permissions and the diagnostics fields.
-export component ToolsPage inherits Rectangle {
+export component ToolsPage inherits Page {
     in property <string> host-name;
     in property <bool> loading;
     // Error or note for the whole page ("not allowed", "not a Hermes host").
@@ -2087,17 +2056,6 @@ export component ToolsPage inherits Rectangle {
         }
         return false;
     }
-
-    property <bool> shown;
-    Timer {
-        interval: 16ms;
-        running: !root.shown;
-        triggered => {
-            root.shown = true;
-        }
-    }
-    opacity: root.shown ? 1 : 0;
-    animate opacity { duration: 200ms; easing: ease-out; }
 
     home-scope := FocusScope {
         width: 0px;
@@ -2456,7 +2414,7 @@ export component ToolsPage inherits Rectangle {
 
 // Shown when a stream ends (or fails to start): what happened, where the
 // full report with every log line was saved, and ways to get it out.
-export component ReportPage inherits Rectangle {
+export component ReportPage inherits Page {
     in property <string> title;
     in property <[string]> summary;
     in property <string> path;
@@ -2508,17 +2466,6 @@ export component ReportPage inherits Rectangle {
         }
         return true;
     }
-
-    property <bool> shown;
-    Timer {
-        interval: 16ms;
-        running: !root.shown;
-        triggered => {
-            root.shown = true;
-        }
-    }
-    opacity: root.shown ? 1 : 0;
-    animate opacity { duration: 200ms; easing: ease-out; }
 
     home-scope := FocusScope {
         width: 0px;

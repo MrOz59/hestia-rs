@@ -10,6 +10,7 @@ export component RowText inherits VerticalLayout {
     in property <string> label;
     in property <string> hint;
     in property <color> tone: Theme.text;
+    in property <color> hint-tone: Theme.muted;
     alignment: center;
     spacing: 3px;
     Text {
@@ -21,23 +22,23 @@ export component RowText inherits VerticalLayout {
     }
     if root.hint != "": Text {
         text: root.hint;
-        color: Theme.muted;
+        color: root.hint-tone;
         font-size: Theme.caption-size;
         wrap: word-wrap;
     }
 }
 
 // The look shared by every row: quiet until hovered, an ember outline and
-// glow when focused.
+// glow when focused. Rows are wide, so their background doesn't animate:
+// the focused row's shadow texture is drawn from it and would be rendered
+// again on every frame of a fade (see `ActionButton` for the other rules).
 export component RowBase inherits Focusable {
     border-radius: Theme.radius - 5px;
     background: root.pressed ? Theme.border : (root.focused || root.hovered ? Theme.card-hover : Theme.card.transparentize(1));
     border-width: root.focused ? 2px : 0px;
     border-color: Theme.accent;
-    drop-shadow-blur: root.focused ? 18px : 0px;
-    drop-shadow-color: Theme.glow;
-    animate background { duration: 120ms; }
-    animate drop-shadow-blur { duration: 160ms; }
+    drop-shadow-blur: 18px;
+    drop-shadow-color: root.focused ? Theme.glow : transparent;
 }
 
 // A titled block of rows.
@@ -274,7 +275,10 @@ export component SliderRow inherits RowBase {
                 background: Theme.text;
                 border-width: root.focused || track.pressed ? 4px : 0px;
                 border-color: Theme.accent;
+                // Grows under the finger while it drags.
+                transform-scale: track.pressed ? 1.25 : 1;
                 animate border-width { duration: 120ms; }
+                animate transform-scale { duration: 180ms; easing: ease-out-back; }
             }
             track := TouchArea {
                 mouse-cursor: pointer;
@@ -308,7 +312,6 @@ export component ActionRow inherits RowBase {
     accessible-role: button;
     accessible-label: root.label;
     height: body.preferred-height;
-    opacity: root.enabled ? 1.0 : 0.45;
 
     body := HorizontalLayout {
         padding-left: 16px;
@@ -320,14 +323,15 @@ export component ActionRow inherits RowBase {
             alignment: center;
             Icon {
                 name: root.icon;
-                tint: root.danger ? Theme.danger : Theme.muted;
+                tint: !root.enabled ? Theme.faint : (root.danger ? Theme.danger : Theme.muted);
             }
         }
         RowText {
             horizontal-stretch: 1;
             label: root.label;
             hint: root.hint;
-            tone: root.danger ? Theme.danger : Theme.text;
+            tone: !root.enabled ? Theme.faint : (root.danger ? Theme.danger : Theme.text);
+            hint-tone: root.enabled ? Theme.muted : Theme.faint;
         }
         if root.value != "": VerticalLayout {
             alignment: center;
@@ -338,7 +342,7 @@ export component ActionRow inherits RowBase {
                 background: root.highlight ? Theme.accent : (root.danger || root.value-danger ? Theme.danger.transparentize(0.85) : Theme.bg);
                 value-text := Text {
                     text: root.value;
-                    color: root.highlight ? Theme.on-accent : (root.danger || root.value-danger ? Theme.danger : Theme.text);
+                    color: !root.enabled ? Theme.faint : (root.highlight ? Theme.on-accent : (root.danger || root.value-danger ? Theme.danger : Theme.text));
                     font-size: Theme.caption-size;
                     font-weight: 700;
                     horizontal-alignment: center;
@@ -536,8 +540,8 @@ component OptionItem inherits Focusable {
     background: root.pressed ? Theme.border : (root.focused || root.hovered ? Theme.card-hover : Theme.card.transparentize(1));
     border-width: root.focused ? 2px : 0px;
     border-color: Theme.accent;
-    drop-shadow-blur: root.focused ? 14px : 0px;
-    drop-shadow-color: Theme.glow;
+    drop-shadow-blur: 14px;
+    drop-shadow-color: root.focused ? Theme.glow : transparent;
 
     HorizontalLayout {
         padding-left: 14px;

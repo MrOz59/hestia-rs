@@ -73,8 +73,8 @@ component QuickRow inherits Focusable {
     background: root.pressed ? Theme.border : (root.focused || root.hovered ? Theme.card-hover : Theme.surface.transparentize(1));
     border-width: root.focused ? 2px : 0px;
     border-color: Theme.accent;
-    drop-shadow-blur: root.focused ? 14px : 0px;
-    drop-shadow-color: Theme.glow;
+    drop-shadow-blur: 14px;
+    drop-shadow-color: root.focused ? Theme.glow : transparent;
     animate background { duration: 100ms; }
 
     HorizontalLayout {
@@ -128,9 +128,11 @@ component QuickTile inherits Focusable {
         : (root.pressed ? Theme.border : (root.focused || root.hovered ? Theme.card-hover : Theme.card));
     border-width: root.focused ? 2px : 0px;
     border-color: root.danger ? Theme.danger : Theme.accent;
-    drop-shadow-blur: root.focused ? 16px : 0px;
-    drop-shadow-color: root.danger ? Theme.danger.transparentize(0.5) : Theme.glow;
+    drop-shadow-blur: 16px;
+    drop-shadow-color: !root.focused ? transparent : (root.danger ? Theme.danger.transparentize(0.5) : Theme.glow);
+    transform-scale: root.pressed ? 0.95 : 1;
     animate background { duration: 100ms; }
+    animate transform-scale { duration: 110ms; easing: ease-out-quad; }
 
     VerticalLayout {
         alignment: center;
@@ -515,9 +517,21 @@ export component StreamView inherits Rectangle {
         }
     }
 
-    if root.banner != "" && !root.keyboard-open: Rectangle {
+    // Rises from below the edge. Over the video everything redraws with
+    // each picture, so overlays here only move: an `opacity` fade would be
+    // an offscreen layer on every frame, a shadow one more texture to draw.
+    if root.banner != "" && !root.keyboard-open: banner-box := Rectangle {
+        property <bool> shown;
+        Timer {
+            interval: 16ms;
+            running: !banner-box.shown;
+            triggered => {
+                banner-box.shown = true;
+            }
+        }
         x: (root.width - self.width) / 2;
-        y: root.height - self.height - 24px;
+        y: root.height - self.height - 24px + (self.shown ? 0px : self.height + 48px);
+        animate y { duration: 420ms; easing: cubic-bezier(0.16, 1, 0.3, 1); }
         width: Math.min(banner-row.preferred-width, root.width - 32px);
         height: banner-row.preferred-height;
         border-radius: 14px;
@@ -552,9 +566,18 @@ export component StreamView inherits Rectangle {
     // Shortcut keys while the keyboard is open: a slim row at the top, so
     // the on-screen keyboard (which types straight into the host) can't
     // cover it.
-    if root.keyboard-open: Rectangle {
+    if root.keyboard-open: key-box := Rectangle {
+        property <bool> shown;
+        Timer {
+            interval: 16ms;
+            running: !key-box.shown;
+            triggered => {
+                key-box.shown = true;
+            }
+        }
         x: 8px;
-        y: 8px;
+        y: self.shown ? 8px : -self.height - 8px;
+        animate y { duration: 300ms; easing: cubic-bezier(0.2, 0.9, 0.25, 1); }
         width: root.width - (root.show-menu-button ? Theme.control-height + 28px : 16px);
         height: key-bar.preferred-height;
         border-radius: 16px;
@@ -603,7 +626,9 @@ export component StreamView inherits Rectangle {
         background: handle.has-hover || handle.pressed ? Theme.accent.transparentize(0.3) : #0a0807a0;
         border-width: 1px;
         border-color: #ffffff1c;
+        transform-scale: handle.pressed ? 0.9 : 1;
         animate background { duration: 120ms; }
+        animate transform-scale { duration: 110ms; easing: ease-out-quad; }
         Icon {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
@@ -620,38 +645,33 @@ export component StreamView inherits Rectangle {
         }
     }
 
-    // The menu: a panel on the right over a dimmed picture; tapping the
-    // picture closes it.
-    if root.menu-open: Rectangle {
-        background: #0000007a;
+    // The menu: a drawer that slides in from the right over a dimmed picture
+    // and back out when it closes; tapping the picture closes it. Both stay
+    // in the tree for the slide out, hidden (not drawn, no input) once the
+    // drawer is off screen. No shadow and no fade: they would cost on every
+    // video frame, and the dimming already sets the drawer apart.
+    Rectangle {
+        visible: root.menu-open || panel.x < root.width;
+        background: root.menu-open ? #0000007a : #00000000;
+        animate background { duration: 240ms; easing: ease-out-quad; }
         TouchArea {
+            enabled: root.menu-open;
             clicked => {
                 root.menu-open = false;
             }
         }
     }
-    if root.menu-open: panel := Rectangle {
-        property <bool> shown;
-        Timer {
-            interval: 16ms;
-            running: !panel.shown;
-            triggered => {
-                panel.shown = true;
-            }
-        }
+    panel := Rectangle {
         width: Math.min(Theme.compact ? 340px : 360px, root.width - 20px);
         height: root.height - 20px;
-        x: root.width - self.width - 10px + (self.shown ? 0px : 48px);
+        x: root.menu-open ? root.width - self.width - 10px : root.width + 2px;
         y: 10px;
-        opacity: self.shown ? 1 : 0;
-        animate x { duration: 220ms; easing: cubic-bezier(0.2, 0.9, 0.3, 1); }
-        animate opacity { duration: 140ms; }
+        visible: root.menu-open || self.x < root.width;
+        animate x { duration: 320ms; easing: cubic-bezier(0.2, 0.9, 0.25, 1); }
         border-radius: Theme.radius + 2px;
         background: Theme.surface;
         border-width: 1px;
         border-color: Theme.border;
-        drop-shadow-blur: 30px;
-        drop-shadow-color: #000000a0;
         clip: true;
 
         // Swallow taps so they don't reach the picture.

@@ -194,9 +194,10 @@ fn fill_sample_data(ui: &AppWindow) {
     ui.set_pair_busy(true);
 }
 
-/// Lets timers fire and animations (page fades, dialogs, focus) finish.
+/// Lets timers fire and animations (page arrivals, dialogs, the splash
+/// fading out) finish.
 fn settle() {
-    for _ in 0..8 {
+    for _ in 0..12 {
         slint::platform::update_timers_and_animations();
         std::thread::sleep(Duration::from_millis(50));
     }
