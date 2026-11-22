@@ -6,6 +6,13 @@ package=com.mroz59.hestia.rs
 component="$package/android.app.NativeActivity"
 
 check_launch() {
+    local category resolved
+    for category in LAUNCHER LEANBACK_LAUNCHER; do
+        resolved=$(adb shell cmd package resolve-activity --brief \
+            -a android.intent.action.MAIN -c "android.intent.category.$category" -p "$package")
+        [[ "$resolved" == *"$component"* ]]
+    done
+
     adb logcat -c
     local launch
     launch=$(adb shell am start -W -n "$component")
