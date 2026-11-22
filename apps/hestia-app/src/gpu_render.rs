@@ -19,6 +19,7 @@ use std::ptr;
 use std::sync::Arc;
 use std::time::Instant;
 
+use hestia_frontend::gl_yuv::YuvPass;
 use hestia_frontend::presentation::GpuWindow;
 use hestia_media::FrameBuffer;
 use hestia_media::gpu_video::GpuPicture;
@@ -638,6 +639,7 @@ struct Renderer {
     weak: slint::Weak<AppWindow>,
     gpu: Arc<GpuWindow>,
     gl: Option<Gl>,
+    planar: Option<YuvPass>,
     /// The stream view shows our texture (for this stream, at this size).
     image_set: Option<(u64, (u32, u32))>,
 }
@@ -659,26 +661,44 @@ impl Renderer {
         }
     }
 
-    fn before_rendering(&mut self) {
+    fn before_rendering(&mut self, api: &GraphicsAPI<'_>) {
         let Some(gl) = self.gl.as_mut() else { return };
         let Some(presentation) = self.gpu.active() else { return };
         let Some(frame) = presentation.take_gpu() else { return };
-        let FrameBuffer::Native(NativePicture::Android(picture)) = frame.buffer else {
-            return;
+        let result = match &frame.buffer {
+            FrameBuffer::Native(NativePicture::Android(picture)) => {
+                gl.draw(picture).and_then(|draw| Ok((draw, Some(gl.release_fence()?))))
+            }
+            FrameBuffer::Native(NativePicture::Planar(picture)) => {
+                let GraphicsAPI::NativeOpenGL { get_proc_address } = api else {
+                    return;
+                };
+                // Only a planar stream needs this shader. MediaCodec continues
+                // to import hardware buffers through its external texture.
+                (|| {
+                    if self.planar.is_none() {
+                        self.planar = Some(YuvPass::new(*get_proc_address)?);
+                    }
+                    self.planar
+                        .as_mut()
+                        .unwrap()
+                        .draw_picture(picture)
+                        .map(|draw| (draw, None))
+                })()
+            }
+            _ => return,
         };
-        let result = gl.draw(&picture).and_then(|draw| {
-            let fence = gl.release_fence()?;
-            Ok((draw, fence))
-        });
         match result {
             Ok(((texture, resized), fence)) => {
-                let key = (presentation.generation, (picture.width, picture.height));
+                let key = (presentation.generation, (frame.width, frame.height));
                 let now = Instant::now();
                 let stats = &presentation.gpu;
                 stats.ready_to_draw.record(now.duration_since(frame.decoded_at));
                 stats.receive_to_draw.record(now.duration_since(frame.received_at));
                 stats.record_draw(frame.idr_requested_at, frame.loss_detected_at, now);
-                picture.release(fence);
+                if let (Some(fence), FrameBuffer::Native(NativePicture::Android(picture))) = (fence, frame.buffer) {
+                    picture.release(fence);
+                }
                 if !presentation.gpu_available() || !self.gpu.is_active(presentation.generation) {
                     return;
                 }
@@ -725,6 +745,9 @@ impl Renderer {
             presentation.discard_gpu();
         }
         self.clear_image();
+        if let Some(mut pass) = self.planar.take() {
+            pass.delete();
+        }
         if let Some(mut gl) = self.gl.take() {
             gl.delete();
         }
@@ -737,11 +760,12 @@ pub(crate) fn install(ui: &AppWindow, gpu: Arc<GpuWindow>) {
         weak: ui.as_weak(),
         gpu,
         gl: None,
+        planar: None,
         image_set: None,
     };
     let result = ui.window().set_rendering_notifier(move |state, api| match state {
         RenderingState::RenderingSetup => renderer.setup(api),
-        RenderingState::BeforeRendering => renderer.before_rendering(),
+        RenderingState::BeforeRendering => renderer.before_rendering(api),
         RenderingState::RenderingTeardown => renderer.teardown(),
         _ => {}
     });

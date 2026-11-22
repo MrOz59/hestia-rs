@@ -357,6 +357,24 @@ pub struct YuvPass {
 }
 
 impl YuvPass {
+    /// Upload a decoder's pooled I420 planes into the persistent textures.
+    pub fn draw_picture(
+        &mut self,
+        picture: &hestia_media::native_picture::PlanarPicture,
+    ) -> Result<(u32, bool), String> {
+        let (y, u, v) = picture.planes();
+        let (matrix, offset) = picture.colorimetry.gpu_conversion();
+        self.draw(&Planes {
+            y,
+            u,
+            v,
+            width: picture.width,
+            height: picture.height,
+            matrix,
+            offset,
+        })
+    }
+
     /// The context makes textures from EGL images ([`Self::draw_nv12`]).
     pub fn draws_egl_images(&self) -> bool {
         self.gl.glEGLImageTargetTexture2DOES.is_some()

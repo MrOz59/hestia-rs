@@ -10,6 +10,28 @@ use crate::{Colorimetry, FrameDecoder, VideoFormat};
 /// The decoder and the formats it can announce to the host.
 pub type DecoderChoice = (Box<dyn FrameDecoder>, Vec<VideoFormat>);
 
+/// Opens the experimental Vulkan codec before launch so an unavailable
+/// runtime or incompatible GPU is reported before starting the host app.
+pub fn pyrowave_decoder(
+    width: u32,
+    height: u32,
+    hardware: bool,
+    gpu: Option<Arc<GpuOutput>>,
+) -> Result<DecoderChoice, String> {
+    if !hardware {
+        return Err("Enable hardware decoding to use PyroWave".into());
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        crate::pyrowave::open(width, height, gpu)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let _ = (width, height, gpu);
+        Err("PyroWave is available on Linux and Android".into())
+    }
+}
+
 /// Select hardware for this session when requested. The platform supplies its
 /// probe, so asking for software never queries the native decoder APIs.
 pub fn select_decoder(

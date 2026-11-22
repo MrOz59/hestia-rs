@@ -52,14 +52,19 @@ impl SessionListener for Forward {
 }
 
 fn all_formats() -> Vec<VideoFormat> {
-    [VideoCodec::Av1, VideoCodec::Hevc, VideoCodec::H264]
-        .into_iter()
-        .map(|codec| VideoFormat {
-            codec,
-            ten_bit: false,
-            yuv444: false,
-        })
-        .collect()
+    [
+        VideoCodec::Av1,
+        VideoCodec::Hevc,
+        VideoCodec::H264,
+        VideoCodec::PyroWave,
+    ]
+    .into_iter()
+    .map(|codec| VideoFormat {
+        codec,
+        ten_bit: false,
+        yuv444: false,
+    })
+    .collect()
 }
 
 /// Saves one decoded picture as a binary PPM (any image viewer opens it).
@@ -96,8 +101,16 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
     let mut decode_stats: Option<Arc<DecodeStats>> = None;
     let (formats, video_sink): (Vec<VideoFormat>, Box<dyn VideoSink>) = match opts.mode {
         VideoMode::Decode => {
-            let (decoder, formats) =
-                hestia_media::decoder_with(Colorimetry::default(), opts.settings.hardware_decoding)?;
+            let (decoder, formats) = if opts.settings.codec == hestia_core::CodecPreference::PyroWave {
+                hestia_media::video_decoder::pyrowave_decoder(
+                    opts.settings.width,
+                    opts.settings.height,
+                    opts.settings.hardware_decoding,
+                    None,
+                )
+            } else {
+                hestia_media::decoder_with(Colorimetry::default(), opts.settings.hardware_decoding)
+            }?;
             let snapshot = opts.snapshot.clone();
             let started = Instant::now();
             let mut saved = false;

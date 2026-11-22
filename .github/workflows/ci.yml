@@ -55,6 +55,9 @@ jobs:
       - name: Tests
         run: cargo test --workspace
 
+      - name: Build the bundled PyroWave runtime
+        run: scripts/build-pyrowave.sh linux target/release/lib
+
       - name: Release build
         run: cargo build --release -p hestia-app -p hestia-cli
 
@@ -72,7 +75,31 @@ jobs:
           path: |
             target/release/hestia-app
             target/release/hestia
+            target/release/lib/
           if-no-files-found: error
+
+  pyrowave:
+    name: PyroWave Vulkan decode
+    runs-on: ubuntu-latest
+    container: rust:1-trixie
+    steps:
+      - uses: actions/checkout@v5
+      # Lavapipe 25.0 crashes in the pinned SDK's decode shader, including
+      # with its standalone C API. Exercise the software ICD from Mesa 26.
+      - name: Install headless Vulkan
+        run: |
+          echo 'deb http://deb.debian.org/debian trixie-backports main' >/etc/apt/sources.list.d/backports.list
+          apt-get update
+          apt-get install -y --no-install-recommends cmake
+          apt-get install -y --no-install-recommends -t trixie-backports mesa-vulkan-drivers
+      - name: Decode the reference picture
+        run: |
+          scripts/build-pyrowave.sh linux target/pyrowave-runtime
+          export LD_LIBRARY_PATH="$PWD/target/pyrowave-runtime"
+          export VK_DRIVER_FILES="$(find /usr/share/vulkan/icd.d -name '*lvp*.json' -print -quit)"
+          test -f "$VK_DRIVER_FILES"
+          export LP_NATIVE_VECTOR_WIDTH=512
+          cargo test -p hestia-media --no-default-features decodes_reference_frame_on_vulkan -- --ignored
 
   interop:
     name: Interop (ENet vs cgutman/enet)
@@ -153,6 +180,10 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
+      - name: Build PyroWave for 64-bit Android
+        if: "!matrix.skia-from-source"
+        run: scripts/build-pyrowave.sh ${{ matrix.abi }} android-libs
+
       - name: Build native library
         run: cargo ndk -t ${{ matrix.abi }} --platform 26 build --release -p hestia-app --lib
 
@@ -180,12 +211,13 @@ jobs:
             exit 1
           fi
           echo "no unresolved C++ runtime symbols"
-          ls -l "$so"
+          mkdir -p android-libs
+          cp "$so" android-libs/
 
       - uses: actions/upload-artifact@v4
         with:
           name: hestia-rs-android-lib-${{ matrix.abi }}
-          path: target/${{ matrix.target }}/release/libhestia_app.so
+          path: android-libs/
           if-no-files-found: error
 
   # One universal APK with every ABI that built, plus one per ABI, all
@@ -229,7 +261,7 @@ jobs:
           mkdir -p jni
           for dir in libs/hestia-rs-android-lib-*; do
             abi=${dir#libs/hestia-rs-android-lib-}
-            mkdir -p "jni/$abi" && cp "$dir/libhestia_app.so" "jni/$abi/"
+            cp -R "$dir" "jni/$abi"
           done
           ls -R jni
           keystore="$RUNNER_TEMP/release.keystore"
@@ -330,6 +362,11 @@ jobs:
               printf '%s\n' "$package" "$actual_abis"
               exit 1
             fi
+            for abi in "${expected_abis[@]}"; do
+              if [[ "$abi" == arm64-v8a || "$abi" == x86_64 ]]; then
+                unzip -tq "$apk" "lib/$abi/libpyrowave-shared.so" 'assets/pyrowave/licenses/PyroWave-LICENSE'
+              fi
+            done
             "$tools/zipalign" -c 4 "$apk"
             certificate=$("$tools/apksigner" verify --print-certs "$apk")
             fingerprint=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' <<< "$certificate")
@@ -374,7 +411,7 @@ jobs:
   # Every push to main replaces the "nightly" pre-release with fresh builds.
   nightly:
     name: Nightly release
-    needs: [linux, android-package, android-install, interop]
+    needs: [linux, android-package, android-install, interop, pyrowave]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -403,6 +440,7 @@ jobs:
           mkdir -p dist staging/hestia-rs
           linux=artifacts/hestia-rs-linux-x86_64
           install -m 755 "$linux/hestia-app" "$linux/hestia" staging/hestia-rs/
+          cp -R "$linux/lib" staging/hestia-rs/
           cp README.md LICENSE staging/hestia-rs/
           tar -C staging -czf dist/hestia-rs-linux-x86_64.tar.gz hestia-rs
           test -f artifacts/hestia-rs-android-apks/hestia-rs-android-universal.apk

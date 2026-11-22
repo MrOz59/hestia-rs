@@ -146,11 +146,17 @@ impl HostSdp {
                 VideoCodec::H264 => true, // Legacy GameStream hosts always support baseline H.264.
                 VideoCodec::Hevc => self.supports_hevc(),
                 VideoCodec::Av1 => self.supports_av1(),
+                VideoCodec::PyroWave => self
+                    .raw
+                    .lines()
+                    .filter_map(|line| line.trim().strip_prefix("a=rtpmap:"))
+                    .any(|mapping| mapping.split_whitespace().nth(1) == Some("PYROWAVE/90000")),
             };
             let required_flag = match (format.codec, format.ten_bit, format.yuv444) {
+                (VideoCodec::PyroWave, false, false) => SCM_PYROWAVE,
                 (_, false, false) => return advertised,
                 (VideoCodec::H264, false, true) => SCM_H264_HIGH8_444,
-                (VideoCodec::H264, true, _) => return false,
+                (VideoCodec::H264, true, _) | (VideoCodec::PyroWave, _, _) => return false,
                 (VideoCodec::Hevc, true, true) => SCM_HEVC_REXT10_444,
                 (VideoCodec::Hevc, true, false) => SCM_HEVC_MAIN10,
                 (VideoCodec::Hevc, false, true) => SCM_HEVC_REXT8_444,
@@ -165,6 +171,7 @@ impl HostSdp {
 
 /// Server codec mode flags, duplicated here to keep this crate standalone.
 mod hestia_codec_flags {
+    pub const SCM_PYROWAVE: u32 = 0x4000_0000;
     pub const SCM_HEVC_MAIN10: u32 = 0x0000_0200;
     pub const SCM_AV1_MAIN10: u32 = 0x0002_0000;
     pub const SCM_H264_HIGH8_444: u32 = 0x0004_0000;
@@ -265,6 +272,7 @@ pub fn build_announce(p: &AnnounceParams) -> String {
 
     a("x-nv-video[0].videoEncoderSlicesPerFrame", "1".into());
     match p.format.codec {
+        VideoCodec::PyroWave => a("x-nv-vqos[0].bitStreamFormat", "64".into()),
         VideoCodec::Av1 => a("x-nv-vqos[0].bitStreamFormat", "2".into()),
         VideoCodec::Hevc => {
             a("x-nv-clientSupportHevc", "1".into());
@@ -385,6 +393,30 @@ a=fmtp:97 surround-params=88001234567\n";
     }
 
     #[test]
+    fn pyrowave_requires_both_host_advertisements_and_sdr_420() {
+        let pyro = VideoFormat {
+            codec: VideoCodec::PyroWave,
+            ten_bit: false,
+            yuv444: false,
+        };
+        let host = HostSdp::new("a=rtpmap:98 PYROWAVE/90000\r\n");
+        let mask = hestia_codec_flags::SCM_PYROWAVE;
+        assert_eq!(host.negotiate_video(&[pyro], mask), Some(pyro));
+        assert_eq!(HostSdp::default().negotiate_video(&[pyro], mask), None);
+        assert_eq!(host.negotiate_video(&[pyro], 0), None);
+        assert_eq!(
+            host.negotiate_video(
+                &[
+                    VideoFormat { ten_bit: true, ..pyro },
+                    VideoFormat { yuv444: true, ..pyro }
+                ],
+                mask
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn announce_has_everything_hermes_requires() {
         let p = AnnounceParams {
             width: 1920,
@@ -411,6 +443,14 @@ a=fmtp:97 surround-params=88001234567\n";
             encoder_csc_mode: 0,
         };
         let sdp = build_announce(&p);
+        let mut pyro_params = p;
+        pyro_params.format.codec = VideoCodec::PyroWave;
+        let pyro = build_announce(&pyro_params);
+        assert!(
+            pyro.lines()
+                .any(|line| line.trim() == "a=x-nv-vqos[0].bitStreamFormat:64")
+        );
+
         assert!(sdp.starts_with("v=0\r\no=android 0 14 IN IPv4 192.168.0.10\r\ns=NVIDIA Streaming Client\r\n"));
         assert!(sdp.ends_with("t=0 0\r\nm=video 47998  \r\n"));
         // Every key Hermes' cmd_announce reads with args.at(...)

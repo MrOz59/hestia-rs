@@ -25,7 +25,7 @@ use std::time::Instant;
 use hestia_frontend::gl_dmabuf::DmabufImporter;
 #[cfg(target_os = "linux")]
 use hestia_frontend::gl_yuv::Nv12Images;
-use hestia_frontend::gl_yuv::{Planes, YuvPass};
+use hestia_frontend::gl_yuv::YuvPass;
 use hestia_frontend::presentation::GpuWindow;
 use hestia_media::native_picture::NativePicture;
 use hestia_media::{DecodedFrame, FrameBuffer};
@@ -100,19 +100,12 @@ impl Renderer {
         let pass = self.pass.as_mut()?;
         match &frame.buffer {
             FrameBuffer::Native(NativePicture::Planar(picture)) => {
-                let (y, u, v) = picture.planes();
-                let (matrix, offset) = picture.colorimetry.gpu_conversion();
                 let size = (picture.width, picture.height);
-                let planes = Planes {
-                    y,
-                    u,
-                    v,
-                    width: size.0,
-                    height: size.1,
-                    matrix,
-                    offset,
-                };
-                Some(pass.draw(&planes).map(|drawn| (size, drawn)).map_err(|e| (e, false)))
+                Some(
+                    pass.draw_picture(picture)
+                        .map(|drawn| (size, drawn))
+                        .map_err(|e| (e, false)),
+                )
             }
             #[cfg(target_os = "linux")]
             FrameBuffer::Native(NativePicture::Dmabuf(picture)) => {

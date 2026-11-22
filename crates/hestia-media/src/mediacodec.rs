@@ -60,11 +60,12 @@ enum Output {
     Buffers,
 }
 
-fn mime(codec: VideoCodec) -> &'static str {
+fn mime(codec: VideoCodec) -> Option<&'static str> {
     match codec {
-        VideoCodec::H264 => "video/avc",
-        VideoCodec::Hevc => "video/hevc",
-        VideoCodec::Av1 => "video/av01",
+        VideoCodec::H264 => Some("video/avc"),
+        VideoCodec::Hevc => Some("video/hevc"),
+        VideoCodec::Av1 => Some("video/av01"),
+        VideoCodec::PyroWave => None,
     }
 }
 
@@ -122,7 +123,7 @@ impl MediaCodecDecoder {
     pub fn probe(colorimetry: Colorimetry) -> Option<Self> {
         let components = [VideoCodec::Hevc, VideoCodec::H264, VideoCodec::Av1]
             .into_iter()
-            .filter(|&codec| MediaCodec::from_decoder_type(mime(codec)).is_some())
+            .filter(|&codec| mime(codec).and_then(MediaCodec::from_decoder_type).is_some())
             .map(|codec| (codec, None))
             .collect();
         Self::new(colorimetry, components, None)
@@ -135,6 +136,7 @@ impl MediaCodecDecoder {
     ) -> Option<Self> {
         let components = components
             .into_iter()
+            .filter(|(codec, _)| mime(*codec).is_some())
             .map(|(codec, name)| (codec, Some(name)))
             .collect();
         Self::new(colorimetry, components, gpu_output)
@@ -184,7 +186,7 @@ impl MediaCodecDecoder {
         output: Output,
         component: Option<&str>,
     ) -> Result<Running, String> {
-        let mime = mime(format.codec);
+        let mime = mime(format.codec).ok_or("not a MediaCodec format")?;
         let create_codec = || {
             match component {
                 Some(name) => MediaCodec::from_codec_name(name),
