@@ -362,6 +362,27 @@ impl AndroidWindowAdapter {
                             touch_pos(p.x(), p.y())
                         };
 
+                    // Hestia RS patch: a mouse is a mouse. Its buttons arrive
+                    // as ButtonPress/ButtonRelease (below), so the Down/Up that
+                    // frame them would add a second, touch-style press; and a
+                    // drag is pointer motion, not a finger.
+                    if is_mouse(motion_event) {
+                        match motion_event.action() {
+                            MotionAction::Down | MotionAction::Up | MotionAction::Cancel => {
+                                return InputStatus::Handled;
+                            }
+                            MotionAction::Move => {
+                                let position = position_for_event(motion_event, offset, scale);
+                                result = self
+                                    .window
+                                    .dispatch_event_with_result(WindowEvent::PointerMoved { position })
+                                    .map(|_| ());
+                                return InputStatus::Handled;
+                            }
+                            _ => {}
+                        }
+                    }
+
                     match motion_event.action() {
                         MotionAction::ButtonPress => {
                             result = self
@@ -759,6 +780,16 @@ fn pointer_logical_position(
     scale_factor: f32,
 ) -> LogicalPosition {
     PhysicalPosition::new(x as i32 - offset.x, y as i32 - offset.y).to_logical(scale_factor)
+}
+
+/// Hestia RS patch: the event comes from a mouse pointer (not a finger, a
+/// pen, or a touchpad finger in pointer mode).
+fn is_mouse(motion_event: &MotionEvent) -> bool {
+    motion_event.pointer_count() > 0
+        && matches!(
+            motion_event.pointer_at_index(0).tool_type(),
+            android_activity::input::ToolType::Mouse
+        )
 }
 
 fn position_for_event(

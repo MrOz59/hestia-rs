@@ -6,6 +6,7 @@ mod android;
 mod clipboard;
 mod display;
 mod gamepads;
+mod input;
 mod keyboard;
 #[cfg(target_os = "android")]
 mod network;
@@ -15,12 +16,13 @@ mod reports;
 pub use android::{set_android_app, video_decoders};
 pub use clipboard::{clipboard_stamp, clipboard_text, set_clipboard_text};
 pub use display::{device_summary, native_display, set_stream_mode};
-#[cfg(target_os = "android")]
-pub use gamepads::android_input_hook;
 pub use gamepads::{
     gamepad_gone, gamepad_state, onscreen_gamepad, onscreen_gamepad_off, rumble, set_gamepad_sink,
     set_gamepads_streaming,
 };
+#[cfg(target_os = "android")]
+pub use input::android_input_hook;
+pub use input::{has_pointer_capture, set_key_sink, set_pointer_sink};
 pub use keyboard::{has_soft_keyboard, set_ime_sink, set_keyboard_visible};
 #[cfg(target_os = "android")]
 pub use network::route_for;

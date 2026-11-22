@@ -36,6 +36,9 @@ log.workspace = true
 [target.'cfg(not(target_os = "android"))'.dependencies]
 env_logger.workspace = true
 directories.workspace = true
+# winit underneath Slint: keys by position, touch screens' fingers, relative
+# mouse motion and pointer lock (src/desktop_input.rs).
+slint = { workspace = true, features = ["unstable-winit-030"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 slint = { workspace = true, features = ["backend-android-activity-06"] }

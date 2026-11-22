@@ -414,6 +414,18 @@ impl View for SlintView<'_> {
     fn set_stream_video_scale(&self, scale: i32) {
         self.0.set_stream_video_scale(scale);
     }
+    fn set_stream_mouse_capture(&self, on: bool) {
+        self.0.set_stream_mouse_capture(on);
+    }
+    fn set_stream_pointer_capture_available(&self, on: bool) {
+        self.0.set_stream_pointer_capture_available(on);
+    }
+    fn set_pointer_capture(&self, on: bool) {
+        #[cfg(not(target_os = "android"))]
+        crate::desktop_input::set_pointer_capture(self.0.window(), on);
+        #[cfg(target_os = "android")]
+        let _ = on;
+    }
 
     fn show_settings(&self, form: SettingsForm) {
         let w = self.0;
@@ -535,7 +547,15 @@ pub(crate) fn wire(ui: &AppWindow, controller: &Arc<Controller>) {
     let c = controller.clone();
     ui.on_stream_toggle_zoom(move || c.toggle_zoom());
     let c = controller.clone();
-    ui.on_stream_view_size(move |w, h| c.stream_view_size(w, h));
+    let window = ui.as_weak();
+    ui.on_stream_view_size(move |w, h| {
+        let scale = window.upgrade().map_or(1.0, |ui| ui.window().scale_factor());
+        c.stream_view_size(w, h, scale)
+    });
+    let c = controller.clone();
+    ui.on_stream_input_focus(move |on| c.stream_input_focus(on));
+    let c = controller.clone();
+    ui.on_stream_toggle_mouse_capture(move || c.toggle_mouse_capture());
     let c = controller.clone();
     ui.on_settings_custom_resolution(move |text| c.custom_resolution(&text));
     let c = controller.clone();

@@ -8,6 +8,8 @@
 //! `docs/FRONTENDS.md` for writing another shell.
 
 #[cfg(not(target_os = "android"))]
+mod desktop_input;
+#[cfg(not(target_os = "android"))]
 mod gl_video;
 #[cfg(target_os = "android")]
 mod gpu_render;
@@ -33,6 +35,10 @@ pub fn pad_preview(width: f32, height: f32) -> Vec<PadControl> {
 
 /// Builds the window and runs the event loop until it closes.
 pub fn run(data_dir: PathBuf) -> Result<(), slint::PlatformError> {
+    // Desktop: keys by position, every finger, mouse capture (winit, below
+    // Slint). Must come before the window.
+    #[cfg(not(target_os = "android"))]
+    desktop_input::install();
     let ui = AppWindow::new()?;
     ui.set_is_android(cfg!(target_os = "android"));
     // The renderer that draws native pictures inside Slint's rendering.
@@ -43,6 +49,8 @@ pub fn run(data_dir: PathBuf) -> Result<(), slint::PlatformError> {
     gl_video::install(&ui, gpu_window.clone());
     let controller = Controller::new(Arc::new(slint_ui::SlintUi::new(&ui)), gpu_window);
     slint_ui::wire(&ui, &controller);
+    #[cfg(not(target_os = "android"))]
+    desktop_input::connect(&controller);
     // Desktop: game controllers straight from evdev.
     #[cfg(target_os = "linux")]
     hestia_frontend::desktop_pads::start();
@@ -63,7 +71,8 @@ fn android_main(app: slint::android::AndroidApp) {
     hestia_frontend::platform::set_android_app(app.clone());
     // Reach LAN hosts over Wi-Fi even when Android prefers mobile data.
     hestia_core::nvhttp::http::set_route_hook(hestia_frontend::platform::route_for);
-    // Game controllers reach the host through the (patched) backend's hook.
+    // Game controllers, keyboards by position, every finger and pens reach
+    // the host through the (patched) backend's hook.
     i_slint_backend_android_activity::set_input_hook(hestia_frontend::platform::android_input_hook);
     let data_dir = app
         .internal_data_path()

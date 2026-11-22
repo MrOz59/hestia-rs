@@ -124,10 +124,16 @@ fn rumble_device(device: i32, low: u16, high: u16) {
     let _ = (device, low, high);
 }
 
-/// Sees every input event before Slint (patched backend). Takes game
-/// controller buttons and sticks while a stream runs.
+/// Whether a stream is running (controllers then drive the host).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(super) fn streaming() -> bool {
+    controllers::active()
+}
+
+/// Game controller buttons and sticks while a stream runs; true when taken.
+/// Part of [`super::android_input_hook`].
 #[cfg(target_os = "android")]
-pub fn android_input_hook(event: &android_activity::input::InputEvent<'_>) -> bool {
+pub(super) fn android_gamepad_event(event: &android_activity::input::InputEvent<'_>) -> bool {
     use android_activity::input::{Axis, InputEvent, KeyAction, MotionAction};
 
     use crate::gamepad::{self, Axes};

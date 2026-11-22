@@ -295,6 +295,14 @@ pub trait View {
     fn set_stream_soft_keyboard(&self, on: bool);
     /// `VideoScale` index.
     fn set_stream_video_scale(&self, scale: i32);
+    /// The stream menu's Mouse entry: captured (relative motion) or free.
+    fn set_stream_mouse_capture(&self, on: bool);
+    /// Whether the menu offers mouse capture (desktop).
+    fn set_stream_pointer_capture_available(&self, on: bool);
+    /// Locks the window's pointer in place and hides it (on), or frees it
+    /// (off). While locked, the shell feeds relative motion to
+    /// `Controller::stream_mouse_motion`.
+    fn set_pointer_capture(&self, on: bool);
 
     // Settings -----------------------------------------------------------
     fn show_settings(&self, form: SettingsForm);

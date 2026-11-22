@@ -9,6 +9,13 @@ pub const SS_ENC_CONTROL_V2: u32 = 0x01;
 pub const SS_ENC_VIDEO: u32 = 0x02;
 pub const SS_ENC_AUDIO: u32 = 0x04;
 
+// Host feature bits (`x-ss-general.featureFlags`).
+
+/// The host takes pen and touch events (`InputEvent::Pen`, `InputEvent::Touch`).
+pub const SS_FF_PEN_TOUCH_EVENTS: u32 = 0x01;
+/// The host takes controller touchpad and motion events.
+pub const SS_FF_CONTROLLER_TOUCH_EVENTS: u32 = 0x02;
+
 /// Moonlight client feature flags we advertise.
 const ML_FF_FEC_STATUS: u32 = 0x01;
 const ML_FF_SESSION_ID_V1: u32 = 0x02;

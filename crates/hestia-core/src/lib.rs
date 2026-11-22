@@ -190,6 +190,15 @@ pub struct StreamDetails {
     pub video_format: stream::VideoFormat,
     pub audio_format: stream::AudioFormat,
     pub encryption_enabled: u32,
+    /// `x-ss-general.featureFlags` from the host (`stream::sdp::SS_FF_*`).
+    pub host_feature_flags: u32,
+}
+
+impl StreamDetails {
+    /// The host takes pen and touch events.
+    pub fn pen_and_touch(&self) -> bool {
+        self.host_feature_flags & stream::sdp::SS_FF_PEN_TOUCH_EVENTS != 0
+    }
 }
 
 impl ManagedStream {
@@ -199,6 +208,7 @@ impl ManagedStream {
             video_format: details.video_format,
             audio_format: details.audio_format,
             encryption_enabled: details.encryption_enabled,
+            host_feature_flags: details.host_feature_flags,
         }
     }
 

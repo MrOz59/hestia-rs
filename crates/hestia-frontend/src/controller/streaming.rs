@@ -2,7 +2,7 @@
 //! frames and forwards keyboard, mouse and touch input to the host.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use hestia_core::TouchMode;
@@ -16,17 +16,17 @@ use log::{info, warn};
 
 use super::report::{self, SharedReport};
 use super::{Controller, Shared, spawn};
+use crate::input::{PointerPhase, RawPointer};
 use crate::presentation::{Presentation, UiPresenter};
-use crate::stream_input::{self, GestureAction, ImeEvent, Picture, StreamInput};
-use crate::typing;
+use crate::stream_input::{self, GestureAction, Held, ImeEvent, Picture, StreamInput, VideoRect};
 use crate::ui::Screen;
 use crate::video_backend::StreamVideo;
 use crate::virtual_pad::PadState;
-use crate::{hostinfo, platform};
+use crate::{hostinfo, keymap, platform, typing};
 
 pub(super) struct ActiveStream {
     generation: u64,
-    session: ManagedStream,
+    out: Output,
     host_id: String,
     input: StreamInput,
     report: SharedReport,
@@ -34,10 +34,79 @@ pub(super) struct ActiveStream {
     present: Arc<Presentation>,
 }
 
-impl ActiveStream {
-    fn send(&self, events: impl IntoIterator<Item = InputEvent>) {
+/// The session's input side: everything for the host goes through here, so
+/// it knows which keys and buttons the host holds.
+struct Output {
+    session: ManagedStream,
+    held: Mutex<Held>,
+}
+
+impl Output {
+    fn held(&self) -> MutexGuard<'_, Held> {
+        self.held.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn send(&self, event: &InputEvent) {
+        self.held().track(event);
+        self.session.send_input(event);
+    }
+
+    fn send_all(&self, events: impl IntoIterator<Item = InputEvent>) {
         for event in events {
-            self.session.send_input(&event);
+            self.send(&event);
+        }
+    }
+
+    /// A key, with the modifiers held once it went down or up.
+    fn send_key(&self, key: u16, pressed: bool) {
+        let modifiers = {
+            let mut held = self.held();
+            held.track(&InputEvent::Key {
+                key,
+                pressed,
+                modifiers: Modifiers::default(),
+            });
+            held.modifiers()
+        };
+        self.session.send_input(&InputEvent::Key {
+            key,
+            pressed,
+            modifiers,
+        });
+    }
+
+    fn modifiers(&self) -> Modifiers {
+        self.held().modifiers()
+    }
+
+    /// Lets go of every key and button the host holds.
+    fn release_all(&self) {
+        let released = self.held().release_all();
+        for event in &released {
+            self.session.send_input(event);
+        }
+    }
+}
+
+/// Stream shortcuts, with Ctrl+Alt+Shift held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hotkey {
+    Disconnect,
+    Stats,
+    MouseCapture,
+}
+
+impl Hotkey {
+    /// By virtual key (letters are their upper-case ASCII code).
+    fn for_key(key: u16) -> Option<Self> {
+        const Q: u16 = b'Q' as u16;
+        const S: u16 = b'S' as u16;
+        const Z: u16 = b'Z' as u16;
+        match key {
+            Q => Some(Self::Disconnect),
+            S => Some(Self::Stats),
+            Z => Some(Self::MouseCapture),
+            _ => None,
         }
     }
 }
@@ -338,17 +407,25 @@ impl Controller {
             session.stop();
             return Err("cancelled".into());
         }
-        let codec = format!("{:?}", session.details().video_format.codec);
+        let details = session.details();
+        let codec = format!("{:?}", details.video_format.codec);
         info!("streaming {size} {codec} from {}", launched.host.name);
         *listener.video.lock().unwrap_or_else(|p| p.into_inner()) = format!("{size}@{} {codec}", launched.request.fps);
         session.report_negotiation(&mut report::lock(&session_report));
 
-        // A stream replacing another keeps the laid-out view (no new layout
-        // event comes for it).
-        let view = self
+        // A stream replacing another keeps the laid-out view and its focus
+        // (no new layout or focus event comes for it).
+        let previous = self
             .active_stream()
             .as_ref()
-            .map_or((0.0, 0.0), |a| a.input.view_size());
+            .map(|a| (a.input.view_size(), a.input.scale(), a.input.video(), a.input.focused));
+        let (view, scale, video, focused) = previous.unwrap_or(((0.0, 0.0), 1.0, VideoRect::default(), true));
+        let mut input = StreamInput::new(stream_width, view, launched.settings.onscreen_controller);
+        input.resize(view.0, view.1, scale);
+        input.set_video(video);
+        input.focused = focused;
+        input.pen_and_touch = details.pen_and_touch();
+        let view = input.view_size();
         // Hermes host offering clipboard sync (the menu's actions, and the
         // setting's live sync).
         let clipboard = self
@@ -360,16 +437,19 @@ impl Controller {
         let clipboard_host = host_id.clone();
         let previous = self.active_stream().replace(ActiveStream {
             generation,
-            session,
+            out: Output {
+                session,
+                held: Mutex::new(Held::default()),
+            },
             host_id,
-            input: StreamInput::new(stream_width, view, launched.settings.onscreen_controller),
+            input,
             report: session_report,
             decode,
             present,
         });
         if let Some(previous) = previous {
             previous.present.close();
-            spawn("hestia-stream-stop", move || previous.session.stop());
+            spawn("hestia-stream-stop", move || previous.out.session.stop());
         }
         let pad = launched.settings.onscreen_controller;
         if clipboard && launched.settings.clipboard_sync {
@@ -384,6 +464,8 @@ impl Controller {
             ui.set_stream_zoom(1.0);
             ui.set_stream_pan_x(0.0);
             ui.set_stream_pan_y(0.0);
+            ui.set_stream_mouse_capture(false);
+            ui.set_pointer_capture(false);
             ui.set_screen(Screen::Stream);
         });
         // Orientation, no system bars, screen on (Android); controllers on.
@@ -408,7 +490,7 @@ impl Controller {
         let c = self.clone();
         spawn("hestia-stream-stop", move || {
             let ActiveStream {
-                session,
+                out: Output { session, .. },
                 host_id,
                 report: session_report,
                 decode,
@@ -524,6 +606,8 @@ impl Controller {
                 ui.set_stream_stats(String::new());
                 ui.set_stream_keyboard_open(false);
                 ui.set_stream_banner(String::new());
+                ui.set_pointer_capture(false);
+                ui.set_stream_mouse_capture(false);
             });
             if let Some(reason) = reason {
                 c.toast(reason);
@@ -553,22 +637,23 @@ impl Controller {
 
     fn send_input(&self, event: InputEvent) {
         if let Some(active) = self.active_stream().as_ref() {
-            active.session.send_input(&event);
+            active.out.send(&event);
         }
     }
 
     /// A key in the stream view: `text` is the character or key name the
-    /// toolkit reports (see `keymap`).
+    /// toolkit reports (see `keymap`). Keys the platform reads by position
+    /// ([`Controller::stream_physical_key`]) don't come here; on-screen
+    /// keyboards and keys without a position do.
     pub fn stream_key(self: &Shared, text: &str, pressed: bool, repeat: bool, modifiers: Modifiers) {
         // The host repeats held keys itself.
         if repeat {
             return;
         }
         if pressed && modifiers.ctrl && modifiers.alt && modifiers.shift {
-            match text.to_ascii_lowercase().as_str() {
-                "q" => return self.end_stream(None, None, false),
-                "s" => return self.ui(|ui| ui.set_stream_show_stats(!ui.stream_show_stats())),
-                _ => {}
+            let key = text.chars().next().map(|c| c.to_ascii_uppercase() as u16);
+            if let Some(hotkey) = key.filter(|_| text.chars().count() == 1).and_then(Hotkey::for_key) {
+                return self.hotkey(hotkey);
             }
         }
         if let Some(event) = stream_input::key(text, pressed, modifiers) {
@@ -576,11 +661,130 @@ impl Controller {
         }
     }
 
-    /// `kind`: 0 down, 1 up, 2 move, 3 cancel. `(x, y)` is relative to the
-    /// video, `size` its size, `screen` the point in the stream view. Touch
-    /// goes to the on-screen controller when it lands on it; otherwise it
-    /// follows the touch mode (trackpad, mouse or real touches). Mice
-    /// position the host cursor absolutely inside the video.
+    /// A key of a physical keyboard, by its Linux input event code (`KEY_*`:
+    /// evdev, Wayland and X11 keycodes minus 8, Android scan codes), seen by
+    /// the platform before the toolkit. Returns true when the stream took it
+    /// (the toolkit must not see it); false when the stream doesn't have the
+    /// keyboard (menu open, no stream) or the key has no place on a host
+    /// keyboard, and the toolkit should handle it as usual.
+    pub fn stream_physical_key(self: &Shared, code: u32, pressed: bool, repeat: bool) -> bool {
+        let Some(key) = keymap::physical(code) else {
+            return false;
+        };
+        let hotkey = {
+            let guard = self.active_stream();
+            let Some(active) = guard.as_ref().filter(|a| a.input.focused) else {
+                return false;
+            };
+            // The host repeats held keys itself.
+            if repeat {
+                return true;
+            }
+            let held = active.out.modifiers();
+            match Hotkey::for_key(key).filter(|_| pressed && held.ctrl && held.alt && held.shift) {
+                Some(hotkey) => Some(hotkey),
+                None => {
+                    active.out.send_key(key, pressed);
+                    None
+                }
+            }
+        };
+        if let Some(hotkey) = hotkey {
+            self.hotkey(hotkey);
+        }
+        true
+    }
+
+    /// Whether the stream has the keyboard now, for platform key hooks: keys
+    /// it should keep from the toolkit even when they aren't for the host
+    /// (the presses a window is sent for keys already held when it gets the
+    /// focus back).
+    pub fn stream_has_keyboard(&self) -> bool {
+        self.active_stream().as_ref().is_some_and(|a| a.input.focused)
+    }
+
+    fn hotkey(self: &Shared, hotkey: Hotkey) {
+        match hotkey {
+            Hotkey::Disconnect => self.end_stream(None, None, false),
+            Hotkey::Stats => self.ui(|ui| ui.set_stream_show_stats(!ui.stream_show_stats())),
+            Hotkey::MouseCapture => self.toggle_mouse_capture(),
+        }
+    }
+
+    /// The stream view got or lost the keyboard and mouse: window focus, the
+    /// menu opening or closing. Losing them lets go of everything the host
+    /// holds (its releases would go elsewhere) and frees a captured mouse
+    /// until they come back.
+    pub fn stream_input_focus(self: &Shared, focused: bool) {
+        let capture = {
+            let mut guard = self.active_stream();
+            let Some(ActiveStream { input, out, .. }) = guard.as_mut() else {
+                return;
+            };
+            if input.focused == focused {
+                return;
+            }
+            let was = input.captured();
+            input.focused = focused;
+            if !focused {
+                input.reset_touch(|event| out.send(&event));
+                out.release_all();
+            }
+            let now = input.captured();
+            (was != now).then_some(now)
+        };
+        if let Some(on) = capture {
+            self.ui(move |ui| ui.set_pointer_capture(on));
+        }
+    }
+
+    /// Menu → Mouse, or Ctrl+Alt+Shift+Z: the host gets relative motion from
+    /// a captured pointer (games, 3D apps) or follows where the mouse points.
+    pub fn toggle_mouse_capture(self: &Shared) {
+        if !platform::has_pointer_capture() {
+            return;
+        }
+        let (mode, engaged) = {
+            let mut guard = self.active_stream();
+            let Some(active) = guard.as_mut() else { return };
+            active.input.capture = !active.input.capture;
+            (active.input.capture, active.input.captured())
+        };
+        self.ui(move |ui| {
+            ui.set_stream_mouse_capture(mode);
+            ui.set_pointer_capture(engaged);
+        });
+        self.toast(if mode {
+            "Mouse captured for the host. Ctrl+Alt+Shift+Z frees it."
+        } else {
+            "Mouse free: the host's cursor goes where you point."
+        });
+    }
+
+    /// Relative mouse motion from the platform (unaccelerated where it can
+    /// be), used while the pointer is captured.
+    pub fn stream_mouse_motion(&self, dx: f64, dy: f64) {
+        let mut guard = self.active_stream();
+        let Some(ActiveStream { input, out, .. }) = guard.as_mut() else {
+            return;
+        };
+        if input.captured()
+            && let Some(event) = input.relative_motion(dx, dy)
+        {
+            out.send(&event);
+        }
+    }
+
+    /// `kind`: 0 down, 1 up, 2 move, 3 cancel. `button`: 1 left, 2 middle,
+    /// 3 right, 4 back, 5 forward. `(x, y)` is relative to the video, `size`
+    /// its size, `screen` the point in the stream view. Touch goes to the
+    /// on-screen controller when it lands on it; otherwise it follows the
+    /// touch mode (trackpad, mouse or real touches). Mice position the host
+    /// cursor absolutely inside the video, or only click while captured.
+    ///
+    /// Where the platform hands over touches itself
+    /// ([`Controller::stream_raw_pointer`]), a touch here only says that the
+    /// touch landed on the stream (not on a button over it).
     pub fn stream_pointer(
         self: &Shared,
         kind: i32,
@@ -591,46 +795,136 @@ impl Controller {
         screen: (f32, f32),
     ) {
         let touch = finger != 0;
-        if touch && self.pad_event(kind, finger, screen) {
-            return;
+        {
+            let mut guard = self.active_stream();
+            let Some(active) = guard.as_mut() else { return };
+            active.input.set_video(VideoRect {
+                origin: (screen.0 - x, screen.1 - y),
+                size: (width, height),
+            });
+            if touch && self.raw_touch.load(Ordering::Relaxed) {
+                let first = if kind == 0 { active.input.router.claim() } else { None };
+                drop(guard);
+                if let Some(first) = first {
+                    self.raw_stream_pointer(first);
+                }
+                return;
+            }
+            if !touch && active.input.captured() {
+                if let Some(event) = stream_input::captured_button(kind, button) {
+                    active.out.send(&event);
+                }
+                return;
+            }
+            if !touch {
+                active.out.send_all(stream_input::absolute_pointer(
+                    kind,
+                    button,
+                    (x, y),
+                    (width, height),
+                    false,
+                ));
+                return;
+            }
         }
-        let mode = self.touch_mode();
-        if touch && mode == TouchMode::Touchscreen {
-            if let Some(event) = stream_input::native_touch(kind, finger, (x, y), (width, height)) {
+        self.touch_pointer(kind, finger, screen, None);
+    }
+
+    /// A finger or pen read by the platform below the toolkit, every finger
+    /// with its own id (see [`crate::input`]). Returns true when the toolkit
+    /// must not see it (a pen hovering over the stream); touches always go
+    /// on to the toolkit too, which says through [`Controller::stream_pointer`]
+    /// whether they landed on the stream.
+    pub fn stream_raw_pointer(self: &Shared, pointer: RawPointer) -> bool {
+        self.raw_touch.store(true, Ordering::Relaxed);
+        let ready = {
+            let mut guard = self.active_stream();
+            let Some(ActiveStream { input, out, .. }) = guard.as_mut() else {
+                return false;
+            };
+            if matches!(pointer.phase, PointerPhase::Hover | PointerPhase::HoverLeave) {
+                // Only the host's pen hovers; otherwise the toolkit makes it a mouse.
+                if !(pointer.tool.is_pen() && input.pen_and_touch && input.focused) {
+                    return false;
+                }
+                let video = input.video();
+                if let Some(event) = stream_input::pen(&pointer, video.local(input.view_point(&pointer)), video.size) {
+                    out.send(&event);
+                }
+                return true;
+            }
+            input.router.raw(pointer)
+        };
+        if let Some(pointer) = ready {
+            self.raw_stream_pointer(pointer);
+        }
+        false
+    }
+
+    /// A finger or pen of a touch that belongs to the stream.
+    fn raw_stream_pointer(self: &Shared, pointer: RawPointer) {
+        let (point, video, as_pen) = {
+            let guard = self.active_stream();
+            let Some(active) = guard.as_ref() else { return };
+            (
+                active.input.view_point(&pointer),
+                active.input.video(),
+                pointer.tool.is_pen() && active.input.pen_and_touch,
+            )
+        };
+        if as_pen {
+            if let Some(event) = stream_input::pen(&pointer, video.local(point), video.size) {
                 self.send_input(event);
             }
             return;
         }
-        let picture = Picture {
-            centre: (screen.0 - x + width / 2.0, screen.1 - y + height / 2.0),
-            size: (width, height),
+        let kind = match pointer.phase {
+            PointerPhase::Down => 0,
+            PointerPhase::Up => 1,
+            PointerPhase::Move => 2,
+            _ => 3,
         };
-        if touch && self.multi_finger(kind, finger, screen, picture) {
+        // Finger 0 means the mouse to the gestures below.
+        self.touch_pointer(kind, pointer.id.saturating_add(1), point, pointer.pressure);
+    }
+
+    /// A finger at `screen` (in the stream view): the on-screen controller,
+    /// real touches, gestures, the trackpad or a direct pointer.
+    fn touch_pointer(self: &Shared, kind: i32, finger: i32, screen: (f32, f32), pressure: Option<f32>) {
+        if self.pad_event(kind, finger, screen) {
+            return;
+        }
+        let Some(video) = self.active_stream().as_ref().map(|a| a.input.video()) else {
+            return;
+        };
+        let local = video.local(screen);
+        let mode = self.touch_mode();
+        if mode == TouchMode::Touchscreen {
+            if let Some(event) = stream_input::native_touch(kind, finger, local, video.size, pressure) {
+                self.send_input(event);
+            }
+            return;
+        }
+        if self.multi_finger(kind, finger, screen, video.picture()) {
             return; // part of a multi-finger gesture, not a pointer action
         }
-        if touch && mode == TouchMode::Trackpad {
-            return self.trackpad_event(kind, x, y, width);
+        if mode == TouchMode::Trackpad {
+            return self.trackpad_event(kind, local.0, local.1, video.size.0);
         }
         if let Some(active) = self.active_stream().as_ref() {
-            active.send(stream_input::absolute_pointer(
-                kind,
-                button,
-                (x, y),
-                (width, height),
-                touch,
-            ));
+            active
+                .out
+                .send_all(stream_input::absolute_pointer(kind, 0, local, video.size, true));
         }
     }
 
     fn multi_finger(self: &Shared, kind: i32, finger: i32, point: (f32, f32), picture: Picture) -> bool {
         let action = {
             let mut guard = self.active_stream();
-            let Some(ActiveStream { input, session, .. }) = guard.as_mut() else {
+            let Some(ActiveStream { input, out, .. }) = guard.as_mut() else {
                 return false;
             };
-            input.multi_finger(kind, finger, point, picture, Instant::now(), |event| {
-                session.send_input(&event)
-            })
+            input.multi_finger(kind, finger, point, picture, Instant::now(), |event| out.send(&event))
         };
         match action {
             GestureAction::Pointer => return false,
@@ -745,11 +1039,13 @@ impl Controller {
     }
 
     /// The stream view was laid out (or resized): re-lay the controller.
-    pub fn stream_view_size(self: &Shared, width: f32, height: f32) {
+    /// `scale` is the window's logical-to-physical pixel ratio, for
+    /// [`Controller::stream_raw_pointer`]'s positions.
+    pub fn stream_view_size(self: &Shared, width: f32, height: f32, scale: f32) {
         let visible = {
             let mut guard = self.active_stream();
             let Some(active) = guard.as_mut() else { return };
-            active.input.resize(width, height)
+            active.input.resize(width, height, scale)
         };
         if visible {
             self.push_pad_view();
@@ -759,30 +1055,27 @@ impl Controller {
     /// A game controller's new state, for the host.
     pub(super) fn stream_gamepad(&self, state: hestia_core::stream::input::GamepadState) {
         if let Some(active) = self.active_stream().as_ref() {
-            active.send([InputEvent::Gamepad(state)]);
+            active.out.send(&InputEvent::Gamepad(state));
         }
     }
 
     /// Text and deletions from the on-screen keyboard, typed on the host.
     pub(super) fn stream_ime(self: &Shared, event: ImeEvent) {
         if let Some(active) = self.active_stream().as_ref() {
-            stream_input::ime(event, |event| active.session.send_input(&event));
+            stream_input::ime(event, |event| active.out.send(&event));
         }
     }
 
     fn trackpad_event(self: &Shared, kind: i32, x: f32, y: f32, video_width: f32) {
         let mut guard = self.active_stream();
         let Some(ActiveStream {
-            input,
-            session,
-            generation,
-            ..
+            input, out, generation, ..
         }) = guard.as_mut()
         else {
             return;
         };
         if let Some(touch_id) = input.trackpad_event(kind, (x, y), video_width, Instant::now(), |event| {
-            session.send_input(&event);
+            out.send(&event);
         }) {
             let generation = *generation;
             let c = self.clone();
@@ -797,16 +1090,16 @@ impl Controller {
         let Some(active) = guard.as_mut().filter(|active| active.generation == generation) else {
             return;
         };
-        let ActiveStream { input, session, .. } = active;
-        input.long_press(touch_id, Instant::now(), |event| session.send_input(&event));
+        let ActiveStream { input, out, .. } = active;
+        input.long_press(touch_id, Instant::now(), |event| out.send(&event));
     }
 
     /// Menu → Touch: trackpad → mouse → touchscreen (remembered).
     pub fn cycle_touch_mode(self: &Shared) {
         let mode = self.touch_mode().next();
         self.touch_mode.store(mode.index() as u8, Ordering::Relaxed);
-        if let Some(ActiveStream { input, session, .. }) = self.active_stream().as_mut() {
-            input.reset_touch(|event| session.send_input(&event));
+        if let Some(ActiveStream { input, out, .. }) = self.active_stream().as_mut() {
+            input.reset_touch(|event| out.send(&event));
         }
         self.ui(move |ui| ui.set_stream_touch_mode(mode.index()));
         self.toast(match mode {
@@ -827,14 +1120,14 @@ impl Controller {
     /// A key from the stream menu's keyboard bar (Esc, Tab, Win, Alt+Tab…).
     pub fn stream_special_key(&self, name: &str) {
         if let Some(active) = self.active_stream().as_ref() {
-            active.send(typing::special_key_events(name));
+            active.out.send_all(typing::special_key_events(name));
         }
     }
 
     /// Stream menu → "Fix picture".
     pub fn request_keyframe(self: &Shared) {
         if let Some(active) = self.active_stream().as_ref() {
-            active.session.request_keyframe();
+            active.out.session.request_keyframe();
         }
         self.toast("Asked the host for a fresh frame");
     }

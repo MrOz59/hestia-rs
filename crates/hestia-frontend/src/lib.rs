@@ -9,8 +9,11 @@
 //! A UI shell — today Slint, in `apps/hestia-app` — implements the port in
 //! [`ui`] ([`ui::View`] and [`ui::UiHandle`]), forwards the user's actions to
 //! [`controller::Controller`]'s public methods and draws the stream's
-//! pictures. Swapping toolkits means writing another shell; nothing in this
-//! crate changes. See `docs/FRONTENDS.md`.
+//! pictures. Input the toolkit can't carry (keys by position, every finger,
+//! pens, relative mouse motion) the shell or the platform layer reads below
+//! the toolkit and hands over as [`input`] values. Swapping toolkits means
+//! writing another shell; nothing in this crate changes. See
+//! `docs/FRONTENDS.md`.
 
 mod clipsync;
 pub mod controller;
@@ -22,6 +25,7 @@ pub mod gl_dmabuf;
 #[cfg(not(target_os = "android"))]
 pub mod gl_yuv;
 mod hostinfo;
+pub mod input;
 mod keymap;
 mod netroute;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
