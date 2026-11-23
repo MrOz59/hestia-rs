@@ -745,6 +745,7 @@ export component AppsPage inherits Page {
     callback quit-app;
     callback forget;
     callback tools;
+    callback settings;
 
     // Focus: an app (0…); the header's Back (-2), Host tools (-3) and
     // Forget (-5); the stream profile (-7); Resume (-6) and Quit (-4) on
@@ -833,14 +834,18 @@ export component AppsPage inherits Page {
             }
             return true;
         }
-        // Header: Back (-2), Host tools (-3), Forget (-5).
+        // Header: Back (-2), Settings (-8), Host tools (-3), Forget (-5).
         if (key == Key.RightArrow && from == -2) {
+            root.nav = -8;
+        } else if (key == Key.RightArrow && from == -8) {
             root.nav = root.hermes ? -3 : -5;
         } else if (key == Key.RightArrow && from == -3) {
             root.nav = -5;
         } else if (key == Key.LeftArrow && from == -5) {
-            root.nav = root.hermes ? -3 : -2;
+            root.nav = root.hermes ? -3 : -8;
         } else if (key == Key.LeftArrow && from == -3) {
+            root.nav = -8;
+        } else if (key == Key.LeftArrow && from == -8) {
             root.nav = -2;
         } else if (key == Key.DownArrow && root.first-content() != -2) {
             root.nav = root.first-content();
@@ -878,6 +883,17 @@ export component AppsPage inherits Page {
             }
             back-entered => {
                 root.nav = -2;
+            }
+            VerticalLayout {
+                alignment: center;
+                IconButton {
+                    icon: "settings";
+                    label: "Host settings";
+                    want-focus: root.at(-8);
+                    nav(k) => { return root.move(-8, k); }
+                    entered => { root.nav = -8; }
+                    clicked => { root.settings(); }
+                }
             }
             if root.hermes && Theme.compact: VerticalLayout {
                 alignment: center;
@@ -1410,7 +1426,8 @@ export component SettingsPage inherits Page {
         return p < 19 ? p : (p < 19 + root.profile-count ? 100 + (p - 19) : 20 + (p - 19 - root.profile-count));
     }
     pure function valid(i: int) -> bool {
-        return (i != 8 || root.mediacodec || root.gpu-conversion) && (i != 10 || root.android);
+        return (i != 8 || root.mediacodec || root.gpu-conversion) && (i != 10 || root.android)
+            && (i != 18 || root.host-name != "");
     }
     pure function step(from: int, dir: int) -> int {
         if (from == 19) { return dir > 0 ? 8 : 7; }
@@ -1489,8 +1506,8 @@ export component SettingsPage inherits Page {
 
     VerticalLayout {
         TopBar {
-            title: "Settings";
-            subtitle: "Used from the next stream on";
+            title: root.host-name == "" ? "Settings" : root.host-name + " settings";
+            subtitle: root.host-name == "" ? "Device defaults" : "Stream settings for this host";
             back-focus: root.at(-2);
             back => {
                 root.back();
@@ -1839,11 +1856,11 @@ export component SettingsPage inherits Page {
                         }
                     }
 
-                    Group {
+                    if root.host-name != "": Group {
                         title: "Profiles";
                         FieldRow {
                             label: "Save as a profile";
-                            hint: "Keeps this page's settings under a name, to pick per host on the host's page";
+                            hint: "Saves only for this host; other hosts keep their own profiles";
                             placeholder: "Couch TV";
                             action: "Save";
                             text <=> root.profile-text;
