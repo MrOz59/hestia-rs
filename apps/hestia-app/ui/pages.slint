@@ -1347,6 +1347,8 @@ export component SettingsPage inherits Page {
     in-out property <bool> gpu-video;
     in-out property <bool> direct-video;
     in property <bool> android;
+    in property <bool> physical-keyboard;
+    in property <string> host-name;
     in property <bool> touch-controls;
     // The PyroWave decoder renders planar frames, including on Android.
     property <bool> mediacodec: root.android && root.hardware-decoding && root.codec != 4;
