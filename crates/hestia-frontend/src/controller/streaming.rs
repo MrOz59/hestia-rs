@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use hestia_core::TouchMode;
-use hestia_core::shortcuts::{ShortcutAction, Shortcuts};
 use hestia_core::diagnosis::{self, Bottleneck, SpikeHistory};
 use hestia_core::report::StatsSample;
+use hestia_core::shortcuts::{ShortcutAction, Shortcuts};
 use hestia_core::stream::input::Modifiers;
 use hestia_core::stream::{InputEvent, SessionListener, StreamEvent, StreamStats};
 use hestia_core::{LaunchedSession, ManagedStream, StreamHost};
@@ -496,7 +496,7 @@ impl Controller {
                 session,
                 held: Mutex::new(Held::default()),
                 swallowed_keys: Mutex::new(HashSet::new()),
-            }
+            },
             host_id,
             input,
             report: session_report,
@@ -721,12 +721,16 @@ impl Controller {
             let shortcuts = self.core().map(|core| core.settings().shortcuts).unwrap_or_default();
             let (consumed, action) = {
                 let guard = self.active_stream();
-                guard.as_ref().filter(|active| active.input.focused)
+                guard
+                    .as_ref()
+                    .filter(|active| active.input.focused)
                     .map(|active| active.out.local_shortcut(key, pressed, modifiers, shortcuts))
                     .unwrap_or((false, None))
             };
             if consumed {
-                if let Some(action) = action { self.hotkey(action); }
+                if let Some(action) = action {
+                    self.hotkey(action);
+                }
                 return;
             }
         }

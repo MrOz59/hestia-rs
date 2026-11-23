@@ -11,10 +11,13 @@ impl Controller {
     pub(super) fn push_profiles(self: &Shared) {
         let Some(core) = self.core() else { return };
         let id = self.state().current_host.clone();
-        let names: Vec<String> = id.as_deref()
+        let names: Vec<String> = id
+            .as_deref()
             .and_then(|id| core.profiles(id).ok())
             .unwrap_or_default()
-            .into_iter().map(|p| p.name).collect();
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
         let chosen = id.and_then(|id| core.host(&id).ok()).and_then(|h| h.profile);
         let index = chosen
             .and_then(|name| names.iter().position(|n| n.eq_ignore_ascii_case(&name)))
@@ -49,8 +52,12 @@ impl Controller {
                         c.toast(format!("Saved profile, but selection failed: {e}"));
                         return;
                     }
-                    let index = core.profiles(&id).unwrap_or_default()
-                        .iter().position(|p| p.name == saved).unwrap_or_default();
+                    let index = core
+                        .profiles(&id)
+                        .unwrap_or_default()
+                        .iter()
+                        .position(|p| p.name == saved)
+                        .unwrap_or_default();
                     c.push_profiles();
                     c.ui(move |ui| ui.set_cfg_profile_pick(index as i32));
                     c.toast(format!("Saved profile “{saved}” for this host"));
@@ -63,9 +70,17 @@ impl Controller {
     /// Load this host's profile into the editor without modifying its selection.
     pub fn load_profile(self: &Shared, index: i32) {
         let Some(core) = self.core() else { return };
-        let Some(id) = self.state().current_host.clone() else { return };
-        let Some(profile) = core.profiles(&id).unwrap_or_default()
-            .into_iter().nth(index.max(0) as usize) else { return };
+        let Some(id) = self.state().current_host.clone() else {
+            return;
+        };
+        let Some(profile) = core
+            .profiles(&id)
+            .unwrap_or_default()
+            .into_iter()
+            .nth(index.max(0) as usize)
+        else {
+            return;
+        };
         if let Err(e) = core.set_host_profile(&id, Some(&profile.name)) {
             self.toast(format!("Could not select profile: {e}"));
             return;
@@ -82,9 +97,17 @@ impl Controller {
     /// Deleting a profile never affects another host.
     pub fn delete_profile(self: &Shared, index: i32) {
         let Some(core) = self.core() else { return };
-        let Some(id) = self.state().current_host.clone() else { return };
-        let Some(profile) = core.profiles(&id).unwrap_or_default()
-            .into_iter().nth(index.max(0) as usize) else { return };
+        let Some(id) = self.state().current_host.clone() else {
+            return;
+        };
+        let Some(profile) = core
+            .profiles(&id)
+            .unwrap_or_default()
+            .into_iter()
+            .nth(index.max(0) as usize)
+        else {
+            return;
+        };
         match core.delete_profile(&id, &profile.name) {
             Ok(()) => {
                 self.push_profiles();
@@ -100,8 +123,11 @@ impl Controller {
     /// Selects a profile from this host's own profile list.
     pub fn choose_host_profile(self: &Shared, index: i32) {
         let Some(core) = self.core() else { return };
-        let Some(id) = self.state().current_host.clone() else { return };
-        let name = usize::try_from(index - 1).ok()
+        let Some(id) = self.state().current_host.clone() else {
+            return;
+        };
+        let name = usize::try_from(index - 1)
+            .ok()
             .and_then(|i| core.profiles(&id).ok()?.into_iter().nth(i))
             .map(|p| p.name);
         match core.set_host_profile(&id, name.as_deref()) {

@@ -174,7 +174,10 @@ impl Controller {
             let (settings, host_name) = match selected {
                 Some(ref id) => {
                     let (settings, _) = core.settings_for_host(id);
-                    let name = core.host(id).map(|host| host.display_name().to_owned()).unwrap_or_default();
+                    let name = core
+                        .host(id)
+                        .map(|host| host.display_name().to_owned())
+                        .unwrap_or_default();
                     (settings, name)
                 }
                 None => (core.settings(), String::new()),
@@ -456,7 +459,9 @@ impl Controller {
     /// Open the editor for the selected host, retaining its current pairing.
     pub fn edit_current_host(self: &Shared) {
         let Some(core) = self.core() else { return };
-        let Some(id) = self.state().current_host.clone() else { return };
+        let Some(id) = self.state().current_host.clone() else {
+            return;
+        };
         let Ok(host) = core.host(&id) else { return };
         let name = host.display_name().to_owned();
         let address = host.active_address().to_string();
@@ -470,7 +475,9 @@ impl Controller {
 
     pub fn save_current_host(self: &Shared, alias: String, address: String) {
         let Some(core) = self.core() else { return };
-        let Some(id) = self.state().current_host.clone() else { return };
+        let Some(id) = self.state().current_host.clone() else {
+            return;
+        };
         match core.edit_host_details(&id, &alias, &address) {
             Ok(()) => {
                 if let Ok(host) = core.host(&id) {
@@ -994,16 +1001,16 @@ impl Controller {
         let c = self.clone();
         self.ui(move |ui| {
             let global = core.settings();
-            let base = selected.as_deref()
+            let base = selected
+                .as_deref()
                 .map(|id| core.settings_for_host(id).0)
                 .unwrap_or_else(|| global.clone());
             let edited = view::read_settings_from(ui, &base);
             let result = if let Some(id) = selected {
                 // Take only device-local choices from the editor, leaving
                 // global video/audio/host quality settings untouched.
-                let device_settings = hestia_core::profiles::StreamProfile::from_settings(
-                    "Global defaults", &global
-                ).apply(&edited);
+                let device_settings =
+                    hestia_core::profiles::StreamProfile::from_settings("Global defaults", &global).apply(&edited);
                 core.set_host_settings(&id, &edited)
                     .and_then(|()| core.set_settings(device_settings))
             } else {
@@ -1020,10 +1027,11 @@ impl Controller {
     pub fn update_shortcut(self: &Shared, which: i32, text: String) {
         use hestia_core::shortcuts::{ShortcutAction, ShortcutBinding};
         let Some(core) = self.core() else { return };
-        let Some(action) = ShortcutAction::from_index(which) else { return };
+        let Some(action) = ShortcutAction::from_index(which) else {
+            return;
+        };
         let mut settings = core.settings();
-        let outcome = ShortcutBinding::parse(&text)
-            .and_then(|binding| settings.shortcuts.assign(action, binding));
+        let outcome = ShortcutBinding::parse(&text).and_then(|binding| settings.shortcuts.assign(action, binding));
         match outcome {
             Ok(()) => match core.set_settings(settings) {
                 Ok(()) => self.toast("Keyboard shortcut updated"),

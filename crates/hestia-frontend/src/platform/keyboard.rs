@@ -21,7 +21,6 @@ pub fn has_soft_keyboard() -> bool {
     cfg!(target_os = "android")
 }
 
-
 /// Whether the user has a real, non-IME keyboard attached. Android tracks
 /// USB/Bluetooth keyboards via its current native configuration. Recheck
 /// whenever the settings page opens so hot-plugging does not need a restart.
