@@ -68,6 +68,35 @@ touchscreen can provide both. Only visible rows take a position in keyboard
 and D-pad navigation. Options that configure Hermes, including Gamescope and
 virtual displays, remain available from either client.
 
+### Host-scoped settings and conditional controls
+
+The host list and the settings editor share one logical context:
+- **Hosts screen → Settings** edits device defaults, including decoder,
+  touchscreen, presentation and local keyboard shortcuts.
+- **Selected host → Settings** edits that host's streaming quality. Saving
+  updates its active named profile or its own default override; device-only
+  controls continue to be shared by the *client device*, not by all hosts.
+- **Selected host → Edit host** changes its local display name and preferred
+  address. Pairing certificates belong to the host's unique ID, not the IP.
+- Profiles live inside each saved `HostRecord`. Different hosts can have
+  profiles with identical names, without sharing their content. The legacy
+  global `profiles.json` is copied to existing hosts once and archived as
+  `profiles.legacy.json` so previous user profiles are not lost.
+
+**Settings visibility is capability-driven**, not a blanket OS check:
+Android-only orientation and MediaCodec options use platform/decoder
+capabilities, while shared stream quality remains available everywhere.
+The shortcut editor is visible only if `physical_keyboard` is available:
+Android checks its current native keyboard configuration when Settings opens,
+so a phone's on-screen keyboard does not expose desktop shortcuts. Desktop
+currently assumes the compositor offers a keyboard seat. New platform-
+specific controls should follow this pattern and must not be shown when
+their required capability is absent.
+
+Keyboard shortcuts are stored as local device settings, not host profiles.
+They accept a modifier combination with A–Z, 0–9 or F1–F24; conflicting
+bindings are rejected and intercepted key-up events are not sent to the host.
+
 ## Startup
 
 What the Slint shell does (`apps/hestia-app/src/lib.rs`), in order:
