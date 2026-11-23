@@ -17,6 +17,7 @@ pub mod presets;
 pub mod profiles;
 pub mod report;
 pub mod settings;
+pub mod shortcuts;
 pub mod store;
 pub mod wol;
 
