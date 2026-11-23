@@ -197,6 +197,18 @@ impl View for SlintView<'_> {
     fn set_host_name(&self, text: String) {
         self.0.set_host_name(text.into());
     }
+    fn set_host_edit_visible(&self, on: bool) {
+        self.0.set_host_edit_visible(on);
+    }
+    fn set_host_edit_name(&self, text: String) {
+        self.0.set_host_edit_name(text.into());
+    }
+    fn set_host_edit_address(&self, text: String) {
+        self.0.set_host_edit_address(text.into());
+    }
+    fn set_host_edit_error(&self, text: String) {
+        self.0.set_host_edit_error(text.into());
+    }
     fn set_host_detail(&self, text: String) {
         self.0.set_host_detail(text.into());
     }
