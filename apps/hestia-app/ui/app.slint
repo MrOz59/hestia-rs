@@ -417,6 +417,11 @@ export component AppWindow inherits Window {
             profile-chosen(index) => {
                 root.apps-profile-chosen(index);
             }
+            settings => {
+                root.settings-return = 1;
+                root.screen = 3;
+                root.open-settings();
+            }
             tools => {
                 root.open-tools();
             }
@@ -654,6 +659,8 @@ export component AppWindow inherits Window {
             gpu-video <=> root.cfg-gpu-video;
             direct-video <=> root.cfg-direct-video;
             android: root.is-android;
+            physical-keyboard: root.cfg-physical-keyboard;
+            host-name: root.cfg-host-name;
             touch-controls: root.has-touch-input;
             orientation <=> root.cfg-orientation;
             profile-names: root.cfg-profile-names;
