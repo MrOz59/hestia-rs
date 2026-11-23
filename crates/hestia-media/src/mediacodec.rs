@@ -543,7 +543,11 @@ impl Running {
     /// the system shows it at the next refresh; older ones finished in the
     /// same pass are skipped (never shown out of order). While the surface
     /// is gone (app in the background) pictures are dropped.
-    fn drain_direct(&mut self, out: &mut DecodedFrame, stats: Option<&DecodeStats>) -> Result<Option<FrameTiming>, String> {
+    fn drain_direct(
+        &mut self,
+        out: &mut DecodedFrame,
+        stats: Option<&DecodeStats>,
+    ) -> Result<Option<FrameTiming>, String> {
         let (generation, window) = crate::direct_video::current();
         if let Some((have, current)) = &mut self.direct
             && *have != generation

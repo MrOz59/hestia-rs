@@ -135,9 +135,12 @@ impl FramePresenter for UiPresenter {
             let now = Instant::now();
             self.presentation.recovery.record(frame.idr_requested_at, now);
             self.presentation.handoff.record(now.duration_since(frame.decoded_at));
-            self.presentation.receive_to_ui.record(now.duration_since(frame.received_at));
+            self.presentation
+                .receive_to_ui
+                .record(now.duration_since(frame.received_at));
             if self.presentation.delivered.fetch_add(1, Ordering::Relaxed) == 0 {
-                self.ui.run(Box::new(|ui: &dyn View| ui.set_stream_status(String::new())));
+                self.ui
+                    .run(Box::new(|ui: &dyn View| ui.set_stream_status(String::new())));
             }
             frame.discard_native();
             return;

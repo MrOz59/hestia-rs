@@ -403,9 +403,8 @@ impl Controller {
         });
         // Android direct video: the helper adds the surface now, while the
         // RTSP handshake runs; the decoder waits a little for it.
-        let direct = cfg!(target_os = "android")
-            && launched.settings.direct_video
-            && launched.settings.hardware_decoding;
+        let direct =
+            cfg!(target_os = "android") && launched.settings.direct_video && launched.settings.hardware_decoding;
         #[cfg(target_os = "android")]
         {
             hestia_media::direct_video::PRESENTED.reset(config.fps);
