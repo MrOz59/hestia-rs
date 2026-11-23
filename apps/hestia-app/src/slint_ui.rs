@@ -433,6 +433,12 @@ impl View for SlintView<'_> {
         let _ = on;
     }
 
+    fn set_settings_host_name(&self, name: String) {
+        self.0.set_cfg_host_name(name.into());
+    }
+    fn set_physical_keyboard(&self, on: bool) {
+        self.0.set_cfg_physical_keyboard(on);
+    }
     fn show_settings(&self, form: SettingsForm) {
         let w = self.0;
         w.set_cfg_resolution_options(strings(form.resolution_options));
