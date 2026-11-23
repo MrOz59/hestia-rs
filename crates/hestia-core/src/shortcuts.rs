@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::stream::input::{Modifiers, vk};
 
+/// The function keys a shortcut can use, F1 to F24.
+const FUNCTION_KEYS: std::ops::RangeInclusive<u16> = vk::F1..=vk::F1 + 23;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShortcutAction {
     Disconnect,
@@ -13,13 +16,12 @@ pub enum ShortcutAction {
 }
 
 impl ShortcutAction {
+    /// Every action, in the order the settings page lists them.
+    pub const ALL: [Self; 3] = [Self::Disconnect, Self::Stats, Self::MouseCapture];
+
+    /// By its place in [`ShortcutAction::ALL`].
     pub fn from_index(index: i32) -> Option<Self> {
-        match index {
-            0 => Some(Self::Disconnect),
-            1 => Some(Self::Stats),
-            2 => Some(Self::MouseCapture),
-            _ => None,
-        }
+        usize::try_from(index).ok().and_then(|i| Self::ALL.get(i).copied())
     }
 }
 
@@ -55,30 +57,29 @@ impl ShortcutBinding {
 
     /// Human-readable and stable across keyboard layouts.
     pub fn label(self) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        if self.ctrl {
-            parts.push("Ctrl".into());
-        }
-        if self.alt {
-            parts.push("Alt".into());
-        }
-        if self.shift {
-            parts.push("Shift".into());
-        }
-        if self.meta {
-            parts.push("Meta".into());
-        }
-        let key = if (vk::F1..=vk::F1 + 23).contains(&self.key) {
+        let modifiers = [
+            (self.ctrl, "Ctrl"),
+            (self.alt, "Alt"),
+            (self.shift, "Shift"),
+            (self.meta, "Meta"),
+        ];
+        let mut parts: Vec<String> = modifiers
+            .into_iter()
+            .filter(|(held, _)| *held)
+            .map(|(_, name)| name.to_owned())
+            .collect();
+        parts.push(if FUNCTION_KEYS.contains(&self.key) {
             format!("F{}", self.key - vk::F1 + 1)
-        } else if let Ok(n) = u8::try_from(self.key) {
-            (n as char).to_string()
+        } else if let Some(c) = u8::try_from(self.key).ok().filter(u8::is_ascii_alphanumeric) {
+            char::from(c).to_string()
         } else {
             format!("0x{:X}", self.key)
-        };
-        parts.push(key);
+        });
         parts.join("+")
     }
 
+    /// Reads a shortcut as [`ShortcutBinding::label`] writes it (any case,
+    /// spaces allowed): modifiers and one key, `Ctrl+Alt+Shift+Q`, `F9`.
     pub fn parse(text: &str) -> Result<Self, &'static str> {
         let mut binding = Self {
             key: 0,
@@ -87,41 +88,40 @@ impl ShortcutBinding {
             shift: false,
             meta: false,
         };
-        let mut found_key = false;
+        let mut key = None;
         for token in text.split('+') {
             let name = token.trim().to_ascii_uppercase();
-            match name.as_str() {
-                "CTRL" | "CONTROL" if !binding.ctrl => binding.ctrl = true,
-                "ALT" if !binding.alt => binding.alt = true,
-                "SHIFT" if !binding.shift => binding.shift = true,
-                "META" | "SUPER" | "WIN" if !binding.meta => binding.meta = true,
-                _ => {
-                    if found_key {
-                        return Err("shortcut must contain only one key");
-                    }
-                    let key = if name.len() == 1 && name.bytes().all(|b| b.is_ascii_alphanumeric()) {
-                        name.as_bytes()[0] as u16
-                    } else if let Some(number) = name
-                        .strip_prefix('F')
-                        .and_then(|n| n.parse::<u16>().ok())
-                        .filter(|n| (1..=24).contains(n))
-                    {
-                        vk::F1 + number - 1
-                    } else {
-                        return Err("use A-Z, 0-9 or F1-F24 with modifiers");
-                    };
-                    binding.key = key;
-                    found_key = true;
+            let modifier = match name.as_str() {
+                "CTRL" | "CONTROL" => Some(&mut binding.ctrl),
+                "ALT" => Some(&mut binding.alt),
+                "SHIFT" => Some(&mut binding.shift),
+                "META" | "SUPER" | "WIN" => Some(&mut binding.meta),
+                _ => None,
+            };
+            if let Some(held) = modifier {
+                if *held {
+                    return Err("each modifier can appear only once");
                 }
+                *held = true;
+                continue;
             }
+            if key.is_some() {
+                return Err("a shortcut has only one key");
+            }
+            key = Some(match name.as_bytes() {
+                [c] if c.is_ascii_alphanumeric() => u16::from(*c),
+                _ => name
+                    .strip_prefix('F')
+                    .and_then(|n| n.parse::<u16>().ok())
+                    .filter(|n| (1..=24).contains(n))
+                    .map(|n| vk::F1 + n - 1)
+                    .ok_or("use A-Z, 0-9 or F1-F24 with modifiers")?,
+            });
         }
-        if !found_key {
-            return Err("shortcut needs a key");
-        }
-        if !(binding.ctrl || binding.alt || binding.shift || binding.meta)
-            && !(vk::F1..=vk::F1 + 23).contains(&binding.key)
-        {
-            return Err("letter and number shortcuts require a modifier");
+        binding.key = key.ok_or("a shortcut needs a key")?;
+        // Shift alone would take capitals and symbols from what is typed.
+        if !FUNCTION_KEYS.contains(&binding.key) && !(binding.ctrl || binding.alt || binding.meta) {
+            return Err("letters and digits need Ctrl, Alt or Meta");
         }
         Ok(binding)
     }
@@ -138,41 +138,48 @@ pub struct Shortcuts {
 impl Default for Shortcuts {
     fn default() -> Self {
         Self {
-            disconnect: ShortcutBinding::default_for(b'Q' as u16),
-            stats: ShortcutBinding::default_for(b'S' as u16),
-            mouse_capture: ShortcutBinding::default_for(b'Z' as u16),
+            disconnect: ShortcutBinding::default_for(u16::from(b'Q')),
+            stats: ShortcutBinding::default_for(u16::from(b'S')),
+            mouse_capture: ShortcutBinding::default_for(u16::from(b'Z')),
         }
     }
 }
 
 impl Shortcuts {
-    pub fn action(self, key: u16, mods: Modifiers) -> Option<ShortcutAction> {
-        if self.disconnect.matches(key, mods) {
-            Some(ShortcutAction::Disconnect)
-        } else if self.stats.matches(key, mods) {
-            Some(ShortcutAction::Stats)
-        } else if self.mouse_capture.matches(key, mods) {
-            Some(ShortcutAction::MouseCapture)
-        } else {
-            None
+    /// The shortcut for `action`.
+    pub fn get(&self, action: ShortcutAction) -> ShortcutBinding {
+        match action {
+            ShortcutAction::Disconnect => self.disconnect,
+            ShortcutAction::Stats => self.stats,
+            ShortcutAction::MouseCapture => self.mouse_capture,
         }
     }
 
-    /// A shortcut is never allowed to shadow a different Hestia command.
+    fn slot(&mut self, action: ShortcutAction) -> &mut ShortcutBinding {
+        match action {
+            ShortcutAction::Disconnect => &mut self.disconnect,
+            ShortcutAction::Stats => &mut self.stats,
+            ShortcutAction::MouseCapture => &mut self.mouse_capture,
+        }
+    }
+
+    /// The action `key` runs with `mods` held, if any.
+    pub fn action(&self, key: u16, mods: Modifiers) -> Option<ShortcutAction> {
+        ShortcutAction::ALL
+            .into_iter()
+            .find(|&action| self.get(action).matches(key, mods))
+    }
+
+    /// Sets `action`'s shortcut. A shortcut is never allowed to shadow a
+    /// different Hestia command.
     pub fn assign(&mut self, action: ShortcutAction, binding: ShortcutBinding) -> Result<(), &'static str> {
-        let duplicate = match action {
-            ShortcutAction::Disconnect => binding == self.stats || binding == self.mouse_capture,
-            ShortcutAction::Stats => binding == self.disconnect || binding == self.mouse_capture,
-            ShortcutAction::MouseCapture => binding == self.disconnect || binding == self.stats,
-        };
-        if duplicate {
+        if ShortcutAction::ALL
+            .into_iter()
+            .any(|other| other != action && self.get(other) == binding)
+        {
             return Err("another Hestia action already uses that shortcut");
         }
-        match action {
-            ShortcutAction::Disconnect => self.disconnect = binding,
-            ShortcutAction::Stats => self.stats = binding,
-            ShortcutAction::MouseCapture => self.mouse_capture = binding,
-        }
+        *self.slot(action) = binding;
         Ok(())
     }
 }
@@ -188,9 +195,32 @@ mod tests {
         assert_eq!(expected.label(), "Ctrl+Alt+Shift+Q");
         assert_eq!(ShortcutBinding::parse("Ctrl+F12").unwrap().label(), "Ctrl+F12");
         assert_eq!(ShortcutBinding::parse("F24").unwrap().label(), "F24");
+        assert_eq!(ShortcutBinding::parse("Meta+f").unwrap().label(), "Meta+F");
+        assert_eq!(ShortcutBinding::parse("Alt+7").unwrap().label(), "Alt+7");
         assert!(ShortcutBinding::parse("X").is_err());
+        assert!(ShortcutBinding::parse("Shift+X").is_err());
         assert!(ShortcutBinding::parse("Ctrl+Shift").is_err());
         assert!(ShortcutBinding::parse("Ctrl+Ctrl+Q").is_err());
+        assert!(ShortcutBinding::parse("Ctrl+Q+W").is_err());
+        assert!(ShortcutBinding::parse("Ctrl+F25").is_err());
+        assert!(ShortcutBinding::parse("Ctrl+").is_err());
+        assert!(ShortcutBinding::parse("").is_err());
+    }
+
+    #[test]
+    fn labels_parse_back() {
+        for action in ShortcutAction::ALL {
+            let binding = Shortcuts::default().get(action);
+            assert_eq!(ShortcutBinding::parse(&binding.label()), Ok(binding));
+        }
+    }
+
+    #[test]
+    fn actions_by_index() {
+        assert_eq!(ShortcutAction::from_index(0), Some(ShortcutAction::Disconnect));
+        assert_eq!(ShortcutAction::from_index(2), Some(ShortcutAction::MouseCapture));
+        assert_eq!(ShortcutAction::from_index(3), None);
+        assert_eq!(ShortcutAction::from_index(-1), None);
     }
 
     #[test]
@@ -198,11 +228,13 @@ mod tests {
         let mut keys = Shortcuts::default();
         assert!(keys.assign(ShortcutAction::Disconnect, keys.stats).is_err());
         assert_eq!(keys.disconnect.label(), "Ctrl+Alt+Shift+Q");
+        // Its own shortcut again is fine.
+        keys.assign(ShortcutAction::Stats, keys.stats).unwrap();
         keys.assign(ShortcutAction::Disconnect, ShortcutBinding::parse("Ctrl+F9").unwrap())
             .unwrap();
         assert_eq!(
             keys.action(
-                b'Q' as u16,
+                u16::from(b'Q'),
                 Modifiers {
                     ctrl: true,
                     alt: true,

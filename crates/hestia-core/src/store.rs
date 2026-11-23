@@ -91,14 +91,14 @@ impl Store {
         Ok(self.read("profiles.json")?.unwrap_or_default())
     }
 
-    /// Profiles used to be global. Once assigned to existing hosts, archive
-    /// the legacy file so deleted host profiles are never re-imported.
+    /// The device-wide profiles from before each host had its own, once
+    /// they're copied to the hosts: renamed to `profiles.legacy.json` (kept,
+    /// and never copied again). No file: nothing to do.
     pub fn archive_legacy_profiles(&self) -> io::Result<()> {
-        let old = self.dir.join("profiles.json");
-        if old.exists() {
-            fs::rename(old, self.dir.join("profiles.legacy.json"))?;
+        match fs::rename(self.dir.join("profiles.json"), self.dir.join("profiles.legacy.json")) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            done => done,
         }
-        Ok(())
     }
 }
 

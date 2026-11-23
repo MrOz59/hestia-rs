@@ -1,8 +1,9 @@
 //! Named stream profiles: the quality side of the settings (mode, bitrate,
 //! codec, audio, HDR, what the host does) saved under a name, like
-//! Artemis' per-host profiles. A host can be set to launch with one; the
-//! device-side choices (touch mode, orientation, decoding, menu button...)
-//! always come from the regular settings.
+//! Artemis' per-host profiles. Each host has its own and can be set to
+//! launch with one; the device-side choices (touch mode, orientation,
+//! decoding, menu button, shortcuts...) always come from the regular
+//! settings.
 
 use serde::{Deserialize, Serialize};
 
@@ -11,7 +12,14 @@ use crate::settings::{AudioLayout, CodecPreference, LaunchMode, StreamSettings};
 /// Longest profile name kept.
 pub const MAX_NAME_CHARS: usize = 40;
 
+/// Name of a host's own defaults (`HostRecord::default_profile`), which
+/// aren't one of its named profiles.
+pub const HOST_DEFAULTS: &str = "Host defaults";
+
+/// Profiles are saved inside the host list, so a field missing from an
+/// older file takes its default instead of making the whole list unreadable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StreamProfile {
     pub name: String,
     pub width: u32,
@@ -41,6 +49,12 @@ pub fn clean_name(name: &str) -> Option<String> {
         .collect();
     let name = name.trim_end();
     (!name.is_empty()).then(|| name.to_owned())
+}
+
+impl Default for StreamProfile {
+    fn default() -> Self {
+        Self::from_settings("", &StreamSettings::default())
+    }
 }
 
 impl StreamProfile {
