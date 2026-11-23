@@ -45,6 +45,11 @@ pub struct VideoTransportStats {
     keyframes_received: u64,
     request_to_keyframe_us: u64,
     max_request_to_keyframe_us: u64,
+    keyframes_already_arriving: u64,
+    request_to_keyframe_packet_us: u64,
+    max_request_to_keyframe_packet_us: u64,
+    keyframe_packet_to_assembly_us: u64,
+    max_keyframe_packet_to_assembly_us: u64,
 }
 
 impl From<&VideoCounters> for VideoTransportStats {
@@ -72,6 +77,11 @@ impl From<&VideoCounters> for VideoTransportStats {
             keyframes_received: recovery.keyframes_received.load(Ordering::Relaxed),
             request_to_keyframe_us: recovery.request_to_keyframe_us.load(Ordering::Relaxed),
             max_request_to_keyframe_us: recovery.max_request_to_keyframe_us.load(Ordering::Relaxed),
+            keyframes_already_arriving: recovery.keyframes_already_arriving.load(Ordering::Relaxed),
+            request_to_keyframe_packet_us: recovery.request_to_keyframe_packet_us.load(Ordering::Relaxed),
+            max_request_to_keyframe_packet_us: recovery.max_request_to_keyframe_packet_us.load(Ordering::Relaxed),
+            keyframe_packet_to_assembly_us: recovery.keyframe_packet_to_assembly_us.load(Ordering::Relaxed),
+            max_keyframe_packet_to_assembly_us: recovery.max_keyframe_packet_to_assembly_us.load(Ordering::Relaxed),
         }
     }
 }
@@ -278,13 +288,42 @@ impl StreamReport {
             );
         }
         let recovered = video.keyframes_received;
-        if recovered > 0 {
-            let mean = video.request_to_keyframe_us as f64 / recovered as f64 / 1000.0;
-            let max = video.max_request_to_keyframe_us as f64 / 1000.0;
+        let first_packet_samples = recovered.saturating_sub(video.keyframes_already_arriving);
+        for (label, total_us, max_us, samples) in [
+            (
+                "IDR request to assembled keyframe",
+                video.request_to_keyframe_us,
+                video.max_request_to_keyframe_us,
+                recovered,
+            ),
+            (
+                "IDR request to first packet of recovered keyframe",
+                video.request_to_keyframe_packet_us,
+                video.max_request_to_keyframe_packet_us,
+                first_packet_samples,
+            ),
+            (
+                "first packet to assembly for recovered keyframes",
+                video.keyframe_packet_to_assembly_us,
+                video.max_keyframe_packet_to_assembly_us,
+                recovered,
+            ),
+        ] {
+            if samples > 0 {
+                let mean = total_us as f64 / samples as f64 / 1000.0;
+                let max = max_us as f64 / 1000.0;
+                self.field(
+                    "Video transport and recovery",
+                    label,
+                    format!("mean {mean:.2} ms / max {max:.2} ms ({samples} samples)"),
+                );
+            }
+        }
+        if video.keyframes_already_arriving > 0 {
             self.field(
                 "Video transport and recovery",
-                "IDR request to assembled keyframe",
-                format!("mean {mean:.2} ms / max {max:.2} ms ({recovered} samples)"),
+                "recovered keyframes already arriving before request",
+                video.keyframes_already_arriving,
             );
         }
     }
