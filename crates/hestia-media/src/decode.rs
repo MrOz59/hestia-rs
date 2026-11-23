@@ -324,6 +324,7 @@ struct QueuedFrame {
 struct Queue {
     frames: VecDeque<QueuedFrame>,
     waiting_for_keyframe: bool,
+    independent_frames: bool,
     generation: u64,
     max_age: Duration,
     closed: bool,
@@ -377,6 +378,7 @@ impl DecodingSink {
                 queue: Mutex::new(Queue {
                     frames: VecDeque::with_capacity(QUEUE_DEPTH),
                     waiting_for_keyframe: true,
+                    independent_frames: false,
                     generation: 0,
                     max_age: Duration::ZERO,
                     closed: false,
@@ -410,6 +412,7 @@ impl VideoSink for DecodingSink {
         // decoder that can't keep up at all is reset (see QUEUE_DEPTH).
         self.shared.queue().max_age =
             Duration::from_micros(MIN_BACKLOG_FRAMES * 1_000_000 / u64::from(fps.max(1))).max(MIN_BACKLOG_AGE);
+        self.shared.queue().independent_frames = format.codec == hestia_stream::VideoCodec::PyroWave;
         let shared = self.shared.clone();
         let requester = self.requester.clone();
         let failure_handler = self.failure_handler.take();
@@ -438,6 +441,11 @@ impl VideoSink for DecodingSink {
         let mut queue = self.shared.queue();
         if queue.closed {
             return SubmitResult::Ok;
+        }
+        // A pending PyroWave frame can be replaced without losing references.
+        if queue.independent_frames && !queue.frames.is_empty() {
+            self.shared.dropped_backlog(queue.frames.len() as u64);
+            queue.frames.clear();
         }
         let overloaded = queue.frames.len() == QUEUE_DEPTH
             || queue
@@ -524,7 +532,7 @@ fn decode_loop(
             let started = Instant::now();
             let queue_age = started.duration_since(queued_at);
             shared.stats.queue_wait.record(queue_age);
-            if queue_age > queue.max_age {
+            if !queue.independent_frames && queue_age > queue.max_age {
                 let dropped = queue.invalidate();
                 drop(queue);
                 warn!(
@@ -628,7 +636,8 @@ fn decode_loop(
             }
             Ok(None) => {}
             Err(e) => {
-                let dropped = queue.invalidate();
+                let independent = queue.independent_frames;
+                let dropped = if independent { 1 } else { queue.invalidate() };
                 drop(queue);
                 picture.discard_native();
                 // The first few in full, then a reminder now and then: a
@@ -642,7 +651,7 @@ fn decode_loop(
                     }
                 }
                 shared.stats.dropped.fetch_add(dropped, Ordering::Relaxed);
-                if let Some(r) = &requester {
+                if !independent && let Some(r) = &requester {
                     r.request();
                 }
             }

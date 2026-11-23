@@ -28,6 +28,7 @@ impl VideoSink for DumpVideoSink {
             VideoCodec::H264 => "h264",
             VideoCodec::Hevc => "h265",
             VideoCodec::Av1 => "obu",
+            VideoCodec::PyroWave => "pyrowave",
         };
         let path = self.path.with_extension(ext);
         let file = File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;

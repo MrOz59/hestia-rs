@@ -492,6 +492,7 @@ impl Session {
                 decoder.set_low_delay(true);
                 Codec::H265(Box::new(decoder))
             }
+            VideoCodec::PyroWave => return Err("PyroWave requires the Vulkan decoder".into()),
             VideoCodec::Av1 => Codec::Av1(Box::new(
                 StatelessDecoder::<Av1, VaapiBackend<VaFrame>>::new_vaapi(display.clone(), blocking)
                     .map_err(|e| e.to_string())?,

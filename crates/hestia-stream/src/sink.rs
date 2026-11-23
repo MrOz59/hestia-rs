@@ -11,6 +11,7 @@ pub enum VideoCodec {
     H264,
     Hevc,
     Av1,
+    PyroWave,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +26,7 @@ pub struct VideoFormat {
 pub struct EncodedFrame {
     pub frame_number: u32,
     pub keyframe: bool,
-    /// Annex B bitstream (H.264/HEVC) or OBU stream (AV1).
+    /// Annex B bitstream (H.264/HEVC) or OBU stream (AV1), or a complete opaque PyroWave packet.
     pub data: Vec<u8>,
     /// When the first packet of this frame arrived.
     pub received_at: Instant,

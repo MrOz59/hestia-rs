@@ -545,7 +545,11 @@ pub fn handshake(cfg: &HandshakeConfig) -> Result<Negotiated, RtspError> {
         host_address: remote.ip().to_string(),
         video_port: negotiated.video_port,
         refresh_rate_x100: cfg.fps * 100,
-        encoder_csc_mode: 0,
+        encoder_csc_mode: if video_format.codec == crate::sink::VideoCodec::PyroWave {
+            2
+        } else {
+            0
+        },
     });
     client.transact("ANNOUNCE", "streamid=control/13/0", vec![], Some(announce.into_bytes()))?;
     client.transact("PLAY", "/", vec![], None)?;

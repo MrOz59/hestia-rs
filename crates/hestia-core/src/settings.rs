@@ -10,10 +10,11 @@ pub enum CodecPreference {
     H264,
     Hevc,
     Av1,
+    PyroWave,
 }
 
 impl CodecPreference {
-    pub const ALL: [Self; 4] = [Self::Auto, Self::H264, Self::Hevc, Self::Av1];
+    pub const ALL: [Self; 5] = [Self::Auto, Self::H264, Self::Hevc, Self::Av1, Self::PyroWave];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -21,6 +22,7 @@ impl CodecPreference {
             Self::H264 => "H.264",
             Self::Hevc => "HEVC",
             Self::Av1 => "AV1",
+            Self::PyroWave => "PyroWave",
         }
     }
 
@@ -30,6 +32,7 @@ impl CodecPreference {
             Self::Auto | Self::Hevc => "hevc",
             Self::H264 => "h264",
             Self::Av1 => "av1",
+            Self::PyroWave => "pyrowave",
         }
     }
 }

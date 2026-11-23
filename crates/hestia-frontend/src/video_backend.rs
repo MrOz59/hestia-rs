@@ -29,6 +29,18 @@ impl StreamVideo {
         let gpu = settings
             .gpu_video
             .then(|| Arc::new(GpuOutput::new(window.status.clone())));
+        if settings.codec == hestia_core::CodecPreference::PyroWave {
+            if settings.hdr {
+                return Err("PyroWave requires SDR. Turn off HDR in stream settings.".into());
+            }
+            let decoder = hestia_media::video_decoder::pyrowave_decoder(
+                settings.width,
+                settings.height,
+                settings.hardware_decoding,
+                gpu.clone(),
+            )?;
+            return Ok(Self { decoder, gpu });
+        }
         #[cfg(target_os = "android")]
         let decoder = select_decoder_for_renderer(
             colorimetry,

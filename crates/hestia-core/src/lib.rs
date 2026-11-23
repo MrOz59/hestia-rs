@@ -327,10 +327,12 @@ impl LaunchedSession {
             CodecPreference::H264 => Some(VideoCodec::H264),
             CodecPreference::Hevc => Some(VideoCodec::Hevc),
             CodecPreference::Av1 => Some(VideoCodec::Av1),
+            CodecPreference::PyroWave => Some(VideoCodec::PyroWave),
         };
         let mut video_formats: Vec<_> = decoder_formats
             .iter()
             .copied()
+            .filter(|f| (f.codec == VideoCodec::PyroWave) == (preferred == Some(VideoCodec::PyroWave)))
             .filter(|f| self.request.hdr || !f.ten_bit)
             .collect();
         if let Some(codec) = preferred {
@@ -886,6 +888,19 @@ impl HestiaClient {
             ));
         }
 
+        if settings.codec == CodecPreference::PyroWave {
+            if settings.hdr {
+                return Err(CoreError::Invalid(
+                    "PyroWave requires SDR. Turn off HDR in stream settings.".into(),
+                ));
+            }
+            if server_info.codec_mode_support & hestia_nvhttp::codecs::SCM_PYROWAVE == 0 {
+                return Err(CoreError::Invalid(
+                    "The host does not advertise PyroWave. Enable it in Hermes or choose another codec.".into(),
+                ));
+            }
+        }
+
         let mut request = LaunchRequest::new(app_id, settings.width, settings.height, settings.fps);
         request.optimize_game_settings = settings.optimize_game_settings;
         request.play_audio_on_host = settings.play_audio_on_host;
@@ -1177,6 +1192,21 @@ mod tests {
         assert_eq!(c.packet_size, StreamConfig::LAN_PACKET_SIZE);
         // No HDR requested: 10-bit formats are not offered.
         assert_eq!(c.video_formats, vec![HEVC, H264]);
+    }
+
+    #[test]
+    fn pyrowave_is_explicit_even_with_a_multi_format_sink() {
+        let pyro = VideoFormat {
+            codec: VideoCodec::PyroWave,
+            ..H264
+        };
+        for (pref, expected) in [(CodecPreference::Auto, H264), (CodecPreference::PyroWave, pyro)] {
+            assert_eq!(
+                session("", pref).stream_config(&[pyro, H264]).unwrap().video_formats,
+                [expected]
+            );
+        }
+        assert!(session("", CodecPreference::PyroWave).stream_config(&[H264]).is_err());
     }
 
     #[test]

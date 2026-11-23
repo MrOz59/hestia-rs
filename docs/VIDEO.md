@@ -225,3 +225,35 @@ draws (compositor, vsync, the screen).
   CCS) surfaces, AMD; then keeping each buffer's EGL images instead of
   importing per picture.
 * HDR: 10-bit formats and BT.2020/PQ end to end.
+
+### PyroWave with Hermes
+
+Enable PyroWave on the Hermes host, then select **PyroWave (SDR)** under the
+client's video codec settings. Enable hardware decoding and disable HDR. Start
+with 720p60 on a fast LAN. Auto continues to negotiate H.264, HEVC or AV1.
+
+Linux and the 64-bit Android APKs (arm64-v8a and x86_64) bundle the PyroWave
+0.5 runtime pinned to the Hermes encoder revision. The client opens the Vulkan
+decoder at the requested resolution before launch. A compatible GPU and driver
+are required. Video is 8-bit, limited-range BT.709, 4:2:0, with even dimensions.
+The stream report identifies the decoder as **PyroWave (Vulkan, I420 readback)**.
+
+The decoder writes into pooled I420 planes through the synchronous Vulkan
+readback API. The GL renderer uploads these planes and converts them to RGB.
+If GPU presentation is disabled or unavailable, the worker converts to RGBA.
+Each frame is independent, so a damaged frame can be skipped and an older frame
+waiting to decode can be replaced by the newest one.
+
+For a local Linux build, run `scripts/build-pyrowave.sh linux target/debug/lib`
+(use `target/release/lib` for a release build). The client looks first in
+`lib/` beside its executable, then on the system library path. To exercise
+the decoder with the encoded test picture on Linux (CI uses Mesa 26 Lavapipe with `LP_NATIVE_VECTOR_WIDTH=512`):
+
+```sh
+LD_LIBRARY_PATH="$PWD/target/debug/lib" cargo test -p hestia-media decodes_reference_frame_on_vulkan -- --ignored
+```
+
+For local Android packaging, set `ANDROID_NDK_HOME` to the app's NDK, then
+run `scripts/build-pyrowave.sh arm64-v8a jni/arm64-v8a` alongside the matching
+`libhestia_app.so`. Repeat for `x86_64` when building that ABI. Pass `jni` to
+`scripts/android-package.sh` as usual.

@@ -81,9 +81,14 @@ package() {
     for abi in "$@"; do
         mkdir -p "$work/stage/lib/$abi"
         cp "$libs/$abi/libhestia_app.so" "$work/stage/lib/$abi/"
+        if [[ -f "$libs/$abi/libpyrowave-shared.so" ]]; then
+            cp "$libs/$abi/libpyrowave-shared.so" "$work/stage/lib/$abi/"
+            mkdir -p "$work/stage/assets/pyrowave"
+            cp -R "$libs/$abi/licenses" "$work/stage/assets/pyrowave/"
+        fi
     done
     cp "$work/base.apk" "$work/unsigned.apk"
-    (cd "$work/stage" && zip -q -r -9 "$work/unsigned.apk" lib)
+    (cd "$work/stage" && zip -q -r -9 "$work/unsigned.apk" .)
     sign "$work/unsigned.apk" "$out/$name"
     echo "$name: $(du -h "$out/$name" | cut -f1) ($*)"
 }

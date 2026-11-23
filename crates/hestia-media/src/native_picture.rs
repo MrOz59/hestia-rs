@@ -135,6 +135,23 @@ pub struct PlanarPicture {
 }
 
 impl PlanarPicture {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub(crate) fn allocate(pool: &Arc<PlanePool>, width: u32, height: u32, colorimetry: Colorimetry) -> Self {
+        let (w, h) = (width as usize, height as usize);
+        Self {
+            data: pool.take(w * h + 2 * w.div_ceil(2) * h.div_ceil(2)),
+            pool: pool.clone(),
+            width,
+            height,
+            colorimetry,
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub(crate) fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+
     /// Copies a picture out of a decoder's (strided) planes into pooled
     /// storage. Fails, rather than panicking, when a plane is shorter than
     /// the size and strides imply.

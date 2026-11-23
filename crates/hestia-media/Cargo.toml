@@ -34,4 +34,7 @@ cros-codecs = { workspace = true, optional = true }
 # AMediaCodec + AImageReader (hardware video, Opus) and AAudio (playback).
 ndk = { version = "0.9", default-features = false, features = ["media", "api-level-26"] }
 ndk-sys = { version = "0.6", features = ["audio"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+ash = { version = "0.38", default-features = false, features = ["loaded"] }
 libloading = "0.8"

@@ -383,6 +383,9 @@ impl FrameAssembler {
 
     fn mark_lost(&mut self, count: u32, out: &mut Vec<AssemblerOutput>) {
         self.stats.lost_frames += u64::from(count);
+        if self.codec == VideoCodec::PyroWave {
+            return;
+        }
         self.waiting_for_idr = true;
         if !matches!(out.last(), Some(AssemblerOutput::NeedIdr)) {
             out.push(AssemblerOutput::NeedIdr);
@@ -410,6 +413,30 @@ fn depacketize_at(
     let latency = u16::from_le_bytes([first[1], first[2]]);
     let last_len = u16::from_le_bytes([first[4], first[5]]) as usize;
     let capacity = first.len();
+
+    // Hermes pads the last RTP shard. Zeroes are valid codec bytes, so use
+    // only the explicit last-payload length, including the single-shard case.
+    if codec == VideoCodec::PyroWave {
+        let (last, prefix) = payloads.split_last()?;
+        let tail = last.as_ref().get(..last_len)?;
+        if header_len != 8 || tail.is_empty() {
+            return None;
+        }
+        let mut parts = prefix.iter().map(AsRef::as_ref).chain(std::iter::once(tail));
+        let start = parts.next()?.get(header_len..)?;
+        let mut data = Vec::with_capacity(start.len() + parts.clone().map(<[u8]>::len).sum::<usize>());
+        data.extend_from_slice(start);
+        for part in parts {
+            data.extend_from_slice(part);
+        }
+        return (!data.is_empty()).then_some(AssembledFrame {
+            frame,
+            data,
+            keyframe: true,
+            host_latency_100us: latency,
+            received_at,
+        });
+    }
 
     let total_len: usize = payloads.iter().map(|part| part.as_ref().len()).sum();
     if total_len < header_len {
@@ -472,7 +499,7 @@ pub fn is_keyframe_bitstream(data: &[u8], codec: VideoCodec) -> bool {
                             return false;
                         }
                     }
-                    VideoCodec::Av1 => return false,
+                    VideoCodec::Av1 | VideoCodec::PyroWave => return false,
                 }
             }
             i = n;
@@ -795,7 +822,7 @@ fn receive_loop(
 
     while !stop.load(Ordering::Relaxed) {
         let now = Instant::now();
-        if decoder_wants_idr.swap(false, Ordering::Relaxed) {
+        if decoder_wants_idr.swap(false, Ordering::Relaxed) && cfg.format.codec != VideoCodec::PyroWave {
             assembler.wait_for_keyframe();
             if let Some(reason) = idr.want(now, IdrReason::Decoder) {
                 counters.recovery.request(reason, idr.loss_detected_at, emit);
@@ -906,7 +933,7 @@ fn receive_loop(
                         loss_detected_at: recovered_loss,
                         host_latency: Some(Duration::from_micros(frame.host_latency_100us as u64 * 100)),
                     };
-                    if sink.submit(encoded) == SubmitResult::NeedKeyframe {
+                    if sink.submit(encoded) == SubmitResult::NeedKeyframe && cfg.format.codec != VideoCodec::PyroWave {
                         debug!("decoder asked for a keyframe");
                         assembler.wait_for_keyframe();
                         if let Some(reason) = idr.want(Instant::now(), IdrReason::Decoder) {
@@ -1200,6 +1227,32 @@ mod tests {
                 if a.frame == u32::MAX && a.received_at == start && b.frame == 0
         ));
         assert_eq!(asm.stats.lost_frames, 0);
+    }
+
+    #[test]
+    fn pyrowave_preserves_binary_padding_and_resumes_after_loss() {
+        let mut asm = FrameAssembler::new(PACKET_SIZE as u32, VideoCodec::PyroWave);
+        let start = Instant::now();
+        let data: Vec<u8> = [0, 0, 1, 0, 0, 0, 0].into_iter().cycle().take(4200).collect();
+        // Drop a shard and reconstruct through FEC. The picture is independent
+        // even when the generic frame header does not mark an IDR.
+        let packets = packetize(1, &data, PACKET_SIZE, 30, 10, false);
+        let out: Vec<_> = packets.iter().skip(1).flat_map(|p| asm.add_at(p, start)).collect();
+        assert!(matches!(&out[..], [AssemblerOutput::Frame(f)] if f.keyframe && f.data == data));
+        let next = packetize(3, &[4, 0, 0], PACKET_SIZE, 20, 40, false);
+        assert!(asm.add_at(&next[0], start).is_empty());
+        let out = asm.expire(start + REORDER_WINDOW);
+        assert!(matches!(&out[..], [AssemblerOutput::Frame(f)] if f.frame == 3 && f.data == [4,0,0]));
+        assert_eq!((asm.stats.lost_frames, asm.stats.dropped_waiting_idr), (1, 0));
+    }
+
+    #[test]
+    fn pyrowave_requires_an_exact_nonempty_payload() {
+        for last in [0u16, 7, 8, 11] {
+            let mut payload = vec![1, 0, 0, 2, 0, 0, 0, 0, 0, 0];
+            payload[4..6].copy_from_slice(&last.to_le_bytes());
+            assert!(depacketize(1, &[payload], VideoCodec::PyroWave).is_none());
+        }
     }
 
     #[test]
