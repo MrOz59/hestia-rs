@@ -451,6 +451,12 @@ impl View for SlintView<'_> {
     fn set_physical_keyboard(&self, on: bool) {
         self.0.set_cfg_physical_keyboard(on);
     }
+    fn set_shortcut_labels(&self, labels: [String; 3]) {
+        let [disconnect, stats, capture] = labels;
+        self.0.set_cfg_shortcut_disconnect(disconnect.into());
+        self.0.set_cfg_shortcut_stats(stats.into());
+        self.0.set_cfg_shortcut_capture(capture.into());
+    }
     fn show_settings(&self, form: SettingsForm) {
         let w = self.0;
         w.set_cfg_resolution_options(strings(form.resolution_options));
