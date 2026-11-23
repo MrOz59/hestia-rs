@@ -96,7 +96,7 @@ impl SessionUrl {
             Some(p) => p.parse().map_err(|_| RtspError::Malformed("bad port"))?,
             None => DEFAULT_RTSP_PORT,
         };
-        let host = if host.is_empty() || host == "0.0.0.0" {
+        let host = if host.is_empty() || host == "0.0.0.0" || host == "::" {
             fallback_host
         } else {
             host
@@ -578,6 +578,9 @@ mod tests {
         assert_eq!((u.host.as_str(), u.port, u.encrypted), ("fe80::2", 48011, false));
         let u = SessionUrl::parse("", "pc").unwrap();
         assert_eq!((u.host.as_str(), u.port), ("pc", DEFAULT_RTSP_PORT));
+        // An unspecified address stands for the host we asked.
+        let u = SessionUrl::parse("rtsp://[::]:48010", "fd00::20").unwrap();
+        assert_eq!((u.host.as_str(), u.port), ("fd00::20", 48010));
         assert!(SessionUrl::parse("http://x", "x").is_err());
     }
 

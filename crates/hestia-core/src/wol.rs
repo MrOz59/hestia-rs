@@ -1,9 +1,13 @@
 //! Wake-on-LAN: the "magic packet" (6 × 0xFF, then the MAC 16 times) sent
 //! by UDP broadcast, as Moonlight does, to wake a sleeping host whose MAC
-//! address an earlier `/serverinfo` told us.
+//! address an earlier `/serverinfo` told us. On IPv6 networks it also goes
+//! to the all-nodes group, so IPv6-only LANs can wake hosts too.
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
+
+/// The link-local all-nodes group.
+const ALL_NODES: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
 
 /// Ports Moonlight sends to: the classic WoL ports and GameStream's, which
 /// some routers forward to the host.
@@ -72,9 +76,40 @@ pub fn wake(mac: [u8; 6], address: Option<IpAddr>, before_send: impl Fn(&SocketA
     }
 }
 
+/// Sends the packet to the IPv6 all-nodes group on each interface (by
+/// index). A sleeping network card matches the magic pattern in any frame,
+/// and unlike unicast this needs no neighbour discovery, which a sleeping
+/// host can't answer. Returns how many went out.
+pub fn wake_ipv6(mac: [u8; 6], interfaces: &[u32]) -> io::Result<usize> {
+    if interfaces.is_empty() {
+        return Ok(0);
+    }
+    let socket = UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0))?;
+    let packet = magic_packet(mac);
+    let mut sent = 0;
+    let mut last_err = None;
+    for &interface in interfaces {
+        for port in PORTS {
+            match socket.send_to(&packet, SocketAddrV6::new(ALL_NODES, port, 0, interface)) {
+                Ok(_) => sent += 1,
+                Err(e) => last_err = Some(e),
+            }
+        }
+    }
+    match (sent, last_err) {
+        (0, Some(e)) => Err(e),
+        _ => Ok(sent),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_ipv6_interface_sends_nothing() {
+        assert_eq!(wake_ipv6([1, 2, 3, 4, 5, 6], &[]).unwrap(), 0);
+    }
 
     #[test]
     fn macs() {

@@ -45,6 +45,8 @@ Apollo/Hermes OTP proof).
 ### hestia-nvhttp
 GameStream HTTP control plane. A small HTTP/1.1 client over `std::net` +
 rustls (one request per connection, as hosts expect), a forgiving XML reader,
+Happy Eyeballs connections (RFC 8305: IPv6 first, unique-local first, families
+alternating, a new attempt every 250 ms),
 and typed calls: `serverinfo` (HTTPS when paired, HTTP fallback), the five-stage
 pairing handshake (ported from Moonlight's `NvPairingManager`), `applist`,
 `appasset`, `launch`/`resume` (with `corever=1` for encrypted RTSP, Apollo's
@@ -63,7 +65,11 @@ JSON parsing is lenient (defaults for missing fields, unknown fields ignored).
 mDNS browsing for `_nvstream._tcp.local` using legacy-unicast one-shot queries
 (RFC 6762 §6.7): queries go to 224.0.0.251:5353 from an ephemeral port and the
 responder (Avahi on Hermes hosts) replies by unicast. No port-5353 bind next to
-the system responder, and no Android `MulticastLock`.
+the system responder, and no Android `MulticastLock`. The same query also goes
+to ff02::fb on every interface with IPv6 (the scope id picks the interface), so
+IPv6-only networks are browsed too; IPv6 link-local answers are skipped, as
+they need a scope we don't keep. `netif` lists this device's addresses and
+prefixes (`getifaddrs`), which tells which hosts share a link with us.
 
 ### hestia-core
 The facade the apps use: `HestiaClient::open(data_dir)` loads or creates the
@@ -71,8 +77,11 @@ identity and loads hosts and settings (JSON, atomic writes). Host records are
 keyed by the host's unique id once known, and the pinned certificate belongs
 to the record, not to an address. A record keeps every address the host has
 been reached at (`hostaddr`: added by hand or seen over mDNS), and
-`refresh()` asks them all at once: the LAN beats a VPN such as
-Tailscale, which beats the internet, and an address now answering as another
+`refresh()` asks them all at once: the LAN (anything on a network this device
+is attached to, IPv6 global addresses included) beats a VPN such as Tailscale,
+which beats the internet. On the same kind of network IPv6 wins, unique-local
+first, as draft-ietf-6man-rfc6724-update has it rather than RFC 6724's table,
+which ranks unique-local below IPv4. An address now answering as another
 known host is dropped. A new address that answers as a known host merges into
 its record, so its pairing carries over. `launch()` prepares a Hermes session when
 available, then launches or resumes, and returns a `LaunchedSession` carrying

@@ -198,7 +198,7 @@ fn run(cli: Cli) -> Result<()> {
                 println!(
                     "{:<24} {:<22} {:<8} {}",
                     h.name,
-                    format!("{}:{}", h.address, h.http_port),
+                    h.active_address(),
                     if h.is_paired() { "paired" } else { "unpaired" },
                     h.id
                 );
@@ -470,14 +470,9 @@ fn resolve(client: &HestiaClient, query: &str) -> Result<HostRecord> {
 
 fn print_snapshot(s: &HostSnapshot) {
     let r = &s.record;
-    println!("{} ({}:{})", r.name, r.address, r.http_port);
+    println!("{} ({})", r.name, r.active_address());
     println!("  id:       {}", r.id);
-    let others: Vec<String> = r
-        .known_addresses()
-        .iter()
-        .skip(1)
-        .map(|a| format!("{}:{}", a.address, a.http_port))
-        .collect();
+    let others: Vec<String> = r.known_addresses().iter().skip(1).map(|a| a.to_string()).collect();
     if !others.is_empty() {
         println!("  also at:  {}", others.join(", "));
     }
