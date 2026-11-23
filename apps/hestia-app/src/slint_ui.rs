@@ -654,5 +654,7 @@ pub(crate) fn wire(ui: &AppWindow, controller: &Arc<Controller>) {
     let c = controller.clone();
     ui.on_settings_preset_changed(move |index| c.apply_preset(index));
     let c = controller.clone();
+    ui.on_settings_update_shortcut(move |which, text| c.update_shortcut(which, text.to_string()));
+    let c = controller.clone();
     ui.on_stream_cycle_scale(move || c.cycle_video_scale());
 }
