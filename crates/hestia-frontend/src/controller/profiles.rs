@@ -34,7 +34,8 @@ impl Controller {
         });
     }
 
-    /// Save a profile only for the host whose settings page is open.
+    /// Settings → "Save as profile": the page as it is now, named, for the
+    /// open host only; the host then launches with it.
     pub fn save_profile(self: &Shared, name: &str) {
         let Some(core) = self.core() else { return };
         let Some(id) = self.state().current_host.clone() else {
@@ -67,7 +68,8 @@ impl Controller {
         });
     }
 
-    /// Load this host's profile into the editor without modifying its selection.
+    /// Settings → a profile's Load: the host launches with it from now on,
+    /// and the page shows it (Save then changes that profile).
     pub fn load_profile(self: &Shared, index: i32) {
         let Some(core) = self.core() else { return };
         let Some(id) = self.state().current_host.clone() else {
@@ -86,7 +88,7 @@ impl Controller {
             return;
         }
         self.push_profiles();
-        self.toast(format!("Loaded “{}” for editing", profile.name));
+        self.toast(format!("Loaded “{}”: this host launches with it", profile.name));
         self.ui(move |ui| {
             let (base, _) = core.settings_for_host(&id);
             let settings = profile.apply(&view::read_settings_from(ui, &base));
@@ -94,7 +96,7 @@ impl Controller {
         });
     }
 
-    /// Deleting a profile never affects another host.
+    /// Settings → a profile's Delete (other hosts keep theirs).
     pub fn delete_profile(self: &Shared, index: i32) {
         let Some(core) = self.core() else { return };
         let Some(id) = self.state().current_host.clone() else {
@@ -120,7 +122,8 @@ impl Controller {
         }
     }
 
-    /// Selects a profile from this host's own profile list.
+    /// Host page → "Stream profile": what this host launches with (0: its
+    /// own defaults, then its profiles).
     pub fn choose_host_profile(self: &Shared, index: i32) {
         let Some(core) = self.core() else { return };
         let Some(id) = self.state().current_host.clone() else {

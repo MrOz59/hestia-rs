@@ -93,9 +93,11 @@ currently assumes the compositor offers a keyboard seat. New platform-
 specific controls should follow this pattern and must not be shown when
 their required capability is absent.
 
-Keyboard shortcuts are stored as local device settings, not host profiles.
-They accept a modifier combination with A–Z, 0–9 or F1–F24; conflicting
-bindings are rejected and intercepted key-up events are not sent to the host.
+Keyboard shortcuts are stored as local device settings, not host profiles,
+and a stream reads them when it starts. Letters and digits need Ctrl, Alt or
+Meta (Shift alone would take capitals from what is typed); F1–F24 can also be
+used alone. Two actions can't share a shortcut, and the release of a key that
+ran one stays on the device too, like its press.
 
 ## Startup
 
