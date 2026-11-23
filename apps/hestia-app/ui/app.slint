@@ -228,6 +228,10 @@ export component AppWindow inherits Window {
     in property <string> client-id;
     in property <string> cfg-host-name;
     in property <bool> cfg-physical-keyboard;
+    in-out property <string> cfg-shortcut-disconnect: "Ctrl+Alt+Shift+Q";
+    in-out property <string> cfg-shortcut-stats: "Ctrl+Alt+Shift+S";
+    in-out property <string> cfg-shortcut-capture: "Ctrl+Alt+Shift+Z";
+    callback settings-update-shortcut(int, string);
     in property <string> data-dir;
     in property <string> version-text;
     property <int> settings-return: 0;
@@ -674,6 +678,10 @@ export component AppWindow inherits Window {
             android: root.is-android;
             physical-keyboard: root.cfg-physical-keyboard;
             host-name: root.cfg-host-name;
+            shortcut-disconnect <=> root.cfg-shortcut-disconnect;
+            shortcut-stats <=> root.cfg-shortcut-stats;
+            shortcut-capture <=> root.cfg-shortcut-capture;
+            update-shortcut(which, value) => { root.settings-update-shortcut(which, value); }
             touch-controls: root.has-touch-input;
             orientation <=> root.cfg-orientation;
             profile-names: root.cfg-profile-names;
