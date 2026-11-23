@@ -45,6 +45,10 @@ impl Controller {
             let settings = view::read_settings_from(ui, &base);
             match core.save_profile(&id, &name, &settings) {
                 Ok(saved) => {
+                    if let Err(e) = core.set_host_profile(&id, Some(&saved)) {
+                        c.toast(format!("Saved profile, but selection failed: {e}"));
+                        return;
+                    }
                     let index = core.profiles(&id).unwrap_or_default()
                         .iter().position(|p| p.name == saved).unwrap_or_default();
                     c.push_profiles();
@@ -62,7 +66,12 @@ impl Controller {
         let Some(id) = self.state().current_host.clone() else { return };
         let Some(profile) = core.profiles(&id).unwrap_or_default()
             .into_iter().nth(index.max(0) as usize) else { return };
-        self.toast(format!("Loaded “{}”; Save to update the selected host configuration", profile.name));
+        if let Err(e) = core.set_host_profile(&id, Some(&profile.name)) {
+            self.toast(format!("Could not select profile: {e}"));
+            return;
+        }
+        self.push_profiles();
+        self.toast(format!("Loaded “{}” for editing", profile.name));
         self.ui(move |ui| {
             let (base, _) = core.settings_for_host(&id);
             let settings = profile.apply(&view::read_settings_from(ui, &base));
