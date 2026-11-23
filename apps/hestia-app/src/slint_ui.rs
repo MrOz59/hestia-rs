@@ -528,6 +528,10 @@ pub(crate) fn wire(ui: &AppWindow, controller: &Arc<Controller>) {
     ui.on_open_host(move |id| c.open_host(id.to_string()));
     let c = controller.clone();
     ui.on_add_host(move |address| c.add_host(address.to_string()));
+    let c = controller.clone();
+    ui.on_open_host_editor(move || c.edit_current_host());
+    let c = controller.clone();
+    ui.on_save_host_edit(move |name, address| c.save_current_host(name.to_string(), address.to_string()));
 
     let c = controller.clone();
     ui.on_pair_retry(move || c.restart_pairing());
