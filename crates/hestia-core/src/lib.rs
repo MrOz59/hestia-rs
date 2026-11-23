@@ -940,6 +940,24 @@ impl HestiaClient {
         })?
     }
 
+    /// Edit an alias and preferred address together, as one persisted host
+    /// update. The unique id, certificates and other reachable addresses stay.
+    pub fn edit_host_details(&self, id: &str, alias: &str, address: &str) -> Result<()> {
+        let alias = alias.trim();
+        if alias.chars().count() > 80 {
+            return Err(CoreError::Invalid("host name is too long".into()));
+        }
+        let (name, port) = address::parse(address)?;
+        self.update_hosts(|hosts| {
+            let host = hosts.iter_mut().find(|h| h.id == id)
+                .ok_or_else(|| CoreError::Invalid(format!("unknown host: {id}")))?;
+            host.display_name = (!alias.is_empty()).then(|| alias.to_owned());
+            host.set_active(HostAddress::new(name, port));
+            host.manual = true;
+            Ok(())
+        })?
+    }
+
     /// Forgets a host locally (the host keeps its own paired-client entry
     /// until removed in its web UI).
     pub fn forget(&self, id: &str) -> Result<()> {
