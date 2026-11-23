@@ -96,6 +96,7 @@ struct Running {
     /// Direct output: the surface rendered to (None while it's gone) and
     /// its generation, to follow it when the helper replaces it.
     direct: Option<(u64, Option<NativeWindow>)>,
+    direct_measurement: Option<crate::direct_video::Measurement>,
 }
 
 // SAFETY: see the type's documentation.
@@ -103,6 +104,16 @@ unsafe impl Send for Running {}
 
 impl Drop for Running {
     fn drop(&mut self) {
+        if let Some(measurement) = &self.direct_measurement {
+            if self
+                .direct
+                .as_ref()
+                .is_some_and(|(generation, _)| !crate::direct_video::is_current(*generation))
+            {
+                measurement.surface_changed();
+            }
+            measurement.end_codec();
+        }
         let _ = self.codec.stop();
     }
 }
@@ -193,6 +204,7 @@ impl MediaCodecDecoder {
         fps: u32,
         output: Output,
         component: Option<&str>,
+        stats: Option<&Arc<DecodeStats>>,
     ) -> Result<Running, String> {
         let mime = mime(format.codec).ok_or("not a MediaCodec format")?;
         let create_codec = || {
@@ -263,9 +275,9 @@ impl MediaCodecDecoder {
                 }
             }
         }
-        if direct.is_some() {
-            crate::direct_video::measure(&codec);
-        }
+        let direct_measurement = stats
+            .filter(|_| direct.is_some())
+            .map(|stats| crate::direct_video::measure(&codec, stats.clone(), fps));
         codec.start().map_err(|e| format!("start {mime}: {e:?}"))?;
         info!(
             "MediaCodec {} {w}x{h}@{fps} started ({output:?} output)",
@@ -283,6 +295,7 @@ impl MediaCodecDecoder {
             pending: VecDeque::with_capacity(MAX_PENDING_FRAMES),
             rendered: VecDeque::with_capacity(MAX_PENDING_FRAMES),
             direct: direct.map(|(generation, window)| (generation, Some(window))),
+            direct_measurement,
         })
     }
 
@@ -318,7 +331,15 @@ impl MediaCodecDecoder {
         let mut error = reason.to_owned();
         if let Some((_, component)) = self.components.iter().find(|(codec, _)| *codec == format.codec) {
             for &output in outputs {
-                match Self::start(format, width, height, fps, output, component.as_deref()) {
+                match Self::start(
+                    format,
+                    width,
+                    height,
+                    fps,
+                    output,
+                    component.as_deref(),
+                    self.stats.as_ref(),
+                ) {
                     Ok(running) => {
                         self.running = Some(running);
                         return Ok(());
@@ -554,6 +575,9 @@ impl Running {
         if let Some((have, current)) = &mut self.direct
             && *have != generation
         {
+            if let Some(measurement) = &self.direct_measurement {
+                measurement.surface_changed();
+            }
             if let Some(window) = &window {
                 self.codec
                     .set_output_surface(window)
@@ -579,11 +603,20 @@ impl Running {
                         continue;
                     };
                     timing.codec_output_at = Instant::now();
+                    if visible && let Some(measurement) = &self.direct_measurement {
+                        measurement.output(timing.codec_output_at);
+                    }
                     if let Some((older, _)) = newest.replace((buffer, timing)) {
                         record_superseded(stats, 1);
-                        self.codec
-                            .release_output_buffer(older, false)
-                            .map_err(|e| format!("release output: {e:?}"))?;
+                        let release = self.codec.release_output_buffer(older, false);
+                        if let Some(measurement) = &self.direct_measurement {
+                            if release.is_ok() {
+                                measurement.discard_older(visible);
+                            } else {
+                                measurement.release_result(0, false, false);
+                            }
+                        }
+                        release.map_err(|e| format!("release output: {e:?}"))?;
                     }
                 }
                 Ok(DequeuedOutputBufferInfoResult::OutputFormatChanged) => {
@@ -608,9 +641,15 @@ impl Running {
         let Some((buffer, timing)) = newest else {
             return Ok(None);
         };
-        self.codec
-            .release_output_buffer(buffer, visible)
-            .map_err(|e| format!("release output: {e:?}"))?;
+        let pts = buffer.info().presentation_time_us();
+        if visible && let Some(measurement) = &self.direct_measurement {
+            measurement.expect_callback(pts);
+        }
+        let release = self.codec.release_output_buffer(buffer, visible);
+        if let Some(measurement) = &self.direct_measurement {
+            measurement.release_result(pts, visible, release.is_ok());
+        }
+        release.map_err(|e| format!("release output: {e:?}"))?;
         out.width = self.width as u32;
         out.height = self.height as u32;
         out.buffer = FrameBuffer::Direct;
@@ -796,6 +835,9 @@ impl FrameDecoder for MediaCodecDecoder {
         let running = self.running.as_mut().ok_or("decoder not configured")?;
         if let Err(e) = running.codec.flush() {
             return self.fall_back(&format!("could not flush decoder: {e:?}"));
+        }
+        if let Some(measurement) = &running.direct_measurement {
+            measurement.codec_flushed();
         }
         // Keep timestamps monotonic across resets so an image already handed
         // to the reader cannot be mistaken for an output from the new IDR.

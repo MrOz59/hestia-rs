@@ -8,17 +8,20 @@
 //! picks it up when it starts and follows later changes. When the surface
 //! is missing or fails, the decoder uses its other outputs.
 //!
-//! [`PRESENTED`] records when each frame actually reached the display
-//! (`AMediaCodec_setOnFrameRenderedCallback`, Android 13+), which is what
-//! the stream report shows as "Direct video".
+//! The report separates explicit discards and releases from Android's
+//! asynchronous codec render callbacks (available on Android 13+).
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use log::{info, warn};
 use ndk::media::media_codec::MediaCodec;
 use ndk::native_window::NativeWindow;
+
+use crate::DecodeStats;
+pub use crate::direct_video_stats::DirectVideoStats;
 
 static WANTED: AtomicBool = AtomicBool::new(false);
 
@@ -78,6 +81,10 @@ pub(crate) fn current() -> (u64, Option<NativeWindow>) {
     (slot.generation, slot.window.clone())
 }
 
+pub(crate) fn is_current(generation: u64) -> bool {
+    slot().generation == generation
+}
+
 /// Waits a little for the surface: the helper adds it on the UI thread
 /// while the stream starts, so it can arrive just after the decoder.
 pub(crate) fn wait_for_surface(timeout: Duration) -> Option<(u64, NativeWindow)> {
@@ -93,99 +100,50 @@ pub(crate) fn wait_for_surface(timeout: Duration) -> Option<(u64, NativeWindow)>
     }
 }
 
-/// When frames reached the display, from the codec's frame-rendered
-/// callback.
-pub struct PresentedStats {
-    frames: AtomicU64,
-    last_ns: AtomicI64,
-    period_us: AtomicU64,
-    /// Every interval between two presented frames, microseconds (capped,
-    /// about 18 minutes at 60 fps).
-    intervals: Mutex<Vec<u32>>,
-    /// Whether the callback could be installed for this stream.
-    measuring: AtomicBool,
+// Keep an opaque generation token in callback userdata. A delayed callback can
+// race codec teardown, so it must never dereference codec-owned memory.
+static NEXT_CODEC_ID: AtomicUsize = AtomicUsize::new(1);
+static CALLBACKS: LazyLock<Mutex<HashMap<usize, Weak<DecodeStats>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) struct Measurement {
+    id: usize,
+    stats: Arc<DecodeStats>,
 }
 
-const MAX_INTERVALS: usize = 1 << 16;
-
-pub static PRESENTED: PresentedStats = PresentedStats {
-    frames: AtomicU64::new(0),
-    last_ns: AtomicI64::new(0),
-    period_us: AtomicU64::new(0),
-    intervals: Mutex::new(Vec::new()),
-    measuring: AtomicBool::new(false),
-};
-
-/// A summary of [`PresentedStats`] for the report and the overlay.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PresentedSummary {
-    pub frames: u64,
-    pub p50_ms: f64,
-    pub p99_ms: f64,
-    pub worst_ms: f64,
-    /// Intervals more than 30% away from the stream's frame period.
-    pub uneven_pct: f64,
-}
-
-impl PresentedStats {
-    /// A new stream at `fps`.
-    pub fn reset(&self, fps: u32) {
-        self.frames.store(0, Ordering::Relaxed);
-        self.last_ns.store(0, Ordering::Relaxed);
-        self.period_us
-            .store(1_000_000 / u64::from(fps.max(1)), Ordering::Relaxed);
-        self.intervals.lock().unwrap_or_else(|p| p.into_inner()).clear();
-        self.measuring.store(false, Ordering::Relaxed);
+impl Measurement {
+    pub(crate) fn surface_changed(&self) {
+        self.stats.direct_video.surface_changed(self.id, Instant::now());
     }
 
-    pub fn frames(&self) -> u64 {
-        self.frames.load(Ordering::Relaxed)
+    pub(crate) fn codec_flushed(&self) {
+        self.stats.direct_video.codec_flushed(self.id, Instant::now());
     }
 
-    pub fn measuring(&self) -> bool {
-        self.measuring.load(Ordering::Relaxed)
+    pub(crate) fn end_codec(&self) {
+        self.stats.direct_video.end_codec(self.id, Instant::now());
     }
 
-    fn record(&self, system_ns: i64) {
-        self.frames.fetch_add(1, Ordering::Relaxed);
-        let last = self.last_ns.swap(system_ns, Ordering::Relaxed);
-        if last > 0 && system_ns > last {
-            let us = ((system_ns - last) / 1_000).min(i64::from(u32::MAX)) as u32;
-            let mut intervals = self.intervals.lock().unwrap_or_else(|p| p.into_inner());
-            if intervals.len() < MAX_INTERVALS {
-                intervals.push(us);
-            }
-        }
+    pub(crate) fn output(&self, now: Instant) {
+        self.stats.direct_video.output(self.id, now);
     }
 
-    pub fn summary(&self) -> Option<PresentedSummary> {
-        let mut intervals = self.intervals.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        if intervals.is_empty() {
-            return None;
-        }
-        intervals.sort_unstable();
-        let at = |q: f64| intervals[((intervals.len() - 1) as f64 * q).round() as usize] as f64 / 1_000.0;
-        let period = self.period_us.load(Ordering::Relaxed).max(1) as f64;
-        let uneven = intervals
-            .iter()
-            .filter(|&&us| (us as f64 - period).abs() > period * 0.3)
-            .count();
-        Some(PresentedSummary {
-            frames: self.frames(),
-            p50_ms: at(0.5),
-            p99_ms: at(0.99),
-            worst_ms: *intervals.last().unwrap() as f64 / 1_000.0,
-            uneven_pct: uneven as f64 * 100.0 / intervals.len() as f64,
-        })
+    pub(crate) fn expect_callback(&self, pts: i64) {
+        self.stats.direct_video.expect_callback(self.id, pts, Instant::now());
+    }
+
+    pub(crate) fn release_result(&self, pts: i64, visible: bool, ok: bool) {
+        self.stats.direct_video.release_result(self.id, pts, visible, ok);
+    }
+
+    pub(crate) fn discard_older(&self, visible: bool) {
+        self.stats.direct_video.discard_older(self.id, visible);
     }
 }
 
-impl PresentedSummary {
-    pub fn line(&self) -> String {
-        format!(
-            "{} frames shown; interval p50 {:.1} ms, p99 {:.1} ms, worst {:.1} ms; {:.1}% uneven (outside ±30%)",
-            self.frames, self.p50_ms, self.p99_ms, self.worst_ms, self.uneven_pct
-        )
+impl Drop for Measurement {
+    fn drop(&mut self) {
+        CALLBACKS.lock().unwrap_or_else(|p| p.into_inner()).remove(&self.id);
+        self.end_codec();
     }
 }
 
@@ -197,11 +155,20 @@ type SetCallback = unsafe extern "C" fn(
 
 unsafe extern "C" fn on_frame_rendered(
     _codec: *mut ndk_sys::AMediaCodec,
-    _userdata: *mut std::ffi::c_void,
-    _media_time_us: i64,
+    userdata: *mut std::ffi::c_void,
+    media_time_us: i64,
     system_ns: i64,
 ) {
-    PRESENTED.record(system_ns);
+    let arrival = Instant::now();
+    let id = userdata as usize;
+    let stats = CALLBACKS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&id)
+        .and_then(Weak::upgrade);
+    if let Some(stats) = stats {
+        stats.direct_video.callback(id, media_time_us, system_ns, arrival);
+    }
 }
 
 /// The raw `AMediaCodec *`. The ndk crate keeps it private, but its derived
@@ -215,9 +182,11 @@ fn codec_pointer(codec: &MediaCodec) -> Option<*mut ndk_sys::AMediaCodec> {
     (address != 0).then_some(address as *mut ndk_sys::AMediaCodec)
 }
 
-/// Starts measuring when frames reach the display (Android 13+; looked up
-/// at run time so older releases still load the library).
-pub(crate) fn measure(codec: &MediaCodec) {
+/// Observe this codec's output and register for render callbacks if supported.
+pub(crate) fn measure(codec: &MediaCodec, stats: Arc<DecodeStats>, fps: u32) -> Measurement {
+    let id = NEXT_CODEC_ID.fetch_add(1, Ordering::Relaxed);
+    stats.direct_video.begin_codec(id, fps, Instant::now());
+    let measurement = Measurement { id, stats };
     static SET: OnceLock<Option<SetCallback>> = OnceLock::new();
     let set = SET.get_or_init(|| {
         // SAFETY: libmediandk is a system library; the symbol has the
@@ -234,43 +203,21 @@ pub(crate) fn measure(codec: &MediaCodec) {
         }
     });
     let (Some(set), Some(pointer)) = (set, codec_pointer(codec)) else {
-        info!("direct video: no frame-rendered callback on this device; not measuring");
-        return;
+        info!("direct video: render callbacks unavailable");
+        return measurement;
     };
-    // SAFETY: `pointer` is this live codec; the callback only touches a
-    // static, and the codec stops calling it when it is deleted.
-    let status = unsafe { set(pointer, Some(on_frame_rendered), std::ptr::null_mut()) };
+    CALLBACKS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(id, Arc::downgrade(&measurement.stats));
+    // SAFETY: pointer identifies the live codec. Userdata is an opaque token,
+    // never a pointer to Rust data. The registry owns only a weak reference.
+    let status = unsafe { set(pointer, Some(on_frame_rendered), id as *mut std::ffi::c_void) };
     if status == ndk_sys::media_status_t::AMEDIA_OK {
-        PRESENTED.measuring.store(true, Ordering::Relaxed);
+        measurement.stats.direct_video.enable_callbacks(id);
     } else {
+        CALLBACKS.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
         warn!("direct video: frame-rendered callback refused ({status:?})");
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn summary_of_even_and_late_frames() {
-        let stats = PresentedStats {
-            frames: AtomicU64::new(0),
-            last_ns: AtomicI64::new(0),
-            period_us: AtomicU64::new(0),
-            intervals: Mutex::new(Vec::new()),
-            measuring: AtomicBool::new(false),
-        };
-        stats.reset(60);
-        let mut t = 1_000_000_000i64;
-        for i in 0..100 {
-            // One frame in ten comes a whole period late.
-            t += if i % 10 == 9 { 33_333_333 } else { 16_666_667 };
-            stats.record(t);
-        }
-        let s = stats.summary().unwrap();
-        assert_eq!(s.frames, 100);
-        assert!((s.p50_ms - 16.7).abs() < 0.1, "{s:?}");
-        assert!((s.worst_ms - 33.3).abs() < 0.1, "{s:?}");
-        assert!((s.uneven_pct - 10.1).abs() < 0.5, "{s:?}");
-    }
+    measurement
 }

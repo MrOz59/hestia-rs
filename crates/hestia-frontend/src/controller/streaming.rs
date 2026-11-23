@@ -111,20 +111,6 @@ impl Hotkey {
     }
 }
 
-/// Direct video: frames sent to the display that it never showed (decoded
-/// minus presented), when the presentation is being measured.
-fn direct_unshown(decoded: u64) -> u64 {
-    #[cfg(target_os = "android")]
-    {
-        let presented = &hestia_media::direct_video::PRESENTED;
-        if presented.measuring() {
-            return decoded.saturating_sub(presented.frames());
-        }
-    }
-    let _ = decoded;
-    0
-}
-
 #[derive(Clone)]
 struct Totals {
     at: Instant,
@@ -133,6 +119,8 @@ struct Totals {
     decode_us: u64,
     decoder_dropped: u64,
     superseded: u64,
+    direct_superseded: u64,
+    direct_releases: Option<u64>,
 }
 
 struct Listener {
@@ -205,7 +193,15 @@ impl Listener {
             decoded: self.decode.decoded.load(Ordering::Relaxed),
             decode_us: self.decode.decode_time_us.load(Ordering::Relaxed),
             decoder_dropped: self.decode.dropped.load(Ordering::Relaxed),
-            superseded: self.present.superseded() + direct_unshown(self.decode.decoded.load(Ordering::Relaxed)),
+            superseded: self.present.superseded(),
+            #[cfg(target_os = "android")]
+            direct_superseded: self.decode.direct_video.superseded(),
+            #[cfg(not(target_os = "android"))]
+            direct_superseded: 0,
+            #[cfg(target_os = "android")]
+            direct_releases: self.decode.direct_video.visible_releases(),
+            #[cfg(not(target_os = "android"))]
+            direct_releases: None,
         };
         let mut last = self.last.lock().unwrap_or_else(|p| p.into_inner());
         let prev = last.replace(now.clone())?;
@@ -215,7 +211,8 @@ impl Listener {
         let skipped = delta(now.stats.dropped_waiting_idr, prev.stats.dropped_waiting_idr);
         let lost = delta(now.stats.lost_frames, prev.stats.lost_frames);
         let decoded = delta(now.decoded, prev.decoded);
-        let superseded = delta(now.superseded, prev.superseded);
+        let direct_superseded = delta(now.direct_superseded, prev.direct_superseded);
+        let superseded = delta(now.superseded, prev.superseded) + direct_superseded;
         let host_frames = delta(now.stats.host_latency_frames, prev.stats.host_latency_frames);
         let host_ms = (host_frames > 0)
             .then(|| delta(now.stats.host_latency_us, prev.stats.host_latency_us) as f64 / host_frames as f64 / 1000.0);
@@ -237,9 +234,10 @@ impl Listener {
             },
             skipped_waiting_idr_fps: skipped as f64 / secs,
             network_drop_pct: percent(lost, received + skipped + lost),
-            // Frames the screen skipped. The decoder's own drops (it fell
-            // behind) show up as decoded < received, a decode problem.
-            display_drop_pct: percent(superseded, decoded),
+            // Explicit replacements only. MediaCodec's asynchronous render
+            // notifications are not a drop signal. Direct replacements never
+            // reached the presenter, so include them in the denominator.
+            display_drop_pct: percent(superseded, decoded + direct_superseded),
             host_ms,
         };
         let verdict = self.diagnosis.lock().unwrap_or_else(|p| p.into_inner()).sample(&window);
@@ -254,8 +252,12 @@ impl Listener {
             dropped_waiting_idr: now.stats.dropped_waiting_idr,
             idr_requests: now.stats.idr_requests,
             decoded_fps: Some(window.decoded_fps),
+            direct_release_fps: now
+                .direct_releases
+                .zip(prev.direct_releases)
+                .map(|(now, prev)| delta(now, prev) as f64 / secs),
             decode_ms: Some(window.decode_ms),
-            dropped: Some(now.decoder_dropped + now.superseded),
+            dropped: Some(now.decoder_dropped + now.superseded + now.direct_superseded),
             host_ms,
             verdict: match verdict.bottleneck {
                 Bottleneck::None => None,
@@ -266,10 +268,13 @@ impl Listener {
     }
 
     fn stats_line(&self, s: &StatsSample, verdict: &diagnosis::Diagnosis) -> String {
+        let rates = match s.direct_release_fps {
+            Some(fps) => format!("{:.0} in / {fps:.0} released fps", s.fps),
+            None => format!("{:.0} fps", s.decoded_fps.unwrap_or(s.fps)),
+        };
         let mut line = format!(
-            "{}  ·  {:.0} fps  ·  {:.1} Mbps  ·  RTT {} ms  ·  decode {:.1} ms{}  ·  FEC {}  ·  lost {}  ·  dropped {}",
+            "{}  ·  {rates}  ·  {:.1} Mbps  ·  RTT {} ms  ·  decode {:.1} ms{}  ·  FEC {}  ·  lost {}  ·  dropped {}",
             self.label,
-            s.decoded_fps.unwrap_or(s.fps),
             s.mbps,
             s.rtt_ms,
             s.decode_ms.unwrap_or(0.0),
@@ -428,7 +433,6 @@ impl Controller {
             && launched.settings.codec != hestia_core::CodecPreference::PyroWave;
         #[cfg(target_os = "android")]
         {
-            hestia_media::direct_video::PRESENTED.reset(config.fps);
             hestia_media::direct_video::set_wanted(direct);
         }
         if direct {
@@ -572,7 +576,7 @@ impl Controller {
                 );
                 r.field(
                     "Video delivery",
-                    "handed to Slint",
+                    "presenter handoffs (UI or direct)",
                     present.delivered.load(Ordering::Relaxed),
                 );
                 r.field(
@@ -581,9 +585,9 @@ impl Controller {
                     present.superseded.load(Ordering::Relaxed),
                 );
                 for (stage, histogram) in decode.latency_stages().into_iter().chain([
-                    ("RGBA ready to Slint handoff", &present.handoff),
-                    ("first packet to Slint handoff", &present.receive_to_ui),
-                    ("IDR request to first Slint handoff", &present.recovery.latency),
+                    ("picture ready to presenter handoff", &present.handoff),
+                    ("first packet to presenter handoff", &present.receive_to_ui),
+                    ("IDR request to first presenter handoff", &present.recovery.latency),
                 ]) {
                     if let Some(summary) = histogram.summary() {
                         r.field("Video latency", stage, summary);
@@ -591,11 +595,8 @@ impl Controller {
                 }
                 #[cfg(target_os = "android")]
                 {
-                    let presented = &hestia_media::direct_video::PRESENTED;
-                    match presented.summary() {
-                        Some(summary) => r.field("Direct video", "shown on the display", summary.line()),
-                        None if presented.measuring() => r.field("Direct video", "shown on the display", "no frames"),
-                        None => {}
+                    for (key, value) in decode.direct_video.report(Instant::now()) {
+                        r.field("Direct video", key, value);
                     }
                     for (label, counter) in [
                         ("frames collected while input idle", &decode.idle_output),
