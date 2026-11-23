@@ -221,6 +221,10 @@ pub trait View {
 
     // Apps ---------------------------------------------------------------
     fn set_host_name(&self, text: String);
+    fn set_host_edit_visible(&self, on: bool);
+    fn set_host_edit_name(&self, text: String);
+    fn set_host_edit_address(&self, text: String);
+    fn set_host_edit_error(&self, text: String);
     fn set_host_detail(&self, text: String);
     fn set_host_chips(&self, chips: Vec<String>);
     fn set_host_hermes(&self, on: bool);
