@@ -1,11 +1,13 @@
 //! The stream screen: runs a [`ManagedStream`] after a launch, shows decoded
 //! frames and forwards keyboard, mouse and touch input to the host.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use hestia_core::TouchMode;
+use hestia_core::shortcuts::{ShortcutAction, Shortcuts};
 use hestia_core::diagnosis::{self, Bottleneck, SpikeHistory};
 use hestia_core::report::StatsSample;
 use hestia_core::stream::input::Modifiers;
@@ -39,6 +41,8 @@ pub(super) struct ActiveStream {
 struct Output {
     session: ManagedStream,
     held: Mutex<Held>,
+    /// Key-up must not reach the host when Hestia intercepted key-down.
+    swallowed_keys: Mutex<HashSet<u16>>,
 }
 
 impl Output {
@@ -79,34 +83,31 @@ impl Output {
         self.held().modifiers()
     }
 
+    /// Intercept both key-down and key-up for local shortcuts. This avoids
+    /// sending a stray release to the host without the matching press.
+    fn local_shortcut(
+        &self,
+        key: u16,
+        pressed: bool,
+        modifiers: Modifiers,
+        config: Shortcuts,
+    ) -> (bool, Option<ShortcutAction>) {
+        let mut swallowed = self.swallowed_keys.lock().unwrap_or_else(|p| p.into_inner());
+        if !pressed {
+            return (swallowed.remove(&key), None);
+        }
+        if let Some(action) = config.action(key, modifiers) {
+            swallowed.insert(key);
+            return (true, Some(action));
+        }
+        (false, None)
+    }
+
     /// Lets go of every key and button the host holds.
     fn release_all(&self) {
         let released = self.held().release_all();
         for event in &released {
             self.session.send_input(event);
-        }
-    }
-}
-
-/// Stream shortcuts, with Ctrl+Alt+Shift held.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Hotkey {
-    Disconnect,
-    Stats,
-    MouseCapture,
-}
-
-impl Hotkey {
-    /// By virtual key (letters are their upper-case ASCII code).
-    fn for_key(key: u16) -> Option<Self> {
-        const Q: u16 = b'Q' as u16;
-        const S: u16 = b'S' as u16;
-        const Z: u16 = b'Z' as u16;
-        match key {
-            Q => Some(Self::Disconnect),
-            S => Some(Self::Stats),
-            Z => Some(Self::MouseCapture),
-            _ => None,
         }
     }
 }
@@ -488,7 +489,8 @@ impl Controller {
             out: Output {
                 session,
                 held: Mutex::new(Held::default()),
-            },
+                swallowed_keys: Mutex::new(HashSet::new()),
+            }
             host_id,
             input,
             report: session_report,
@@ -712,10 +714,17 @@ impl Controller {
         if repeat {
             return;
         }
-        if pressed && modifiers.ctrl && modifiers.alt && modifiers.shift {
-            let key = text.chars().next().map(|c| c.to_ascii_uppercase() as u16);
-            if let Some(hotkey) = key.filter(|_| text.chars().count() == 1).and_then(Hotkey::for_key) {
-                return self.hotkey(hotkey);
+        if let Some(crate::keymap::Mapped::Key(key)) = keymap::map(text) {
+            let shortcuts = self.core().map(|core| core.settings().shortcuts).unwrap_or_default();
+            let (consumed, action) = {
+                let guard = self.active_stream();
+                guard.as_ref().filter(|active| active.input.focused)
+                    .map(|active| active.out.local_shortcut(key, pressed, modifiers, shortcuts))
+                    .unwrap_or((false, None))
+            };
+            if consumed {
+                if let Some(action) = action { self.hotkey(action); }
+                return;
             }
         }
         if let Some(event) = stream_input::key(text, pressed, modifiers) {
@@ -733,6 +742,7 @@ impl Controller {
         let Some(key) = keymap::physical(code) else {
             return false;
         };
+        let shortcuts = self.core().map(|core| core.settings().shortcuts).unwrap_or_default();
         let hotkey = {
             let guard = self.active_stream();
             let Some(active) = guard.as_ref().filter(|a| a.input.focused) else {
@@ -743,13 +753,11 @@ impl Controller {
                 return true;
             }
             let held = active.out.modifiers();
-            match Hotkey::for_key(key).filter(|_| pressed && held.ctrl && held.alt && held.shift) {
-                Some(hotkey) => Some(hotkey),
-                None => {
-                    active.out.send_key(key, pressed);
-                    None
-                }
+            let (consumed, action) = active.out.local_shortcut(key, pressed, held, shortcuts);
+            if !consumed {
+                active.out.send_key(key, pressed);
             }
+            action
         };
         if let Some(hotkey) = hotkey {
             self.hotkey(hotkey);
@@ -765,11 +773,11 @@ impl Controller {
         self.active_stream().as_ref().is_some_and(|a| a.input.focused)
     }
 
-    fn hotkey(self: &Shared, hotkey: Hotkey) {
+    fn hotkey(self: &Shared, hotkey: ShortcutAction) {
         match hotkey {
-            Hotkey::Disconnect => self.end_stream(None, None, false),
-            Hotkey::Stats => self.ui(|ui| ui.set_stream_show_stats(!ui.stream_show_stats())),
-            Hotkey::MouseCapture => self.toggle_mouse_capture(),
+            ShortcutAction::Disconnect => self.end_stream(None, None, false),
+            ShortcutAction::Stats => self.ui(|ui| ui.set_stream_show_stats(!ui.stream_show_stats())),
+            ShortcutAction::MouseCapture => self.toggle_mouse_capture(),
         }
     }
 
