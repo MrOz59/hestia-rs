@@ -176,6 +176,8 @@ export component StreamView inherits Rectangle {
     in property <string> subtitle;
     in property <bool> show-stats: true;
     in property <bool> fullscreen;
+    in property <bool> window-fullscreen;
+    in property <bool> touch-controls;
     // 0 trackpad, 1 mouse, 2 touchscreen
     in property <int> touch-mode: 0;
     callback cycle-touch-mode();
@@ -267,10 +269,16 @@ export component StreamView inherits Rectangle {
     }
 
     // TV remote / keyboard in the menu: the focused entry, -1 until an
-    // arrow key is pressed. 0 close, 1 Disconnect, 2 Quit app, 3 keyboard,
-    // 4 / 5 clipboard (Hermes), 6 touch, 13 mouse (desktop), 7 controller,
-    // 8 zoom, 9 picture, 10 statistics, 11 fix picture, 12 full screen.
+    // arrow key is pressed. Hidden rows consume no position.
     property <int> menu-focus: -1;
+    property <int> touch-row: root.clipboard-actions ? 6 : 4;
+    property <int> mouse-row: root.touch-row + (root.touch-controls ? 1 : 0);
+    property <int> pad-row: root.mouse-row + (root.mouse-capture-available ? 1 : 0);
+    property <int> zoom-row: root.pad-row + 1;
+    property <int> picture-row: root.pad-row + (root.touch-controls ? 2 : 0);
+    property <int> stats-row: root.picture-row + 1;
+    property <int> keyframe-row: root.stats-row + 1;
+    property <int> fullscreen-row: root.keyframe-row + 1;
     // Quit asks for a second press.
     property <bool> quit-armed;
     changed menu-open => {
@@ -283,32 +291,6 @@ export component StreamView inherits Rectangle {
     }
     changed picture-in-picture => {
         root.input-focus(!root.picture-in-picture && !root.menu-open && focus.has-focus);
-    }
-    pure function menu-ok(i: int) -> bool {
-        return i >= 3 && i <= 13 && ((i != 4 && i != 5) || root.clipboard-actions) && (i != 13 || root.mouse-capture-available);
-    }
-    // The rows in the order they're shown (Mouse comes after Touch); -1
-    // past the last one.
-    pure function menu-next(i: int) -> int {
-        return i == 6 ? 13 : (i == 13 ? 7 : (i == 12 ? -1 : i + 1));
-    }
-    pure function menu-prev(i: int) -> int {
-        return i == 7 ? 13 : (i == 13 ? 6 : i - 1);
-    }
-    pure function menu-once(from: int, dir: int) -> int {
-        return dir > 0 ? root.menu-next(from) : root.menu-prev(from);
-    }
-    pure function menu-twice(from: int, dir: int) -> int {
-        return root.menu-once(root.menu-once(from, dir), dir);
-    }
-    pure function menu-thrice(from: int, dir: int) -> int {
-        return root.menu-once(root.menu-twice(from, dir), dir);
-    }
-    // The next row that is shown, skipping up to two hidden ones.
-    pure function menu-step(from: int, dir: int) -> int {
-        return root.menu-ok(root.menu-once(from, dir)) ? root.menu-once(from, dir)
-            : root.menu-ok(root.menu-twice(from, dir)) ? root.menu-twice(from, dir)
-            : root.menu-ok(root.menu-thrice(from, dir)) ? root.menu-thrice(from, dir) : from;
     }
     function menu-move(from: int, key: string) -> bool {
         if (key == Key.Back || key == Key.Escape) {
@@ -337,11 +319,11 @@ export component StreamView inherits Rectangle {
             return true;
         }
         if (key == Key.DownArrow) {
-            root.menu-focus = root.menu-step(from, 1);
+            root.menu-focus = min(from + 1, root.window-fullscreen ? root.fullscreen-row : root.keyframe-row);
             return true;
         }
         if (key == Key.UpArrow) {
-            root.menu-focus = from == 3 ? 1 : root.menu-step(from, -1);
+            root.menu-focus = from == 3 ? 1 : from - 1;
             return true;
         }
         return false;
@@ -658,7 +640,7 @@ export component StreamView inherits Rectangle {
             }
             IconButton {
                 icon: "close";
-                label: "Hide the keyboard";
+                label: root.soft-keyboard ? "Hide the keyboard" : "Hide shortcut keys";
                 clicked => {
                     root.keyboard-open = false;
                 }
@@ -816,8 +798,8 @@ export component StreamView inherits Rectangle {
 
                 QuickRow {
                     icon: "keyboard";
-                    text: root.keyboard-open ? "Hide keyboard" : (root.soft-keyboard ? "Keyboard" : "Shortcut keys");
-                    value: root.soft-keyboard && !root.keyboard-open ? "3-finger tap" : "";
+                    text: root.keyboard-open ? (root.soft-keyboard ? "Hide keyboard" : "Hide shortcut keys") : (root.soft-keyboard ? "Keyboard" : "Shortcut keys");
+                    value: root.touch-controls && root.soft-keyboard && !root.keyboard-open ? "3-finger tap" : "";
                     want-focus: root.menu-focus == 3;
                     nav(key) => {
                         return root.menu-move(3, key);
@@ -860,16 +842,16 @@ export component StreamView inherits Rectangle {
                         root.menu-open = false;
                     }
                 }
-                QuickRow {
+                if root.touch-controls: QuickRow {
                     icon: "mouse";
                     text: "Touch";
                     value: root.touch-mode == 0 ? "Trackpad" : (root.touch-mode == 1 ? "Mouse" : "Touchscreen");
-                    want-focus: root.menu-focus == 6;
+                    want-focus: root.menu-focus == root.touch-row;
                     nav(key) => {
-                        return root.menu-move(6, key);
+                        return root.menu-move(root.touch-row, key);
                     }
                     entered => {
-                        root.menu-focus = 6;
+                        root.menu-focus = root.touch-row;
                     }
                     clicked => {
                         root.cycle-touch-mode();
@@ -880,44 +862,44 @@ export component StreamView inherits Rectangle {
                     text: "Capture mouse";
                     value: "Ctrl+Alt+Shift+Z";
                     state: root.mouse-capture ? 1 : 0;
-                    want-focus: root.menu-focus == 13;
+                    want-focus: root.menu-focus == root.mouse-row;
                     nav(key) => {
-                        return root.menu-move(13, key);
+                        return root.menu-move(root.mouse-row, key);
                     }
                     entered => {
-                        root.menu-focus = 13;
+                        root.menu-focus = root.mouse-row;
                     }
                     clicked => {
                         root.toggle-mouse-capture();
                         root.menu-open = false;
                     }
                 }
-                QuickRow {
+                if root.touch-controls: QuickRow {
                     icon: "gamepad";
                     text: "On-screen controller";
                     state: root.pad-visible ? 1 : 0;
-                    want-focus: root.menu-focus == 7;
+                    want-focus: root.menu-focus == root.pad-row;
                     nav(key) => {
-                        return root.menu-move(7, key);
+                        return root.menu-move(root.pad-row, key);
                     }
                     entered => {
-                        root.menu-focus = 7;
+                        root.menu-focus = root.pad-row;
                     }
                     clicked => {
                         root.toggle-pad();
                         root.menu-open = false;
                     }
                 }
-                QuickRow {
+                if root.touch-controls: QuickRow {
                     icon: "zoom";
                     text: root.zoom-mode ? "Zoom (pinch, pan with 2 fingers)" : "Zoom";
                     state: root.zoom-mode ? 1 : 0;
-                    want-focus: root.menu-focus == 8;
+                    want-focus: root.menu-focus == root.zoom-row;
                     nav(key) => {
-                        return root.menu-move(8, key);
+                        return root.menu-move(root.zoom-row, key);
                     }
                     entered => {
-                        root.menu-focus = 8;
+                        root.menu-focus = root.zoom-row;
                     }
                     clicked => {
                         root.toggle-zoom();
@@ -928,12 +910,12 @@ export component StreamView inherits Rectangle {
                     icon: "aspect";
                     text: "Picture";
                     value: root.video-scale == 0 ? "Fit" : (root.video-scale == 1 ? "Fill" : "Stretch");
-                    want-focus: root.menu-focus == 9;
+                    want-focus: root.menu-focus == root.picture-row;
                     nav(key) => {
-                        return root.menu-move(9, key);
+                        return root.menu-move(root.picture-row, key);
                     }
                     entered => {
-                        root.menu-focus = 9;
+                        root.menu-focus = root.picture-row;
                     }
                     clicked => {
                         root.cycle-scale();
@@ -943,12 +925,12 @@ export component StreamView inherits Rectangle {
                     icon: "stats";
                     text: "Statistics";
                     state: root.show-stats ? 1 : 0;
-                    want-focus: root.menu-focus == 10;
+                    want-focus: root.menu-focus == root.stats-row;
                     nav(key) => {
-                        return root.menu-move(10, key);
+                        return root.menu-move(root.stats-row, key);
                     }
                     entered => {
-                        root.menu-focus = 10;
+                        root.menu-focus = root.stats-row;
                     }
                     clicked => {
                         root.toggle-stats();
@@ -958,35 +940,35 @@ export component StreamView inherits Rectangle {
                     icon: "refresh";
                     text: "Fix picture";
                     value: "New keyframe";
-                    want-focus: root.menu-focus == 11;
+                    want-focus: root.menu-focus == root.keyframe-row;
                     nav(key) => {
-                        return root.menu-move(11, key);
+                        return root.menu-move(root.keyframe-row, key);
                     }
                     entered => {
-                        root.menu-focus = 11;
+                        root.menu-focus = root.keyframe-row;
                     }
                     clicked => {
                         root.request-keyframe();
                         root.menu-open = false;
                     }
                 }
-                QuickRow {
+                if root.window-fullscreen: QuickRow {
                     icon: root.fullscreen ? "fullscreen-exit" : "fullscreen";
                     text: "Full screen";
                     state: root.fullscreen ? 1 : 0;
-                    want-focus: root.menu-focus == 12;
+                    want-focus: root.menu-focus == root.fullscreen-row;
                     nav(key) => {
-                        return root.menu-move(12, key);
+                        return root.menu-move(root.fullscreen-row, key);
                     }
                     entered => {
-                        root.menu-focus = 12;
+                        root.menu-focus = root.fullscreen-row;
                     }
                     clicked => {
                         root.toggle-fullscreen();
                         root.menu-open = false;
                     }
                 }
-                if !Theme.compact: Text {
+                if !Theme.compact && root.mouse-capture-available: Text {
                     text: "Ctrl+Alt+Shift+Q disconnects, Ctrl+Alt+Shift+S shows statistics, Ctrl+Alt+Shift+Z captures the mouse";
                     color: Theme.faint;
                     font-size: Theme.caption-size;

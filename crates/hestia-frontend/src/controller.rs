@@ -741,7 +741,9 @@ impl Controller {
                 let session_report = report::begin(&title, &host_name, &device);
                 let failure: String;
                 // The host's stream profile, if it has one, over the settings.
-                let (settings, profile) = core.settings_for_host(&id);
+                let (mut settings, profile) = core.settings_for_host(&id);
+                // Apply this build's supported choices to imported profiles as well.
+                settings.codec = view::client_codec(settings.codec);
                 if let Some(name) = profile {
                     info!("launching with stream profile “{name}”");
                     report::lock(&session_report).field("Settings", "profile", name);

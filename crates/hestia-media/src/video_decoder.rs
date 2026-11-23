@@ -7,6 +7,13 @@ use crate::mediacodec::MediaCodecDecoder;
 use crate::native_picture::GpuOutput;
 use crate::{Colorimetry, FrameDecoder, VideoFormat};
 
+/// Whether this build can open the PyroWave runtime. Device and driver support
+/// are checked when the user explicitly selects the codec.
+pub const PYROWAVE_SUPPORTED: bool = cfg!(any(
+    target_os = "linux",
+    all(target_os = "android", target_pointer_width = "64")
+));
+
 /// The decoder and the formats it can announce to the host.
 pub type DecoderChoice = (Box<dyn FrameDecoder>, Vec<VideoFormat>);
 

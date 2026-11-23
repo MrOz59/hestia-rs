@@ -179,6 +179,19 @@ pub fn decode_art(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     Some((rgba.into_raw(), w, h))
 }
 
+// The Android package ships the Vulkan codec on its two 64-bit ABIs only.
+fn client_codecs() -> impl Iterator<Item = CodecPreference> {
+    CodecPreference::ALL
+        .into_iter()
+        .filter(|&codec| codec != CodecPreference::PyroWave || hestia_media::video_decoder::PYROWAVE_SUPPORTED)
+}
+
+pub(crate) fn client_codec(codec: CodecPreference) -> CodecPreference {
+    client_codecs()
+        .find(|&available| available == codec)
+        .unwrap_or_default()
+}
+
 /// The settings form for `s` on a display whose native mode is `native`.
 pub fn settings_form(s: &StreamSettings, native: Option<(u32, u32, u32)>) -> SettingsForm {
     let (sizes, rates) = mode_options(native, s);
@@ -192,7 +205,13 @@ pub fn settings_form(s: &StreamSettings, native: Option<(u32, u32, u32)>) -> Set
         resolution: index(sizes.iter().position(|&m| m == (s.width, s.height))),
         fps: index(rates.iter().position(|&f| f == s.fps)),
         bitrate_mbps: s.bitrate_kbps as f32 / 1000.0,
-        codec: index(CodecPreference::ALL.iter().position(|&c| c == s.codec)),
+        codec_options: client_codecs()
+            .map(|codec| match codec {
+                CodecPreference::PyroWave => "PyroWave (SDR)".into(),
+                _ => codec.label().into(),
+            })
+            .collect(),
+        codec: index(client_codecs().position(|c| c == s.codec)),
         audio: index(AUDIO_LAYOUTS.iter().position(|&a| a == s.audio)),
         hdr: s.hdr,
         virtual_display: s.virtual_display,
@@ -237,7 +256,7 @@ pub fn settings_from_form(form: &SettingsForm, base: &StreamSettings) -> StreamS
         bitrate_kbps: bitrate_from_mbps(form.bitrate_mbps),
         preset: Preset::ALL[pick(form.preset, Preset::ALL.len())],
         video_scale: VIDEO_SCALES[pick(form.video_scale, VIDEO_SCALES.len())],
-        codec: CodecPreference::ALL[pick(form.codec, CodecPreference::ALL.len())],
+        codec: client_codecs().nth(form.codec.max(0) as usize).unwrap_or_default(),
         audio: AUDIO_LAYOUTS[pick(form.audio, AUDIO_LAYOUTS.len())],
         hdr: form.hdr,
         virtual_display: form.virtual_display,

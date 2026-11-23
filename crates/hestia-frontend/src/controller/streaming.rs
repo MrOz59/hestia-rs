@@ -422,8 +422,10 @@ impl Controller {
         });
         // Android direct video: the helper adds the surface now, while the
         // RTSP handshake runs; the decoder waits a little for it.
-        let direct =
-            cfg!(target_os = "android") && launched.settings.direct_video && launched.settings.hardware_decoding;
+        let direct = cfg!(target_os = "android")
+            && launched.settings.direct_video
+            && launched.settings.hardware_decoding
+            && launched.settings.codec != hestia_core::CodecPreference::PyroWave;
         #[cfg(target_os = "android")]
         {
             hestia_media::direct_video::PRESENTED.reset(config.fps);
@@ -908,7 +910,10 @@ impl Controller {
     /// on to the toolkit too, which says through [`Controller::stream_pointer`]
     /// whether they landed on the stream.
     pub fn stream_raw_pointer(self: &Shared, pointer: RawPointer) -> bool {
-        self.raw_touch.store(true, Ordering::Relaxed);
+        if !self.raw_touch.load(Ordering::Relaxed) {
+            self.raw_touch.store(true, Ordering::Relaxed);
+            self.ui(|ui| ui.set_has_touch_input(true));
+        }
         let ready = {
             let mut guard = self.active_stream();
             let Some(ActiveStream { input, out, .. }) = guard.as_mut() else {

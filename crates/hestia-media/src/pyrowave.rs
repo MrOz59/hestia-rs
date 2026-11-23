@@ -162,7 +162,7 @@ fn open_device(
     gpu: Option<Arc<GpuOutput>>,
     allow_software_icd: bool,
 ) -> Result<DecoderChoice, String> {
-    if cfg!(all(target_os = "android", target_pointer_width = "32")) {
+    if !crate::video_decoder::PYROWAVE_SUPPORTED {
         return Err("PyroWave needs a 64-bit Android app and Vulkan GPU".into());
     }
     if ![width, height]

@@ -374,6 +374,9 @@ impl View for SlintView<'_> {
     fn set_stream_menu_open(&self, on: bool) {
         self.0.set_stream_menu_open(on);
     }
+    fn set_has_touch_input(&self, on: bool) {
+        self.0.set_has_touch_input(on);
+    }
     fn set_stream_pad_visible(&self, on: bool) {
         self.0.set_stream_pad_visible(on);
     }
@@ -434,6 +437,7 @@ impl View for SlintView<'_> {
         let w = self.0;
         w.set_cfg_resolution_options(strings(form.resolution_options));
         w.set_cfg_fps_options(strings(form.fps_options));
+        w.set_cfg_codec_options(strings(form.codec_options));
         w.set_cfg_preset(form.preset);
         w.set_cfg_preset_hint(form.preset_hint.into());
         w.set_cfg_video_scale(form.video_scale);
@@ -461,6 +465,7 @@ impl View for SlintView<'_> {
         SettingsForm {
             resolution_options: labels(w.get_cfg_resolution_options()),
             fps_options: labels(w.get_cfg_fps_options()),
+            codec_options: labels(w.get_cfg_codec_options()),
             preset: w.get_cfg_preset(),
             preset_hint: w.get_cfg_preset_hint().into(),
             video_scale: w.get_cfg_video_scale(),

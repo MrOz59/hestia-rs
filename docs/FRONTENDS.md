@@ -59,6 +59,15 @@ two exceptions are `set_app_art` (box art arriving one card at a time) and
 The compiler lists anything a new shell forgets: `View` has no default
 methods.
 
+### Platform-specific options
+
+Build the settings and stream menus from the capabilities of the client.
+Use the codec choices supplied by `SettingsForm`. For input options, use
+the touchscreen and pointer-capture flags supplied to the shell. A Linux
+touchscreen can provide both. Only visible rows take a position in keyboard
+and D-pad navigation. Options that configure Hermes, including Gamescope and
+virtual displays, remain available from either client.
+
 ## Startup
 
 What the Slint shell does (`apps/hestia-app/src/lib.rs`), in order:
