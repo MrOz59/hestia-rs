@@ -318,6 +318,14 @@ export component AppWindow inherits Window {
             root.take-focus();
         }
     }
+    changed host-edit-visible => {
+        if (root.host-edit-visible) {
+            root.dlg = !root.is-android || Nav.keyboard ? 0 : -1;
+        } else {
+            root.dlg = -1;
+            root.take-focus();
+        }
+    }
     changed pair-visible => {
         if (root.pair-visible) {
             root.dlg = root.pair-start();
