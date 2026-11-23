@@ -746,6 +746,7 @@ export component AppsPage inherits Page {
     callback forget;
     callback tools;
     callback settings;
+    callback edit-host;
 
     // Focus: an app (0…); the header's Back (-2), Host tools (-3) and
     // Forget (-5); the stream profile (-7); Resume (-6) and Quit (-4) on
@@ -834,16 +835,20 @@ export component AppsPage inherits Page {
             }
             return true;
         }
-        // Header: Back (-2), Settings (-8), Host tools (-3), Forget (-5).
+        // Header: Back (-2), Settings (-8), Edit (-9), Tools (-3), Forget (-5).
         if (key == Key.RightArrow && from == -2) {
             root.nav = -8;
         } else if (key == Key.RightArrow && from == -8) {
+            root.nav = -9;
+        } else if (key == Key.RightArrow && from == -9) {
             root.nav = root.hermes ? -3 : -5;
         } else if (key == Key.RightArrow && from == -3) {
             root.nav = -5;
         } else if (key == Key.LeftArrow && from == -5) {
-            root.nav = root.hermes ? -3 : -8;
+            root.nav = root.hermes ? -3 : -9;
         } else if (key == Key.LeftArrow && from == -3) {
+            root.nav = -9;
+        } else if (key == Key.LeftArrow && from == -9) {
             root.nav = -8;
         } else if (key == Key.LeftArrow && from == -8) {
             root.nav = -2;
@@ -893,6 +898,17 @@ export component AppsPage inherits Page {
                     nav(k) => { return root.move(-8, k); }
                     entered => { root.nav = -8; }
                     clicked => { root.settings(); }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                IconButton {
+                    icon: "edit";
+                    label: "Edit host";
+                    want-focus: root.at(-9);
+                    nav(k) => { return root.move(-9, k); }
+                    entered => { root.nav = -9; }
+                    clicked => { root.edit-host(); }
                 }
             }
             if root.hermes && Theme.compact: VerticalLayout {
