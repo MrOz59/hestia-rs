@@ -157,11 +157,24 @@ impl Controller {
         self.refresh_current_running();
     }
 
-    /// The settings page opened: load the saved settings into its form.
+    /// Load the settings for the selected host, or device defaults on the
+    /// hosts screen. Hardware-specific controls depend on current capabilities.
     pub fn open_settings(self: &Shared) {
         if let Some(core) = self.core() {
-            let settings = core.settings();
-            self.ui(move |ui| view::load_settings_into(ui, &settings, platform::native_display()));
+            let selected = self.state().current_host.clone();
+            let (settings, host_name) = match selected {
+                Some(ref id) => {
+                    let (settings, _) = core.settings_for_host(id);
+                    let name = core.host(id).map(|host| host.display_name().to_owned()).unwrap_or_default();
+                    (settings, name)
+                }
+                None => (core.settings(), String::new()),
+            };
+            self.ui(move |ui| {
+                ui.set_settings_host_name(host_name);
+                ui.set_physical_keyboard(platform::has_physical_keyboard());
+                view::load_settings_into(ui, &settings, platform::native_display());
+            });
             self.push_profiles();
         }
     }
@@ -896,13 +909,30 @@ impl Controller {
     // Settings
     // ------------------------------------------------------------------
 
-    /// Saves the settings form.
+    /// Store host quality independently; keep local decoder and UI preferences
+    /// global to the device. No settings from one host leak into another.
     pub fn save_settings(self: &Shared) {
         let Some(core) = self.core() else { return };
+        let selected = self.state().current_host.clone();
         let c = self.clone();
         self.ui(move |ui| {
-            let settings = view::read_settings_from(ui, &core.settings());
-            match core.set_settings(settings) {
+            let global = core.settings();
+            let base = selected.as_deref()
+                .map(|id| core.settings_for_host(id).0)
+                .unwrap_or_else(|| global.clone());
+            let edited = view::read_settings_from(ui, &base);
+            let result = if let Some(id) = selected {
+                // Take only device-local choices from the editor, leaving
+                // global video/audio/host quality settings untouched.
+                let device_settings = hestia_core::profiles::StreamProfile::from_settings(
+                    "Global defaults", &global
+                ).apply(&edited);
+                core.set_host_settings(&id, &edited)
+                    .and_then(|()| core.set_settings(device_settings))
+            } else {
+                core.set_settings(edited)
+            };
+            match result {
                 Ok(()) => c.toast("Settings saved"),
                 Err(e) => c.toast(format!("Could not save settings: {e}")),
             }
