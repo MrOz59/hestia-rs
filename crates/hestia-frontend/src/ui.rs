@@ -311,6 +311,8 @@ pub trait View {
     fn set_pointer_capture(&self, on: bool);
 
     // Settings -----------------------------------------------------------
+    fn set_settings_host_name(&self, name: String);
+    fn set_physical_keyboard(&self, on: bool);
     fn show_settings(&self, form: SettingsForm);
     fn settings_form(&self) -> SettingsForm;
     /// `VideoScale` index, without reloading the rest of the form.
