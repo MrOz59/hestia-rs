@@ -61,6 +61,15 @@ jobs:
       - name: Release build
         run: cargo build --release -p hestia-app -p hestia-cli
 
+      - name: Package the Linux GUI with PyroWave
+        run: scripts/linux-appimage.sh target/release dist/Hestia-RS-x86_64.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hestia-rs-appimage
+          path: dist/Hestia-RS-x86_64.AppImage
+          if-no-files-found: error
+
       - name: UI screenshots (headless, software renderer)
         run: cargo run --release -p hestia-app --example screenshots -- screenshots
 
@@ -424,7 +433,7 @@ jobs:
       - name: Download Linux build and screenshots
         uses: actions/download-artifact@v4
         with:
-          pattern: 'hestia-rs-{linux-x86_64,screenshots}'
+          pattern: 'hestia-rs-{linux-x86_64,appimage,screenshots}'
           path: artifacts
 
       - name: Download APKs from the packaging job
@@ -443,6 +452,7 @@ jobs:
           cp -R "$linux/lib" staging/hestia-rs/
           cp README.md LICENSE staging/hestia-rs/
           tar -C staging -czf dist/hestia-rs-linux-x86_64.tar.gz hestia-rs
+          install -m 755 artifacts/hestia-rs-appimage/Hestia-RS-x86_64.AppImage dist/
           test -f artifacts/hestia-rs-android-apks/hestia-rs-android-universal.apk
           cp artifacts/hestia-rs-android-apks/*.apk dist/
           if ls artifacts/hestia-rs-screenshots/*.png >/dev/null 2>&1; then
@@ -460,7 +470,8 @@ jobs:
             echo "Automatic build of \`main\` at ${GITHUB_SHA} ($(date -u '+%Y-%m-%d %H:%M UTC'))."
             echo
             echo "- **Android:** \`hestia-rs-android-universal.apk\` (phones, tablets, Android TV, Chromebooks: every ABI built in this run: $(cd dist && ls hestia-rs-android-*.apk 2>/dev/null | grep -v universal | sed 's/hestia-rs-android-//; s/\.apk//' | paste -sd ' ' -)), or the smaller per-ABI \`hestia-rs-android-<abi>.apk\` (most phones: arm64-v8a)"
-            echo "- **Linux (x86_64):** \`hestia-rs-linux-x86_64.tar.gz\` (needs libopus, ALSA and a recent glibc)"
+            echo "- **Linux GUI (x86_64):** \`Hestia-RS-x86_64.AppImage\` (GUI and PyroWave in one file)"
+            echo "- **Linux GUI and CLI (x86_64):** \`hestia-rs-linux-x86_64.tar.gz\` (needs libopus, ALSA and a recent glibc)"
             echo "- **Screenshots:** \`ui-screenshots.zip\` (phone and desktop, rendered headless)"
             echo
             if git rev-parse -q --verify refs/tags/nightly >/dev/null; then

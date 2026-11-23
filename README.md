@@ -31,9 +31,18 @@ Every push to `main` that passes CI replaces the **`nightly`** pre-release
 | --- | --- |
 | `hestia-rs-android-universal.apk` | any Android device: phones, tablets, Android TV, Chromebooks (all four ABIs) |
 | `hestia-rs-android-<abi>.apk` | a smaller APK for one ABI (most phones: `arm64-v8a`) |
+| `Hestia-RS-x86_64.AppImage` | Linux GUI with the PyroWave runtime in one executable (same system requirements as the tarball) |
 | `hestia-rs-linux-x86_64.tar.gz` | desktop Linux on Wayland (needs libopus, ALSA, libva, libgbm and a recent glibc) |
 | `ui-screenshots.zip` | the screens, rendered headless (phone and desktop) |
 | `SHA256SUMS` | checksums |
+
+On Linux, run `chmod +x Hestia-RS-x86_64.AppImage` once, then launch
+`./Hestia-RS-x86_64.AppImage` to open the GUI. If FUSE is unavailable, use
+`./Hestia-RS-x86_64.AppImage --appimage-extract-and-run`.
+
+With the tarball, extract the entire directory and launch `./hestia-rs/hestia-app`.
+Keep its sibling `lib/` directory with the binaries when moving them. The
+`hestia` executable is the CLI.
 
 The release notes list the commits since the previous nightly; Settings →
 About in the app shows which commit a build is.
