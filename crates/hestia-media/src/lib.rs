@@ -38,6 +38,8 @@ pub mod color;
 pub mod decode;
 #[cfg(target_os = "android")]
 pub mod direct_video;
+#[cfg(any(target_os = "android", test))]
+mod direct_video_stats;
 pub mod dump;
 #[cfg(target_os = "android")]
 pub mod gpu_video;

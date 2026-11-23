@@ -258,6 +258,8 @@ pub struct DecodeStats {
     pub codec_input_timeouts: AtomicU64,
     pub codec_image_reader_full: AtomicU64,
     pub codec_output_superseded: AtomicU64,
+    #[cfg(target_os = "android")]
+    pub direct_video: crate::direct_video::DirectVideoStats,
     pub receive_to_queue: LatencyHistogram,
     pub queue_wait: LatencyHistogram,
     pub codec_feed: LatencyHistogram,
