@@ -29,7 +29,7 @@ use hestia_api::{
     StreamRequest, VirtualDisplayRequest,
 };
 use hestia_crypto::{ClientIdentity, pem};
-use hestia_discovery::DiscoveredHost;
+use hestia_discovery::{DiscoveredHost, netif};
 use hestia_nvhttp::{
     AppInfo, AudioConfig, DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT, LaunchRequest, LaunchResponse, NvHttpClient,
     PairingOutcome, PairingPin, ServerInfo,
@@ -455,7 +455,10 @@ impl LaunchedSession {
                 .next()
                 .map(|a| a.ip())
         });
-        let streaming_remotely = remote_ip.is_some_and(|ip| !is_private_address(ip));
+        // On a network we're attached to (an IPv6 global address of the home
+        // network included), the stream stays local.
+        let streaming_remotely =
+            remote_ip.is_some_and(|ip| !is_private_address(ip) && !netif::on_link(ip, &netif::local_addresses()));
 
         let preferred = match self.settings.codec {
             CodecPreference::Auto => None,
@@ -821,12 +824,14 @@ impl HestiaClient {
             .as_deref()
             .and_then(wol::parse_mac)
             .ok_or_else(|| CoreError::Invalid(format!("no MAC address known for {}", record.name)))?;
-        // Every known IP gets its directed broadcast: the address in use may be
-        // the VPN one while we're back on the host's LAN.
+        // Every known IPv4 address gets its directed broadcast: the address in
+        // use may be the VPN one while we're back on the host's LAN. IPv6
+        // goes to the all-nodes group on each interface instead.
         let ips: Vec<std::net::IpAddr> = record
             .known_addresses()
             .iter()
-            .filter_map(|a| a.address.trim_start_matches('[').trim_end_matches(']').parse().ok())
+            .filter_map(HostAddress::ip)
+            .filter(std::net::IpAddr::is_ipv4)
             .collect();
         let mut sent = 0;
         let mut last_err = None;
@@ -840,6 +845,10 @@ impl HestiaClient {
                 Ok(n) => sent += n,
                 Err(e) => last_err = Some(e),
             }
+        }
+        match wol::wake_ipv6(mac, &netif::ipv6_interfaces(&netif::local_addresses())) {
+            Ok(n) => sent += n,
+            Err(e) => last_err = Some(e),
         }
         if let (0, Some(e)) = (sent, last_err) {
             return Err(CoreError::Invalid(format!("Wake-on-LAN: {e}")));
@@ -882,11 +891,24 @@ impl HestiaClient {
         } else {
             Vec::new()
         };
+        // What each address offers: the kind of network (what shares a link
+        // with this device is LAN) and its family (IPv6 first).
+        let locals = netif::local_addresses();
+        let offers: Vec<(hostaddr::AddressKind, u8)> = candidates
+            .iter()
+            .map(|a| (a.kind_with(|ip| netif::on_link(ip, &locals)), a.family_rank()))
+            .collect();
+        let best = offers
+            .iter()
+            .min()
+            .copied()
+            .unwrap_or((hostaddr::AddressKind::Other, u8::MAX));
 
         let (tx, rx) = mpsc::channel();
         for (index, address) in candidates.iter().enumerate() {
             let mut client = self.nvhttp_at(record, address);
-            let delay = (address.kind() != hostaddr::AddressKind::Lan && candidates.len() > 1).then_some(OFF_LAN_DELAY);
+            let delay =
+                (offers[index].0 != hostaddr::AddressKind::Lan && candidates.len() > 1).then_some(OFF_LAN_DELAY);
             let tx = tx.clone();
             let spawned = std::thread::Builder::new().name("hestia-probe".into()).spawn(move || {
                 if let Some(delay) = delay {
@@ -934,11 +956,12 @@ impl HestiaClient {
             }
             let answer = hostaddr::Answer {
                 index,
-                kind: address.kind(),
+                kind: offers[index].0,
+                family: offers[index].1,
                 verified: info.paired,
                 same_host: !record.has_unique_id() || info.unique_id.is_empty() || info.unique_id == record.id,
             };
-            let ideal = answer.is_ideal(pinned);
+            let ideal = answer.is_ideal(pinned, best);
             if answer.same_host {
                 deadline.get_or_insert_with(|| Instant::now() + PROBE_GRACE);
             }

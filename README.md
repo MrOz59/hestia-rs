@@ -68,6 +68,11 @@ a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
   The same PC reached over the LAN, over a VPN such as Tailscale, by name or
   at a new DHCP address stays one paired host. Each check asks all of its
   addresses at once and uses the LAN when you're on it.
+- **IPv6 first**: on dual-stack networks IPv6 is preferred, unique-local
+  addresses first, and an IPv6 global address of your own network counts as
+  LAN. Discovery and Wake-on-LAN also work on IPv6-only networks. Connections
+  race IPv6 and IPv4 (Happy Eyeballs), so a broken IPv6 path costs a quarter
+  of a second, not a timeout.
 - **Apps**: list with box art and the running app marked; launch, resume and
   quit; "back" while starting cancels the launch.
 

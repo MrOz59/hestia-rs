@@ -107,7 +107,7 @@ pub fn host_card(record: &HostRecord, snapshot: Option<&HostSnapshot>, checking:
         } else {
             record.name.clone()
         },
-        address: format!("{}:{}", record.address, record.http_port),
+        address: record.active_address().to_string(),
         online,
         checking: checking && snapshot.is_none(),
         paired,

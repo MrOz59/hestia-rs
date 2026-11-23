@@ -204,7 +204,7 @@ impl Controller {
                 Some(s) if s.online => format!("online, {}", if s.paired { "paired" } else { "not paired" }),
                 Some(s) => format!("offline: {}", s.error.as_deref().unwrap_or("no answer")),
             };
-            text += &format!("  {} ({}:{}) — {state}\n", host.name, host.address, host.http_port);
+            text += &format!("  {} ({}) — {state}\n", host.name, host.active_address());
         }
         let (kept, left_out) = report::compact_log(&lines);
         text += &format!("\nLog ({} lines):\n", lines.len());

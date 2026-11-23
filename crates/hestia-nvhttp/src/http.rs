@@ -6,7 +6,8 @@
 //! for Android. HTTP/2, keep-alive and redirects are deliberately absent.
 
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::mpsc;
 use std::time::Duration;
 
 /// Upper bound for a response body. Box art is the largest thing we fetch.
@@ -98,25 +99,121 @@ pub fn route(addr: &SocketAddr) {
     }
 }
 
-/// Opens a TCP connection, trying every resolved address in turn. Errors
-/// name the address that failed.
+/// How long a connection attempt runs alone before the next address gets
+/// one too (RFC 8305's recommended "Connection Attempt Delay").
+pub const ATTEMPT_DELAY: Duration = Duration::from_millis(250);
+
+/// Opens a TCP connection to `host` (an IP or a name). With several resolved
+/// addresses this is Happy Eyeballs (RFC 8305): IPv6 first, families
+/// alternating, a new attempt every [`ATTEMPT_DELAY`] (or as soon as one
+/// fails), and the first connection wins. A dead IPv6 path then costs a
+/// quarter of a second instead of a full timeout. Errors name the address.
 pub fn connect(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
     let host = host.trim_start_matches('[').trim_end_matches(']');
-    let addrs: Vec<SocketAddr> = (host, port).to_socket_addrs()?.collect();
-    let mut last_err = io::Error::new(io::ErrorKind::NotFound, format!("{host} did not resolve"));
+    let addrs = connection_order((host, port).to_socket_addrs()?.collect());
+    match addrs.len() {
+        0 => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{host} did not resolve"),
+        )),
+        1 => connect_one(addrs[0], timeout),
+        _ => race(addrs, timeout),
+    }
+}
+
+/// The order to try addresses in: IPv6 before IPv4, unique-local IPv6 first,
+/// then the families alternate (RFC 8305 §4). The resolver's own order
+/// (RFC 6724) would put unique-local IPv6 below every IPv4 address.
+pub fn connection_order(addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    let mut v6 = Vec::new();
+    let mut v4 = Vec::new();
     for addr in addrs {
-        if let Some(hook) = ROUTE_HOOK.get() {
-            hook(&addr);
-        }
-        match TcpStream::connect_timeout(&addr, timeout) {
-            Ok(stream) => {
-                stream.set_nodelay(true).ok();
-                return Ok(stream);
-            }
-            Err(e) => last_err = io::Error::new(e.kind(), format!("{addr}: {e}")),
+        let list = if addr.is_ipv6() { &mut v6 } else { &mut v4 };
+        if !list.contains(&addr) {
+            list.push(addr);
         }
     }
-    Err(last_err)
+    // Stable: unique-local first, the resolver's order otherwise.
+    v6.sort_by_key(|a| !matches!(a.ip(), IpAddr::V6(ip) if (ip.segments()[0] & 0xfe00) == 0xfc00));
+    let mut out = Vec::with_capacity(v6.len() + v4.len());
+    let (mut v6, mut v4) = (v6.into_iter(), v4.into_iter());
+    loop {
+        match (v6.next(), v4.next()) {
+            (None, None) => break,
+            (a, b) => out.extend(a.into_iter().chain(b)),
+        }
+    }
+    out
+}
+
+fn connect_one(addr: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
+    route(&addr);
+    match TcpStream::connect_timeout(&addr, timeout) {
+        Ok(stream) => {
+            stream.set_nodelay(true).ok();
+            Ok(stream)
+        }
+        Err(e) => Err(io::Error::new(e.kind(), format!("{addr}: {e}"))),
+    }
+}
+
+/// Staggered attempts, first connection wins. Attempts still running when one
+/// wins finish on their own and their connections are dropped.
+///
+/// On Android the route hook binds the whole process to a network right
+/// before each attempt; staggering them lets each one create its socket
+/// before the next can rebind.
+fn race(addrs: Vec<SocketAddr>, timeout: Duration) -> io::Result<TcpStream> {
+    let (tx, rx) = mpsc::channel();
+    let mut tx = Some(tx);
+    let mut queue = addrs.into_iter();
+    let mut running = 0usize;
+    let mut last_err = None;
+    loop {
+        // Start the next attempt, if any is left.
+        if let Some(sender) = &tx {
+            match queue.next() {
+                Some(addr) => {
+                    let sender = sender.clone();
+                    let spawned = std::thread::Builder::new()
+                        .name("hestia-connect".into())
+                        .spawn(move || {
+                            // The receiver is gone once another attempt won.
+                            let _ = sender.send(connect_one(addr, timeout));
+                        });
+                    match spawned {
+                        Ok(_) => running += 1,
+                        Err(e) => last_err = Some(e),
+                    }
+                }
+                // Nothing left to start: once every attempt has reported,
+                // the channel closes and the loop ends.
+                None => tx = None,
+            }
+        }
+        if running == 0 && tx.is_none() {
+            break;
+        }
+        let result = if tx.is_some() {
+            match rx.recv_timeout(ATTEMPT_DELAY) {
+                Ok(result) => result,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match rx.recv() {
+                Ok(result) => result,
+                Err(_) => break,
+            }
+        };
+        running -= 1;
+        match result {
+            Ok(stream) => return Ok(stream),
+            // A failed attempt starts the next one right away.
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no address to connect to")))
 }
 
 /// Writes the request and reads the full response from `stream`.
@@ -360,5 +457,83 @@ mod tests {
         assert!(read_response(&mut s.input).is_err());
         assert_eq!(authority("::1", 5), "[::1]:5");
         assert_eq!(authority("10.0.0.2", 5), "10.0.0.2:5");
+    }
+
+    fn sa(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn ipv6_first_then_alternating() {
+        let resolved = vec![
+            sa("192.168.1.20:47989"),
+            sa("[2001:db8::20]:47989"),
+            sa("10.0.0.20:47989"),
+            sa("[fd00::20]:47989"),
+            sa("[2001:db8::20]:47989"),
+            sa("[2001:db8::21]:47989"),
+        ];
+        assert_eq!(
+            connection_order(resolved),
+            [
+                sa("[fd00::20]:47989"),
+                sa("192.168.1.20:47989"),
+                sa("[2001:db8::20]:47989"),
+                sa("10.0.0.20:47989"),
+                sa("[2001:db8::21]:47989"),
+            ]
+        );
+        let v4_only = vec![sa("10.0.0.1:1"), sa("10.0.0.2:1")];
+        assert_eq!(connection_order(v4_only.clone()), v4_only);
+    }
+
+    /// A port nothing listens on (bound, then released).
+    fn closed_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    #[test]
+    fn a_failed_attempt_hands_over_at_once() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let open = listener.local_addr().unwrap();
+        let refused = SocketAddr::new(open.ip(), closed_port());
+        let started = std::time::Instant::now();
+        let stream = race(vec![refused, open], Duration::from_secs(5)).unwrap();
+        assert_eq!(stream.peer_addr().unwrap(), open);
+        assert!(started.elapsed() < ATTEMPT_DELAY, "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn a_silent_address_costs_one_attempt_delay() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let open = listener.local_addr().unwrap();
+        // TEST-NET-1 (RFC 5737): routed nowhere, so the attempt usually hangs.
+        let silent = sa("192.0.2.1:9");
+        let started = std::time::Instant::now();
+        let stream = race(vec![silent, open], Duration::from_secs(10)).unwrap();
+        assert_eq!(stream.peer_addr().unwrap(), open);
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn every_attempt_failing_reports_one() {
+        let a = SocketAddr::new(IpAddr::from([127, 0, 0, 1]), closed_port());
+        let b = SocketAddr::new(IpAddr::from([127, 0, 0, 1]), closed_port());
+        let err = race(vec![a, b], Duration::from_secs(5)).unwrap_err();
+        assert!(err.to_string().starts_with("127.0.0.1:"), "{err}");
+    }
+
+    #[test]
+    fn connects_by_name() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // `localhost` may also resolve to ::1, where nothing listens.
+        let stream = connect("localhost", port, Duration::from_secs(5)).unwrap();
+        assert_eq!(stream.peer_addr().unwrap().port(), port);
+        assert!(connect("[127.0.0.1]", port, Duration::from_secs(5)).is_ok());
     }
 }

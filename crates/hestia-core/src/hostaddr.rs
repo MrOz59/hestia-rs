@@ -5,10 +5,13 @@
 //! lease. The pairing (the pinned certificate) belongs to the host, which is
 //! identified by its GameStream unique id, never to an address. So a host
 //! record keeps every address the host has been reached at, and each check
-//! asks all of them at once and keeps the best answer.
+//! asks all of them at once and keeps the best answer: the LAN first, IPv6
+//! before IPv4 on the same kind of network.
 
+use std::fmt;
 use std::net::IpAddr;
 
+use hestia_discovery::netif;
 use serde::{Deserialize, Serialize};
 
 /// How many addresses a host record keeps; the least recently used go first.
@@ -26,7 +29,9 @@ pub struct HostAddress {
 /// answer, the local network wins over a VPN, which wins over the internet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AddressKind {
-    /// Private, link-local, unique-local or loopback IPs, `.local` names.
+    /// On a network this device is attached to (an IPv6 global address of
+    /// the home network included), or a private, link-local, unique-local or
+    /// loopback IP, or a `.local` name.
     Lan,
     /// Tailscale: the 100.64.0.0/10 shared range, its IPv6 prefix
     /// fd7a:115c:a1e0::/48 and MagicDNS `.ts.net` names.
@@ -48,12 +53,23 @@ impl HostAddress {
         self.address.eq_ignore_ascii_case(address)
     }
 
+    /// The address as an IP, when it is one rather than a DNS name.
+    pub fn ip(&self) -> Option<IpAddr> {
+        self.address.trim_start_matches('[').trim_end_matches(']').parse().ok()
+    }
+
+    /// The kind of network the address leads to, from its range alone.
     pub fn kind(&self) -> AddressKind {
-        let bare = self.address.trim_start_matches('[').trim_end_matches(']');
-        if let Ok(ip) = bare.parse::<IpAddr>() {
-            return ip_kind(ip);
+        self.kind_with(|_| false)
+    }
+
+    /// Like [`kind`](Self::kind), with `on_link` telling which IPs share a
+    /// network with this device: those are on the LAN whatever their range.
+    pub fn kind_with(&self, on_link: impl Fn(IpAddr) -> bool) -> AddressKind {
+        if let Some(ip) = self.ip() {
+            return if on_link(ip) { AddressKind::Lan } else { ip_kind(ip) };
         }
-        let name = bare.trim_end_matches('.').to_ascii_lowercase();
+        let name = self.address.trim_end_matches('.').to_ascii_lowercase();
         if name == "localhost" || name.ends_with(".local") {
             AddressKind::Lan
         } else if name.ends_with(".ts.net") {
@@ -61,6 +77,25 @@ impl HostAddress {
         } else {
             AddressKind::Other
         }
+    }
+
+    /// Preference between address families on the same kind of network,
+    /// lower first (see [`netif::family_rank`]). Names rank with IPv4: the
+    /// connection itself tries IPv6 first.
+    pub fn family_rank(&self) -> u8 {
+        let ipv4 = netif::family_rank(std::net::Ipv4Addr::UNSPECIFIED.into());
+        self.ip().map_or(ipv4, netif::family_rank)
+    }
+}
+
+/// `host:port`, with IPv6 in brackets.
+impl fmt::Display for HostAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self.ip() {
+            Some(IpAddr::V6(v6)) => format!("[{v6}]:{}", self.http_port),
+            _ => format!("{}:{}", self.address, self.http_port),
+        };
+        f.pad(&text)
     }
 }
 
@@ -144,6 +179,8 @@ pub struct Answer {
     /// Position in the record's address list (0 = the address in use).
     pub index: usize,
     pub kind: AddressKind,
+    /// [`HostAddress::family_rank`].
+    pub family: u8,
     /// Came over HTTPS with the pinned certificate, so its pair status is real.
     pub verified: bool,
     /// Answered with the record's unique id (always, before the id is known).
@@ -151,19 +188,21 @@ pub struct Answer {
 }
 
 impl Answer {
-    fn key(&self) -> (bool, bool, AddressKind, usize) {
-        (!self.same_host, !self.verified, self.kind, self.index)
+    fn key(&self) -> (bool, bool, AddressKind, u8, usize) {
+        (!self.same_host, !self.verified, self.kind, self.family, self.index)
     }
 
-    /// Nothing else is worth waiting for: this host, on the LAN, with a real
-    /// pair status when we have one to check.
-    pub fn is_ideal(&self, pinned: bool) -> bool {
-        self.same_host && self.kind == AddressKind::Lan && (self.verified || !pinned)
+    /// Nothing else is worth waiting for: this host, with a real pair status
+    /// when we have one to check, on the best `(kind, family)` any of its
+    /// addresses could offer.
+    pub fn is_ideal(&self, pinned: bool, best: (AddressKind, u8)) -> bool {
+        self.same_host && (self.verified || !pinned) && (self.kind, self.family) <= best
     }
 }
 
 /// Which answer to use (an index into `answers`): one from this host,
-/// verified first, then by [`AddressKind`], then in the record's order. An
+/// verified first, then by [`AddressKind`], then by address family, then in
+/// the record's order. An
 /// answer with another unique id is only taken from the address in use, when
 /// no other address answered as this host: the host was reinstalled and got a
 /// new id, and the user is asked to pair again, as before.
@@ -224,6 +263,32 @@ mod tests {
     }
 
     #[test]
+    fn on_link_is_lan() {
+        let home = |ip: IpAddr| ip.to_string().starts_with("2001:db8:1:");
+        assert_eq!(a("2001:db8:1::20").kind(), AddressKind::Other);
+        assert_eq!(a("2001:db8:1::20").kind_with(home), AddressKind::Lan);
+        assert_eq!(a("2001:db8:9::20").kind_with(home), AddressKind::Other);
+        assert_eq!(a("[2001:db8:1::20]").kind_with(home), AddressKind::Lan);
+        // Ranges still classify what isn't on a local network.
+        assert_eq!(a("100.101.102.103").kind_with(home), AddressKind::Vpn);
+        assert_eq!(a("192.168.0.10").kind_with(|_| false), AddressKind::Lan);
+        assert_eq!(a("cachy.local").kind_with(|_| true), AddressKind::Lan);
+    }
+
+    #[test]
+    fn families_and_display() {
+        assert!(a("fd00::20").family_rank() < a("2001:db8::20").family_rank());
+        assert!(a("2001:db8::20").family_rank() < a("192.168.0.20").family_rank());
+        assert_eq!(a("cachy.local").family_rank(), a("192.168.0.20").family_rank());
+        assert_eq!(a("fd00::20").to_string(), "[fd00::20]:47989");
+        assert_eq!(a("[fd00::20]").to_string(), "[fd00::20]:47989");
+        assert_eq!(a("192.168.0.20").to_string(), "192.168.0.20:47989");
+        assert_eq!(HostAddress::new("pc.local", 48000).to_string(), "pc.local:48000");
+        assert_eq!(format!("{:<16}|", a("fd00::20")), "[fd00::20]:47989|");
+        assert_eq!(format!("{:<20}|", a("10.0.0.1")), "10.0.0.1:47989      |");
+    }
+
+    #[test]
     fn keeping() {
         let ip = |s: &str| s.parse::<IpAddr>().unwrap();
         assert!(worth_keeping(ip("192.168.0.10")));
@@ -281,8 +346,16 @@ mod tests {
         Answer {
             index,
             kind,
+            family: 2,
             verified,
             same_host,
+        }
+    }
+
+    fn v6(index: usize, kind: AddressKind, family: u8) -> Answer {
+        Answer {
+            family,
+            ..answer(index, kind, true, true)
         }
     }
 
@@ -312,15 +385,30 @@ mod tests {
         assert_eq!(pick(&[answer(0, Lan, false, false)]), Some(0));
         let reinstalled_but_seen = [answer(0, Lan, false, false), answer(1, Vpn, true, true)];
         assert_eq!(pick(&reinstalled_but_seen), Some(1));
+
+        // Dual stack at home: unique-local IPv6, then global IPv6, then IPv4.
+        let dual = [answer(0, Lan, true, true), v6(1, Lan, 1), v6(2, Lan, 0)];
+        assert_eq!(pick(&dual), Some(2));
+        let no_ula = [answer(0, Lan, true, true), v6(1, Lan, 1)];
+        assert_eq!(pick(&no_ula), Some(1));
+        // The family never beats the kind of network: LAN IPv4 over Tailscale IPv6.
+        let away = [v6(0, Vpn, 0), answer(1, Lan, true, true)];
+        assert_eq!(pick(&away), Some(1));
     }
 
     #[test]
     fn ideal() {
         use AddressKind::*;
-        assert!(answer(1, Lan, true, true).is_ideal(true));
-        assert!(answer(1, Lan, false, true).is_ideal(false));
-        assert!(!answer(1, Lan, false, true).is_ideal(true));
-        assert!(!answer(0, Vpn, true, true).is_ideal(true));
-        assert!(!answer(0, Lan, true, false).is_ideal(true));
+        let lan_v4 = (Lan, 2);
+        assert!(answer(1, Lan, true, true).is_ideal(true, lan_v4));
+        assert!(answer(1, Lan, false, true).is_ideal(false, lan_v4));
+        assert!(!answer(1, Lan, false, true).is_ideal(true, lan_v4));
+        assert!(!answer(0, Vpn, true, true).is_ideal(true, lan_v4));
+        assert!(!answer(0, Lan, true, false).is_ideal(true, lan_v4));
+        // With a unique-local address in the list, IPv4 isn't worth stopping for.
+        assert!(!answer(1, Lan, true, true).is_ideal(true, (Lan, 0)));
+        assert!(v6(2, Lan, 0).is_ideal(true, (Lan, 0)));
+        // Off the LAN, the best a VPN-only host offers is enough.
+        assert!(answer(0, Vpn, true, true).is_ideal(true, (Vpn, 2)));
     }
 }
