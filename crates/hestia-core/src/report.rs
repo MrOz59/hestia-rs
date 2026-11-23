@@ -28,6 +28,10 @@ pub struct VideoTransportStats {
     frames: u64,
     lost_frames: u64,
     dropped_waiting_idr: u64,
+    late_packets: u64,
+    late_frames: u64,
+    late_buckets: [u64; hestia_stream::video::LATE_BUCKETS_MS.len() + 1],
+    late_max_us: u64,
     recovered: u64,
     fec_reports_sent: u64,
     loss_sends: u64,
@@ -51,6 +55,10 @@ impl From<&VideoCounters> for VideoTransportStats {
             frames: video.frames.load(Ordering::Relaxed),
             lost_frames: video.lost_frames.load(Ordering::Relaxed),
             dropped_waiting_idr: video.dropped_waiting_idr.load(Ordering::Relaxed),
+            late_packets: video.late_packets.load(Ordering::Relaxed),
+            late_frames: video.late_frames.load(Ordering::Relaxed),
+            late_buckets: std::array::from_fn(|i| video.late_buckets[i].load(Ordering::Relaxed)),
+            late_max_us: video.late_max_us.load(Ordering::Relaxed),
             recovered: video.recovered.load(Ordering::Relaxed),
             fec_reports_sent: video.fec_reports_sent.load(Ordering::Relaxed),
             loss_sends: recovery.loss_sends.load(Ordering::Relaxed),
@@ -83,6 +91,8 @@ pub struct StatsSample {
     pub idr_requests: u64,
     /// Decoder (when the client decodes).
     pub decoded_fps: Option<f64>,
+    /// Visible MediaCodec buffer releases in the Android Direct video path.
+    pub direct_release_fps: Option<f64>,
     pub decode_ms: Option<f64>,
     pub dropped: Option<u64>,
     /// Host-reported processing latency for this second.
@@ -172,12 +182,16 @@ fn stats_row(at: Duration, s: &StatsSample) -> String {
         _ => String::new(),
     };
     let host = s.host_ms.map(|h| format!(" | host {h:4.1} ms")).unwrap_or_default();
+    let direct = s
+        .direct_release_fps
+        .map(|fps| format!(" | Direct release {fps:5.1} fps"))
+        .unwrap_or_default();
     let verdict = s
         .verdict
         .map(|v| format!(" | <- {}", v.to_uppercase()))
         .unwrap_or_default();
     format!(
-        "{} | {:5.1} fps forwarded / {:.1} assembled | {:6.2} Mbps | rtt {:3}±{:<3} | fec {:5} | lost {:4} | waiting IDR {:4} | IDR requests {:3}{decode}{host}{verdict}",
+        "{} | {:5.1} fps forwarded / {:.1} assembled | {:6.2} Mbps | rtt {:3}±{:<3} | fec {:5} | lost {:4} | waiting IDR {:4} | IDR requests {:3}{decode}{direct}{host}{verdict}",
         elapsed(at),
         s.fps,
         s.assembled_fps,
@@ -222,6 +236,8 @@ impl StreamReport {
             ("complete frames assembled", video.frames + video.dropped_waiting_idr),
             ("frames forwarded to decoder", video.frames),
             ("frames lost during assembly", video.lost_frames),
+            ("lost frames whose packets still arrived", video.late_frames),
+            ("packets arriving after their frame was lost", video.late_packets),
             ("complete frames skipped waiting for IDR", video.dropped_waiting_idr),
             ("packets recovered by FEC", video.recovered),
             ("FEC block reports sent to host", video.fec_reports_sent),
@@ -234,6 +250,23 @@ impl StreamReport {
         ];
         for (label, value) in values {
             self.field("Video transport and recovery", label, value);
+        }
+        if video.late_packets > 0 {
+            let limits = hestia_stream::video::LATE_BUCKETS_MS;
+            let mut parts: Vec<String> = Vec::new();
+            for (i, count) in video.late_buckets.iter().enumerate() {
+                let label = match i {
+                    0 => format!("<{} ms", limits[0]),
+                    i if i < limits.len() => format!("{}-{} ms", limits[i - 1], limits[i]),
+                    _ => format!(">={} ms", limits[limits.len() - 1]),
+                };
+                parts.push(format!("{label}: {count}"));
+            }
+            self.field(
+                "Video transport and recovery",
+                "late packets by time after their frame was lost",
+                format!("{} (max {:.2} ms)", parts.join(", "), video.late_max_us as f64 / 1000.0),
+            );
         }
         if video.loss_sends > 0 {
             let mean = video.loss_to_send_us as f64 / video.loss_sends as f64 / 1000.0;
@@ -610,11 +643,21 @@ mod tests {
             dropped_waiting_idr: 0,
             idr_requests: 0,
             decoded_fps: Some(fps),
+            direct_release_fps: None,
             decode_ms: Some(4.0),
             dropped: Some(0),
             host_ms: Some(3.0),
             verdict: if lost > 1 { Some("network") } else { None },
         }
+    }
+
+    #[test]
+    fn sample_distinguishes_forwarded_rate_from_direct_release_rate() {
+        let mut s = sample(60.0, 5, 0);
+        s.direct_release_fps = Some(48.0);
+        let row = stats_row(Duration::ZERO, &s);
+        assert!(row.contains("60.0 fps forwarded"));
+        assert!(row.contains("Direct release  48.0 fps"));
     }
 
     #[test]
