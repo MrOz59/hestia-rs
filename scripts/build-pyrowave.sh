@@ -8,8 +8,15 @@ mkdir -p "$work"
 work=$(realpath "$work")
 revision=d2997ac172bdc00e29c58e3f2938acb7e94580bf
 fetch() {
-    local path=$1 remote=$2 commit=$3
-    [[ -d "$path/.git" ]] || git init -q "$path"
+    local path=$1 remote=$2 commit=$3 top
+    # Only run git in a directory that is its own repository. A cache restore
+    # can leave a broken .git behind, and git would then walk up to the
+    # enclosing checkout and check this commit out over it.
+    top=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null || true)
+    if [[ -z $top || $top != "$(cd "$path" && pwd -P)" ]]; then
+        rm -rf "$path"
+        git init -q "$path"
+    fi
     if [[ $(git -C "$path" rev-parse HEAD 2>/dev/null || true) != "$commit" ]]; then
         git -C "$path" fetch --depth 1 "$remote" "$commit"
         git -C "$path" checkout --detach FETCH_HEAD
