@@ -79,6 +79,15 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
     }
 }
 
+/// Labels shown in the local keyboard-shortcut editor.
+fn shortcut_labels(shortcuts: hestia_core::shortcuts::Shortcuts) -> [String; 3] {
+    [
+        shortcuts.disconnect.label(),
+        shortcuts.stats.label(),
+        shortcuts.mouse_capture.label(),
+    ]
+}
+
 impl Controller {
     /// `handle` reaches the shell's window; `gpu_window` is the window's GPU
     /// video renderer (the shell installs it, see `presentation`).
@@ -170,9 +179,11 @@ impl Controller {
                 }
                 None => (core.settings(), String::new()),
             };
+            let shortcuts = core.settings().shortcuts;
             self.ui(move |ui| {
                 ui.set_settings_host_name(host_name);
                 ui.set_physical_keyboard(platform::has_physical_keyboard());
+                ui.set_shortcut_labels(shortcut_labels(shortcuts));
                 view::load_settings_into(ui, &settings, platform::native_display());
             });
             self.push_profiles();
@@ -981,6 +992,25 @@ impl Controller {
                 Err(e) => c.toast(format!("Could not save settings: {e}")),
             }
         });
+    }
+
+    /// Edit a local shortcut without changing any host stream settings.
+    pub fn update_shortcut(self: &Shared, which: i32, text: String) {
+        use hestia_core::shortcuts::{ShortcutAction, ShortcutBinding};
+        let Some(core) = self.core() else { return };
+        let Some(action) = ShortcutAction::from_index(which) else { return };
+        let mut settings = core.settings();
+        let outcome = ShortcutBinding::parse(&text)
+            .and_then(|binding| settings.shortcuts.assign(action, binding));
+        match outcome {
+            Ok(()) => match core.set_settings(settings) {
+                Ok(()) => self.toast("Keyboard shortcut updated"),
+                Err(e) => self.toast(format!("Could not save shortcut: {e}")),
+            },
+            Err(why) => self.toast(format!("Invalid shortcut: {why}")),
+        }
+        let keys = core.settings().shortcuts;
+        self.ui(move |ui| ui.set_shortcut_labels(shortcut_labels(keys)));
     }
 
     /// A preset picked in Settings: fill in resolution, frame rate and
