@@ -70,6 +70,12 @@ export component AppWindow inherits Window {
 
     // Apps
     in property <string> host-name;
+    in-out property <bool> host-edit-visible;
+    in-out property <string> host-edit-name;
+    in-out property <string> host-edit-address;
+    in property <string> host-edit-error;
+    callback open-host-editor();
+    callback save-host-edit(string, string);
     in property <string> host-detail;
     in property <[string]> host-chips;
     in property <[AppCard]> apps;
