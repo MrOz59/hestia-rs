@@ -442,6 +442,50 @@ impl Controller {
         });
     }
 
+    /// Open the editor for the selected host, retaining its current pairing.
+    pub fn edit_current_host(self: &Shared) {
+        let Some(core) = self.core() else { return };
+        let Some(id) = self.state().current_host.clone() else { return };
+        let Ok(host) = core.host(&id) else { return };
+        let name = host.display_name().to_owned();
+        let address = host.active_address().to_string();
+        self.ui(move |ui| {
+            ui.set_host_edit_name(name);
+            ui.set_host_edit_address(address);
+            ui.set_host_edit_error(String::new());
+            ui.set_host_edit_visible(true);
+        });
+    }
+
+    pub fn save_current_host(self: &Shared, alias: String, address: String) {
+        let Some(core) = self.core() else { return };
+        let Some(id) = self.state().current_host.clone() else { return };
+        match core.edit_host_details(&id, &alias, &address) {
+            Ok(()) => {
+                if let Ok(host) = core.host(&id) {
+                    let name = host.display_name().to_owned();
+                    let addr = host.active_address().to_string();
+                    if let Some(snapshot) = self.state().snapshots.get_mut(&id) {
+                        snapshot.record = host;
+                    }
+                    self.ui(move |ui| {
+                        ui.set_host_name(name);
+                        ui.set_host_detail(addr);
+                        ui.set_host_edit_visible(false);
+                        ui.set_host_edit_error(String::new());
+                    });
+                }
+                self.push_hosts();
+                self.refresh_host(id);
+                self.toast("Host updated");
+            }
+            Err(e) => {
+                let message = e.to_string();
+                self.ui(move |ui| ui.set_host_edit_error(message));
+            }
+        }
+    }
+
     /// Forgets the open host (its pairing too).
     pub fn forget_current(self: &Shared) {
         let Some(core) = self.core() else { return };
@@ -620,7 +664,7 @@ impl Controller {
     fn show_apps(self: &Shared, snapshot: HostSnapshot) {
         let id = snapshot.record.id.clone();
         self.state().current_host = Some(id.clone());
-        let name = snapshot.record.name.clone();
+        let name = snapshot.record.display_name().to_owned();
         let detail = match &snapshot.info {
             Some(info) => format!("{} · {}", snapshot.record.address, info.app_version),
             None => snapshot.record.address.clone(),
