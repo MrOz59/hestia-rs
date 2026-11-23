@@ -91,8 +91,14 @@ impl Store {
         Ok(self.read("profiles.json")?.unwrap_or_default())
     }
 
-    pub fn save_profiles(&self, profiles: &[crate::profiles::StreamProfile]) -> io::Result<()> {
-        self.write("profiles.json", &profiles)
+    /// Profiles used to be global. Once assigned to existing hosts, archive
+    /// the legacy file so deleted host profiles are never re-imported.
+    pub fn archive_legacy_profiles(&self) -> io::Result<()> {
+        let old = self.dir.join("profiles.json");
+        if old.exists() {
+            fs::rename(old, self.dir.join("profiles.legacy.json"))?;
+        }
+        Ok(())
     }
 }
 
