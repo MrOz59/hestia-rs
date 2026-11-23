@@ -109,7 +109,9 @@ fn fill_sample_data(ui: &AppWindow) {
             .collect(),
     ));
     ui.set_app_running(true);
-    ui.set_apps_profile_options(strings(&["Settings", "Couch TV", "Phone on the go"]));
+    ui.set_apps_profile_options(strings(&["Host defaults", "Couch TV", "Phone on the go"]));
+    // Settings opened from the host's page: its profiles show.
+    ui.set_cfg_host_name("cachy-desktop".into());
     ui.set_cfg_profile_names(strings(&["Couch TV", "Phone on the go"]));
     ui.set_client_id("6F3A9C21D4E0B7F1".into());
     ui.set_data_dir("/data/user/0/com.mroz59.hestia.rs/files".into());
@@ -264,6 +266,7 @@ fn main() {
         ui.set_has_touch_input(form == "phone");
         ui.set_stream_soft_keyboard(form == "phone");
         ui.set_stream_pointer_capture_available(form == "desktop");
+        ui.set_cfg_physical_keyboard(form == "desktop");
         window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
         let size = PhysicalSize::new((lw as f32 * scale) as u32, (lh as f32 * scale) as u32);
         window.set_size(size);

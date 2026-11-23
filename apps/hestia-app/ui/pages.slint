@@ -1413,7 +1413,7 @@ export component SettingsPage inherits Page {
 
     // Focus: the header's Back (-2) and Save (-3), then the rows in page
     // order: 0…4, Metered bitrate (24), 5…7, Direct video (19), 8…18,
-    // saved profiles (100…), 20…23.
+    // saved profiles (100…), keyboard shortcuts (25…27), 20…23.
     property <int> nav: -1;
     focus-first => {
         if (root.nav == -1) {
@@ -1433,6 +1433,8 @@ export component SettingsPage inherits Page {
         }
     }
     property <int> profile-count: root.profile-names.length;
+    // The shortcut rows, shown with a physical keyboard only.
+    property <int> shortcut-count: root.physical-keyboard ? 3 : 0;
     changed profile-count => {
         if (root.nav >= 100 + root.profile-count) {
             root.nav = root.profile-count > 0 ? 100 + root.profile-count - 1 : 18;
@@ -1441,11 +1443,19 @@ export component SettingsPage inherits Page {
     pure function at(i: int) -> bool {
         return root.sheet < 0 && root.nav == i;
     }
+    // Rows 24 (metered bitrate) and 19 (direct video) sit out of order;
+    // `step` places them.
     pure function pos(i: int) -> int {
-        return i < 19 ? i : (i >= 100 ? 19 + (i - 100) : 19 + root.profile-count + (i - 20));
+        return i < 19 ? i
+            : i >= 100 ? 19 + (i - 100)
+            : i >= 25 ? 19 + root.profile-count + (i - 25)
+            : 19 + root.profile-count + root.shortcut-count + (i - 20);
     }
     pure function index-at(p: int) -> int {
-        return p < 19 ? p : (p < 19 + root.profile-count ? 100 + (p - 19) : 20 + (p - 19 - root.profile-count));
+        return p < 19 ? p
+            : p < 19 + root.profile-count ? 100 + (p - 19)
+            : p < 19 + root.profile-count + root.shortcut-count ? 25 + (p - 19 - root.profile-count)
+            : 20 + (p - 19 - root.profile-count - root.shortcut-count);
     }
     pure function valid(i: int) -> bool {
         return (i != 8 || root.mediacodec || root.gpu-conversion) && (i != 10 || root.android)
@@ -1457,7 +1467,7 @@ export component SettingsPage inherits Page {
         if (from == 19) { return dir > 0 ? 8 : 7; }
         if (root.mediacodec && ((from == 7 && dir > 0) || (from == 8 && dir < 0))) { return 19; }
         let p = root.pos(from) + dir;
-        let last = 22 + root.profile-count + (root.physical-keyboard ? 3 : 0);
+        let last = 22 + root.profile-count + root.shortcut-count;
         if (p < 0 || p > last) {
             return from;
         }
@@ -1932,6 +1942,61 @@ export component SettingsPage inherits Page {
                         }
                     }
 
+                    // Desktop-style key combinations, for a keyboard that
+                    // has the keys (not a phone's on-screen one).
+                    if root.physical-keyboard: Group {
+                        title: "Keyboard shortcuts";
+                        FieldRow {
+                            label: "Disconnect";
+                            hint: "A-Z and 0-9 with Ctrl, Alt or Meta; F1-F24 also alone";
+                            placeholder: "Ctrl+Alt+Shift+Q";
+                            action: "Apply";
+                            text <=> root.shortcut-disconnect;
+                            want-focus: root.at(25);
+                            nav(k) => {
+                                return root.move(25, k);
+                            }
+                            entered => {
+                                root.nav = 25;
+                            }
+                            submit(t) => {
+                                root.update-shortcut(0, t);
+                            }
+                        }
+                        FieldRow {
+                            label: "Toggle statistics";
+                            placeholder: "Ctrl+Alt+Shift+S";
+                            action: "Apply";
+                            text <=> root.shortcut-stats;
+                            want-focus: root.at(26);
+                            nav(k) => {
+                                return root.move(26, k);
+                            }
+                            entered => {
+                                root.nav = 26;
+                            }
+                            submit(t) => {
+                                root.update-shortcut(1, t);
+                            }
+                        }
+                        FieldRow {
+                            label: "Toggle mouse capture";
+                            placeholder: "Ctrl+Alt+Shift+Z";
+                            action: "Apply";
+                            text <=> root.shortcut-capture;
+                            want-focus: root.at(27);
+                            nav(k) => {
+                                return root.move(27, k);
+                            }
+                            entered => {
+                                root.nav = 27;
+                            }
+                            submit(t) => {
+                                root.update-shortcut(2, t);
+                            }
+                        }
+                    }
+
                     Group {
                         title: "Diagnostics";
                         SwitchRow {
@@ -2016,43 +2081,6 @@ export component SettingsPage inherits Page {
                                 font-size: Theme.caption-size;
                                 wrap: word-wrap;
                             }
-                        }
-                    }
-
-                    // A mobile phone without a physical keyboard has no use
-                    // for desktop-style key combinations.
-                    if root.physical-keyboard: Group {
-                        title: "Keyboard shortcuts";
-                        FieldRow {
-                            label: "Disconnect";
-                            hint: "Example: Ctrl+Alt+Shift+Q (A-Z, 0-9, F1-F24)";
-                            placeholder: "Ctrl+Alt+Shift+Q";
-                            action: "Apply";
-                            text <=> root.shortcut-disconnect;
-                            want-focus: root.at(24);
-                            nav(k) => { return root.move(24, k); }
-                            entered => { root.nav = 24; }
-                            submit(t) => { root.update-shortcut(0, t); }
-                        }
-                        FieldRow {
-                            label: "Toggle statistics";
-                            placeholder: "Ctrl+Alt+Shift+S";
-                            action: "Apply";
-                            text <=> root.shortcut-stats;
-                            want-focus: root.at(25);
-                            nav(k) => { return root.move(25, k); }
-                            entered => { root.nav = 25; }
-                            submit(t) => { root.update-shortcut(1, t); }
-                        }
-                        FieldRow {
-                            label: "Toggle mouse capture";
-                            placeholder: "Ctrl+Alt+Shift+Z";
-                            action: "Apply";
-                            text <=> root.shortcut-capture;
-                            want-focus: root.at(26);
-                            nav(k) => { return root.move(26, k); }
-                            entered => { root.nav = 26; }
-                            submit(t) => { root.update-shortcut(2, t); }
                         }
                     }
                 }
