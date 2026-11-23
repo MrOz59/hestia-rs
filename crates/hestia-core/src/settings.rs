@@ -204,6 +204,8 @@ pub struct StreamSettings {
     /// Show the on-screen controller over the stream.
     pub onscreen_controller: bool,
     pub orientation: StreamOrientation,
+    /// Local keyboard commands. Never sent to a host profile.
+    pub shortcuts: crate::shortcuts::Shortcuts,
 }
 
 impl Default for StreamSettings {
@@ -233,6 +235,7 @@ impl Default for StreamSettings {
             touch_mode: None,
             onscreen_controller: false,
             orientation: StreamOrientation::Landscape,
+            shortcuts: crate::shortcuts::Shortcuts::default(),
         }
     }
 }
