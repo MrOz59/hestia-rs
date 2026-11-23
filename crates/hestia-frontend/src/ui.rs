@@ -157,6 +157,7 @@ pub struct PadControl {
 pub struct SettingsForm {
     pub resolution_options: Vec<String>,
     pub fps_options: Vec<String>,
+    pub codec_options: Vec<String>,
     pub preset: i32,
     pub preset_hint: String,
     pub video_scale: i32,
@@ -284,6 +285,7 @@ pub trait View {
     /// `TouchMode` index.
     fn set_stream_touch_mode(&self, mode: i32);
     fn set_stream_menu_open(&self, on: bool);
+    fn set_has_touch_input(&self, on: bool);
     fn set_stream_pad_visible(&self, on: bool);
     fn set_stream_pad_controls(&self, controls: Vec<PadControl>);
     fn set_stream_clipboard(&self, on: bool);

@@ -192,6 +192,7 @@ export component AppWindow inherits Window {
     in-out property <int> cfg-resolution: 1;
     in-out property <int> cfg-fps: 1;
     in-out property <float> cfg-bitrate: 20;
+    in property <[string]> cfg-codec-options;
     in-out property <int> cfg-codec: 0;
     in-out property <int> cfg-audio: 0;
     in-out property <bool> cfg-hdr;
@@ -214,6 +215,8 @@ export component AppWindow inherits Window {
     in-out property <int> apps-profile-index;
     callback apps-profile-chosen(int);
     in property <bool> is-android: false;
+    // Android reports touchscreen support. Desktop input enables this on first touch.
+    in property <bool> has-touch-input;
     in-out property <int> cfg-orientation: 0;
     callback settings-custom-resolution(string);
     in property <string> client-id;
@@ -466,7 +469,9 @@ export component AppWindow inherits Window {
             fullscreen: root.stream-fullscreen;
             touch-mode: root.stream-touch-mode;
             menu-open <=> root.stream-menu-open;
-            pad-visible: root.stream-pad-visible;
+            touch-controls: root.has-touch-input;
+            window-fullscreen: !root.is-android;
+            pad-visible: root.has-touch-input && root.stream-pad-visible;
             clipboard-actions: root.stream-clipboard;
             clipboard-send => {
                 root.stream-clipboard-send();
@@ -620,6 +625,7 @@ export component AppWindow inherits Window {
             }
             resolution-options: root.cfg-resolution-options;
             fps-options: root.cfg-fps-options;
+            codec-names: root.cfg-codec-options;
             preset <=> root.cfg-preset;
             preset-hint: root.cfg-preset-hint;
             video-scale <=> root.cfg-video-scale;
@@ -646,6 +652,7 @@ export component AppWindow inherits Window {
             gpu-video <=> root.cfg-gpu-video;
             direct-video <=> root.cfg-direct-video;
             android: root.is-android;
+            touch-controls: root.has-touch-input;
             orientation <=> root.cfg-orientation;
             profile-names: root.cfg-profile-names;
             profile-pick <=> root.cfg-profile-pick;

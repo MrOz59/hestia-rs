@@ -51,6 +51,11 @@ fn run_window(
     desktop_input::install();
     let ui = AppWindow::new()?;
     ui.set_is_android(cfg!(target_os = "android"));
+    #[cfg(target_os = "android")]
+    ui.set_has_touch_input(!matches!(
+        app.config().touchscreen(),
+        slint::android::android_activity::ndk::configuration::Touchscreen::NoTouch
+    ));
     // The renderer that draws native pictures inside Slint's rendering.
     let gpu_window = Arc::new(GpuWindow::default());
     #[cfg(target_os = "android")]

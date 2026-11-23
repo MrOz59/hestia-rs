@@ -130,6 +130,7 @@ fn fill_sample_data(ui: &AppWindow) {
         "2560 × 1440",
         "3840 × 2160",
     ]));
+    ui.set_cfg_codec_options(strings(&["Auto", "H.264", "HEVC", "AV1", "PyroWave (SDR)"]));
     ui.set_cfg_fps_options(strings(&["30 fps", "60 fps", "90 fps", "120 fps", "144 fps"]));
     ui.set_cfg_preset(2);
     ui.set_cfg_resolution(2);
@@ -259,6 +260,10 @@ fn main() {
 
     // (name, logical width, height, scale): a 412dp phone and a desktop window.
     for (form, lw, lh, scale) in [("phone", 412u32, 915u32, 2.0f32), ("desktop", 1180, 760, 1.0)] {
+        ui.set_is_android(form == "phone");
+        ui.set_has_touch_input(form == "phone");
+        ui.set_stream_soft_keyboard(form == "phone");
+        ui.set_stream_pointer_capture_available(form == "desktop");
         window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
         let size = PhysicalSize::new((lw as f32 * scale) as u32, (lh as f32 * scale) as u32);
         window.set_size(size);
@@ -284,7 +289,8 @@ fn main() {
         ui.set_stream_keyboard_open(false);
         ui.set_pair_visible(false);
 
-        // The on-screen controller over the stream.
+        // A touch-capable device, including a Linux touchscreen.
+        ui.set_has_touch_input(true);
         ui.set_stream_pad_controls(model(hestia_app::pad_preview(lw as f32, lh as f32)));
         ui.set_stream_pad_visible(true);
         ui.set_screen(4);
@@ -292,6 +298,10 @@ fn main() {
         ui.set_stream_pad_visible(false);
     }
 
+    ui.set_is_android(true);
+    ui.set_has_touch_input(true);
+    ui.set_stream_soft_keyboard(true);
+    ui.set_stream_pointer_capture_available(false);
     // Phones stream in landscape: the controller as most people see it.
     let (lw, lh, scale) = (915u32, 412u32, 2.0f32);
     window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
@@ -309,6 +319,7 @@ fn main() {
     save(&window, size, &out.join("phone-landscape-stream-menu.png"));
     ui.set_stream_menu_open(false);
 
+    ui.set_has_touch_input(false);
     // A 1080p TV (960 × 540 dp), driven with the remote's D-pad: the focus
     // glow (an ember outline here, without the shadow) shows where it is.
     let (lw, lh, scale) = (960u32, 540u32, 2.0f32);
