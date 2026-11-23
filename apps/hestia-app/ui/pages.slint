@@ -1381,6 +1381,10 @@ export component SettingsPage inherits Page {
     in property <bool> android;
     in property <bool> physical-keyboard;
     in property <string> host-name;
+    in-out property <string> shortcut-disconnect;
+    in-out property <string> shortcut-stats;
+    in-out property <string> shortcut-capture;
+    callback update-shortcut(int, string);
     in property <bool> touch-controls;
     // The PyroWave decoder renders planar frames, including on Android.
     property <bool> mediacodec: root.android && root.hardware-decoding && root.codec != 4;
@@ -1449,7 +1453,7 @@ export component SettingsPage inherits Page {
         if (from == 19) { return dir > 0 ? 8 : 7; }
         if (root.mediacodec && ((from == 7 && dir > 0) || (from == 8 && dir < 0))) { return 19; }
         let p = root.pos(from) + dir;
-        let last = 22 + root.profile-count;
+        let last = 22 + root.profile-count + (root.physical-keyboard ? 3 : 0);
         if (p < 0 || p > last) {
             return from;
         }
@@ -1995,6 +1999,43 @@ export component SettingsPage inherits Page {
                                 font-size: Theme.caption-size;
                                 wrap: word-wrap;
                             }
+                        }
+                    }
+
+                    // A mobile phone without a physical keyboard has no use
+                    // for desktop-style key combinations.
+                    if root.physical-keyboard: Group {
+                        title: "Keyboard shortcuts";
+                        FieldRow {
+                            label: "Disconnect";
+                            hint: "Example: Ctrl+Alt+Shift+Q (A-Z, 0-9, F1-F24)";
+                            placeholder: "Ctrl+Alt+Shift+Q";
+                            action: "Apply";
+                            text <=> root.shortcut-disconnect;
+                            want-focus: root.at(24);
+                            nav(k) => { return root.move(24, k); }
+                            entered => { root.nav = 24; }
+                            submit(t) => { root.update-shortcut(0, t); }
+                        }
+                        FieldRow {
+                            label: "Toggle statistics";
+                            placeholder: "Ctrl+Alt+Shift+S";
+                            action: "Apply";
+                            text <=> root.shortcut-stats;
+                            want-focus: root.at(25);
+                            nav(k) => { return root.move(25, k); }
+                            entered => { root.nav = 25; }
+                            submit(t) => { root.update-shortcut(1, t); }
+                        }
+                        FieldRow {
+                            label: "Toggle mouse capture";
+                            placeholder: "Ctrl+Alt+Shift+Z";
+                            action: "Apply";
+                            text <=> root.shortcut-capture;
+                            want-focus: root.at(26);
+                            nav(k) => { return root.move(26, k); }
+                            entered => { root.nav = 26; }
+                            submit(t) => { root.update-shortcut(2, t); }
                         }
                     }
                 }
