@@ -65,11 +65,20 @@ impl Api {
                 .with_file_name("lib")
                 .join(name);
             // SAFETY: load the packaged SDK, or a system installation by SONAME.
-            unsafe { Library::new(if bundled.is_file() { bundled } else { name.into() }) }
-        };
+            if bundled.is_file() {
+                unsafe { Library::new(&bundled) }.map_err(|e| format!("Cannot load {}: {e}", bundled.display()))
+            } else {
+                unsafe { Library::new(name) }.map_err(|e| {
+                    format!(
+                        "PyroWave needs {name}. Use the Linux AppImage or extract the whole tarball with lib/ beside the executable. Expected {}. System loader: {e}",
+                        bundled.display()
+                    )
+                })
+            }
+        }?;
         #[cfg(target_os = "android")]
-        let library = unsafe { Library::new("libpyrowave-shared.so") };
-        let library = library.map_err(|e| format!("Cannot load the PyroWave runtime: {e}"))?;
+        let library = unsafe { Library::new("libpyrowave-shared.so") }
+            .map_err(|e| format!("Cannot load the PyroWave runtime: {e}"))?;
         // SAFETY: get_api_version is the stable entry point. All other types
         // below mirror pyrowave.h at the checked 0.5 ABI. Keep the library
         // alive until after both native handles are destroyed.

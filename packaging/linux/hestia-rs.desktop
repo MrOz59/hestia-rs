@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Hestia RS
+Comment=Stream games from a Hermes host
+Exec=hestia-app
+Icon=hestia-rs
+Categories=Game;
+Terminal=false
