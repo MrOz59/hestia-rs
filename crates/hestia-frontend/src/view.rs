@@ -102,11 +102,7 @@ pub fn host_card(record: &HostRecord, snapshot: Option<&HostSnapshot>, checking:
     };
     HostCard {
         id: record.id.clone(),
-        name: if record.name.is_empty() {
-            record.address.clone()
-        } else {
-            record.name.clone()
-        },
+        name: record.display_name().to_owned(),
         address: record.active_address().to_string(),
         online,
         checking: checking && snapshot.is_none(),
