@@ -262,14 +262,18 @@ impl Controller {
                 let Some(c) = controller.upgrade() else { break };
                 let Some(core) = c.core() else { break };
                 match core.note_discovered(&found) {
-                    Ok(id) => {
+                    Ok(note) => {
                         info!("discovered {} at {:?}", found.name, found.addresses);
-                        let known = {
+                        // Check again when the host is new, showed up at a new
+                        // address (a new DHCP lease, back on its LAN) or was
+                        // offline: the record may now reach it another way.
+                        let check = {
                             let st = c.state();
-                            st.snapshots.contains_key(&id) || st.checking.contains(&id)
+                            !st.checking.contains(&note.id)
+                                && (note.learned_address || st.snapshots.get(&note.id).is_none_or(|s| !s.online))
                         };
-                        if !known {
-                            c.refresh_host(id);
+                        if check {
+                            c.refresh_host(note.id);
                         } else {
                             c.push_hosts();
                         }

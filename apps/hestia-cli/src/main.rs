@@ -442,7 +442,7 @@ fn discover(client: Option<&HestiaClient>, seconds: u64) -> Result<()> {
             host.hostname
         );
         if let Some(client) = client {
-            let id = client.note_discovered(host)?;
+            let id = client.note_discovered(host)?.id;
             if let Err(e) = client.refresh(&id) {
                 eprintln!("  could not contact {}: {e}", host.name);
             }
@@ -455,7 +455,7 @@ fn resolve(client: &HestiaClient, query: &str) -> Result<HostRecord> {
     let hosts = client.hosts();
     let matches: Vec<&HostRecord> = hosts
         .iter()
-        .filter(|h| h.id == query || h.name.eq_ignore_ascii_case(query) || h.address == query)
+        .filter(|h| h.id == query || h.name.eq_ignore_ascii_case(query) || h.knows(query))
         .collect();
     match matches.as_slice() {
         [one] => Ok((*one).clone()),
@@ -472,6 +472,15 @@ fn print_snapshot(s: &HostSnapshot) {
     let r = &s.record;
     println!("{} ({}:{})", r.name, r.address, r.http_port);
     println!("  id:       {}", r.id);
+    let others: Vec<String> = r
+        .known_addresses()
+        .iter()
+        .skip(1)
+        .map(|a| format!("{}:{}", a.address, a.http_port))
+        .collect();
+    if !others.is_empty() {
+        println!("  also at:  {}", others.join(", "));
+    }
     println!("  online:   {}", if s.online { "yes" } else { "no" });
     if let Some(e) = &s.error {
         println!("  error:    {e}");

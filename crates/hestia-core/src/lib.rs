@@ -11,6 +11,7 @@
 
 pub mod address;
 pub mod diagnosis;
+pub mod hostaddr;
 pub mod logcapture;
 pub mod presets;
 pub mod profiles;
@@ -20,8 +21,8 @@ pub mod store;
 pub mod wol;
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hestia_api::{
     AppRequest, Capabilities, ClientDescription, HestiaApi, SessionPrepareRequest, SessionPrepareResponse,
@@ -40,6 +41,7 @@ pub use hestia_api as api;
 pub use hestia_discovery as discovery;
 pub use hestia_nvhttp as nvhttp;
 pub use hestia_stream as stream;
+pub use hostaddr::HostAddress;
 pub use presets::Preset;
 pub use settings::{
     AudioLayout, CodecPreference, LaunchMode, StreamOrientation, StreamSettings, TouchMode, VideoScale,
@@ -74,9 +76,13 @@ pub struct HostRecord {
     /// first successful `/serverinfo`.
     pub id: String,
     pub name: String,
-    /// Address used to reach it (IP or DNS name).
+    /// Address in use (IP or DNS name): the last one that answered.
     pub address: String,
     pub http_port: u16,
+    /// Every address the host is known by, most recently used first, the one
+    /// in use included: LAN, VPN (Tailscale…), DNS names. All are tried on
+    /// each check; the pairing belongs to the host, not to an address.
+    pub addresses: Vec<HostAddress>,
     pub https_port: u16,
     /// Pinned host certificate (PEM), present once paired.
     pub server_cert_pem: Option<String>,
@@ -97,6 +103,7 @@ impl Default for HostRecord {
             name: String::new(),
             address: String::new(),
             http_port: DEFAULT_HTTP_PORT,
+            addresses: Vec::new(),
             https_port: DEFAULT_HTTPS_PORT,
             server_cert_pem: None,
             mac: None,
@@ -106,6 +113,9 @@ impl Default for HostRecord {
         }
     }
 }
+
+/// Id of a record whose host hasn't answered yet.
+const PENDING_PREFIX: &str = "pending:";
 
 impl HostRecord {
     pub fn is_paired(&self) -> bool {
@@ -117,6 +127,131 @@ impl HostRecord {
             .as_deref()
             .and_then(|p| pem::decode("CERTIFICATE", p))
     }
+
+    /// Whether the host's unique id is known yet.
+    fn has_unique_id(&self) -> bool {
+        !self.id.starts_with(PENDING_PREFIX)
+    }
+
+    /// The address in use.
+    pub fn active_address(&self) -> HostAddress {
+        HostAddress::new(self.address.clone(), self.http_port)
+    }
+
+    /// Every address to try, the one in use first. Records saved before
+    /// `addresses` existed only have `address`.
+    pub fn known_addresses(&self) -> Vec<HostAddress> {
+        let mut list = self.addresses.clone();
+        hostaddr::promote(&mut list, self.active_address());
+        list
+    }
+
+    /// Whether `address` (IP or name, port aside) is one of this host's.
+    pub fn knows(&self, address: &str) -> bool {
+        self.known_addresses().iter().any(|a| a.is(address))
+    }
+
+    fn sync_addresses(&mut self) {
+        let active = self.active_address();
+        hostaddr::promote(&mut self.addresses, active);
+    }
+
+    /// Makes `address` the one in use.
+    fn set_active(&mut self, address: HostAddress) {
+        self.address = address.address.clone();
+        self.http_port = address.http_port;
+        hostaddr::promote(&mut self.addresses, address);
+    }
+
+    /// Adds an address the host can be reached at. Returns whether it is new
+    /// (or its port changed).
+    fn remember_address(&mut self, address: HostAddress) -> bool {
+        self.sync_addresses();
+        if address.is(&self.address) {
+            self.http_port = address.http_port;
+        }
+        hostaddr::remember(&mut self.addresses, address)
+    }
+
+    /// Drops an address that now belongs to another host. The address in use
+    /// moves to the next one; the last address is kept so the record stays
+    /// usable (forgetting the host is the user's call).
+    fn forget_address(&mut self, address: &str) {
+        self.sync_addresses();
+        if self.addresses.len() < 2 {
+            return;
+        }
+        let was_active = self.active_address().is(address);
+        hostaddr::forget(&mut self.addresses, address);
+        if was_active && let Some(next) = self.addresses.first().cloned() {
+            self.set_active(next);
+        }
+    }
+
+    /// Folds in another record of the same host (same unique id): its
+    /// addresses, and its pairing, MAC and profile when this one lacks them.
+    fn absorb(&mut self, other: HostRecord) {
+        self.sync_addresses();
+        hostaddr::union(&mut self.addresses, &other.known_addresses());
+        self.server_cert_pem = self.server_cert_pem.take().or(other.server_cert_pem);
+        self.mac = self.mac.take().or(other.mac);
+        self.profile = self.profile.take().or(other.profile);
+        self.manual |= other.manual;
+        self.last_seen = self.last_seen.max(other.last_seen);
+        if self.name.is_empty() {
+            self.name = other.name;
+        }
+    }
+}
+
+/// Stores `record`, whose id may just have changed from `old_id`. If another
+/// record already has that id (the same PC discovered and added by hand, or
+/// known by another address), the two become one, in the older one's place.
+fn store_merged(hosts: &mut Vec<HostRecord>, old_id: &str, mut record: HostRecord) -> HostRecord {
+    let own = hosts.iter().position(|h| h.id == old_id);
+    let other = hosts.iter().position(|h| h.id == record.id && h.id != old_id);
+    match (own, other) {
+        (own, Some(other)) => {
+            record.absorb(hosts[other].clone());
+            hosts[other] = record.clone();
+            if let Some(own) = own {
+                hosts.remove(own);
+            }
+        }
+        (Some(own), None) => hosts[own] = record.clone(),
+        (None, None) => hosts.push(record.clone()),
+    }
+    record
+}
+
+/// What mDNS discovery taught us about a host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveryNote {
+    /// Id of the matching record.
+    pub id: String,
+    /// The record is new, or gained an address (worth checking it again).
+    pub learned_address: bool,
+}
+
+/// After the first address of a host answers, how long to wait for a better
+/// one (see [`hostaddr::pick`]).
+const PROBE_GRACE: Duration = Duration::from_millis(250);
+
+/// Addresses off the LAN are asked this long after the LAN ones. On Android
+/// the route hook binds the whole process to a network right before each
+/// connection, so the LAN connections must have their sockets before a VPN
+/// or internet one rebinds to the default network. It also gives the LAN a
+/// head start.
+const OFF_LAN_DELAY: Duration = Duration::from_millis(150);
+
+/// The result of asking every address of a host for `/serverinfo`.
+struct Probe {
+    /// The answer to use: the address, its client and what it said.
+    answer: Option<(HostAddress, NvHttpClient, ServerInfo)>,
+    /// Addresses now answering as another host we know.
+    taken: Vec<String>,
+    /// Why nothing usable answered.
+    error: Option<String>,
 }
 
 /// Live view of a host after talking to it.
@@ -593,19 +728,25 @@ impl HestiaClient {
     /// and contacts it.
     pub fn add_manual(&self, address: &str) -> Result<HostSnapshot> {
         let (host, port) = address::parse(address)?;
-        let existing = self
-            .lock_hosts()
-            .iter()
-            .find(|h| h.address.eq_ignore_ascii_case(&host) && h.http_port == port)
-            .map(|h| h.id.clone());
+        let typed = HostAddress::new(host.clone(), port);
+        // An address we already know: check that host. A new one gets its own
+        // record until the host answers; if it turns out to be a host we know
+        // (its Tailscale address, a new DHCP lease…), `refresh` merges the two
+        // and the pairing carries over.
+        let existing = self.update_hosts(|hosts| {
+            let h = hosts.iter_mut().find(|h| h.knows(&host))?;
+            h.remember_address(typed.clone());
+            Some(h.id.clone())
+        })?;
         let id = match existing {
             Some(id) => id,
             None => {
                 let record = HostRecord {
-                    id: format!("pending:{host}:{port}"),
+                    id: format!("{PENDING_PREFIX}{host}:{port}"),
                     name: host.clone(),
                     address: host,
                     http_port: port,
+                    addresses: vec![typed],
                     manual: true,
                     ..Default::default()
                 };
@@ -624,33 +765,50 @@ impl HestiaClient {
         Ok(snapshot)
     }
 
-    /// Records a host seen via mDNS. Returns the id of the matching record.
-    pub fn note_discovered(&self, found: &DiscoveredHost) -> Result<String> {
-        let addresses: Vec<String> = found.addresses.iter().map(|a| a.to_string()).collect();
+    /// Records a host seen via mDNS: a new record, or its addresses added to
+    /// the matching one (they are all tried on the next check, so a new DHCP
+    /// lease doesn't lose the pairing).
+    pub fn note_discovered(&self, found: &DiscoveredHost) -> Result<DiscoveryNote> {
+        let addresses: Vec<HostAddress> = found
+            .addresses
+            .iter()
+            .filter(|ip| hostaddr::worth_keeping(**ip))
+            .map(|ip| HostAddress::new(ip.to_string(), found.port))
+            .collect();
         let Some(primary) = addresses.first().cloned() else {
-            return Err(CoreError::InvalidAddress(format!("{} has no address", found.name)));
+            return Err(CoreError::InvalidAddress(format!(
+                "{} has no usable address",
+                found.name
+            )));
         };
         self.update_hosts(|hosts| {
             if let Some(h) = hosts
                 .iter_mut()
-                .find(|h| addresses.contains(&h.address) || (!h.name.is_empty() && h.name == found.name))
+                .find(|h| addresses.iter().any(|a| h.knows(&a.address)) || (!h.name.is_empty() && h.name == found.name))
             {
-                if !addresses.contains(&h.address) && !h.manual {
-                    h.address = primary.clone();
+                let mut learned = false;
+                for a in &addresses {
+                    learned |= h.remember_address(a.clone());
                 }
-                h.http_port = found.port;
-                return h.id.clone();
+                return DiscoveryNote {
+                    id: h.id.clone(),
+                    learned_address: learned,
+                };
             }
             let record = HostRecord {
-                id: format!("pending:{primary}:{}", found.port),
+                id: format!("{PENDING_PREFIX}{}:{}", primary.address, primary.http_port),
                 name: found.name.clone(),
-                address: primary.clone(),
-                http_port: found.port,
+                address: primary.address.clone(),
+                http_port: primary.http_port,
+                addresses: addresses.clone(),
                 ..Default::default()
             };
             let id = record.id.clone();
             hosts.push(record);
-            id
+            DiscoveryNote {
+                id,
+                learned_address: true,
+            }
         })
     }
 
@@ -663,14 +821,29 @@ impl HestiaClient {
             .as_deref()
             .and_then(wol::parse_mac)
             .ok_or_else(|| CoreError::Invalid(format!("no MAC address known for {}", record.name)))?;
-        let address = record
-            .address
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse()
-            .ok();
-        let sent = wol::wake(mac, address, hestia_nvhttp::http::route)
-            .map_err(|e| CoreError::Invalid(format!("Wake-on-LAN: {e}")))?;
+        // Every known IP gets its directed broadcast: the address in use may be
+        // the VPN one while we're back on the host's LAN.
+        let ips: Vec<std::net::IpAddr> = record
+            .known_addresses()
+            .iter()
+            .filter_map(|a| a.address.trim_start_matches('[').trim_end_matches(']').parse().ok())
+            .collect();
+        let mut sent = 0;
+        let mut last_err = None;
+        let targets = if ips.is_empty() {
+            vec![None]
+        } else {
+            ips.into_iter().map(Some).collect()
+        };
+        for ip in targets {
+            match wol::wake(mac, ip, hestia_nvhttp::http::route) {
+                Ok(n) => sent += n,
+                Err(e) => last_err = Some(e),
+            }
+        }
+        if let (0, Some(e)) = (sent, last_err) {
+            return Err(CoreError::Invalid(format!("Wake-on-LAN: {e}")));
+        }
         info!("Wake-on-LAN sent to {} ({sent} packets)", record.name);
         Ok(sent)
     }
@@ -681,32 +854,213 @@ impl HestiaClient {
         self.update_hosts(|hosts| hosts.retain(|h| h.id != id))
     }
 
-    /// A ready-to-use GameStream client for a host.
+    /// A ready-to-use GameStream client for a host, at the address in use.
     pub fn nvhttp(&self, record: &HostRecord) -> NvHttpClient {
-        NvHttpClient::new(record.address.clone(), record.http_port, self.identity.clone())
+        self.nvhttp_at(record, &record.active_address())
+    }
+
+    fn nvhttp_at(&self, record: &HostRecord, address: &HostAddress) -> NvHttpClient {
+        NvHttpClient::new(address.address.clone(), address.http_port, self.identity.clone())
             .with_https_port(record.https_port)
             .with_server_cert(record.server_cert_der())
     }
 
-    /// Talks to the host: `/serverinfo`, and for paired Hermes hosts the
-    /// Hestia capabilities. Updates the stored record (id, name, ports...).
+    /// Asks every known address of the host for `/serverinfo` at once and
+    /// keeps the best answer (see [`hostaddr::pick`]): the LAN when we're on
+    /// it, the VPN or the internet otherwise.
+    fn probe(&self, record: &HostRecord) -> Probe {
+        let candidates = record.known_addresses();
+        let pinned = record.is_paired();
+        // Unique ids of the other hosts we know: an address answering with one
+        // of those now belongs to that host.
+        let others: Vec<String> = if record.has_unique_id() {
+            self.lock_hosts()
+                .iter()
+                .filter(|h| h.id != record.id && h.has_unique_id())
+                .map(|h| h.id.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let (tx, rx) = mpsc::channel();
+        for (index, address) in candidates.iter().enumerate() {
+            let mut client = self.nvhttp_at(record, address);
+            let delay = (address.kind() != hostaddr::AddressKind::Lan && candidates.len() > 1).then_some(OFF_LAN_DELAY);
+            let tx = tx.clone();
+            let spawned = std::thread::Builder::new().name("hestia-probe".into()).spawn(move || {
+                if let Some(delay) = delay {
+                    std::thread::sleep(delay);
+                }
+                let result = match client.server_info() {
+                    Ok(info) => Ok((client, info)),
+                    Err(e) => Err(e.to_string()),
+                };
+                // The receiver is gone once a better address answered.
+                let _ = tx.send((index, result));
+            });
+            if let Err(e) = spawned {
+                warn!("could not check {}: {e}", address.address);
+            }
+        }
+        drop(tx);
+
+        let mut answers: Vec<(hostaddr::Answer, NvHttpClient, ServerInfo)> = Vec::new();
+        let mut errors: Vec<(usize, String)> = Vec::new();
+        let mut taken = Vec::new();
+        let mut deadline: Option<Instant> = None;
+        loop {
+            let message = match deadline {
+                None => rx.recv().ok(),
+                Some(deadline) => rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok(),
+            };
+            let Some((index, result)) = message else { break };
+            let address = &candidates[index];
+            let (client, info) = match result {
+                Ok(answer) => answer,
+                Err(e) => {
+                    log::debug!("{} at {}: {e}", record.name, address.address);
+                    errors.push((index, e));
+                    continue;
+                }
+            };
+            if !info.unique_id.is_empty() && others.contains(&info.unique_id) {
+                info!(
+                    "{} now answers as another known host ({}); forgetting it for {}",
+                    address.address, info.hostname, record.name
+                );
+                taken.push(address.address.clone());
+                continue;
+            }
+            let answer = hostaddr::Answer {
+                index,
+                kind: address.kind(),
+                verified: info.paired,
+                same_host: !record.has_unique_id() || info.unique_id.is_empty() || info.unique_id == record.id,
+            };
+            let ideal = answer.is_ideal(pinned);
+            if answer.same_host {
+                deadline.get_or_insert_with(|| Instant::now() + PROBE_GRACE);
+            }
+            answers.push((answer, client, info));
+            if ideal {
+                break;
+            }
+        }
+
+        let picked = hostaddr::pick(&answers.iter().map(|(a, ..)| *a).collect::<Vec<_>>());
+        let answer = picked.map(|i| {
+            let (answer, client, info) = answers.swap_remove(i);
+            let address = candidates[answer.index].clone();
+            if answer.index != 0 {
+                info!("{} answers at {} now", record.name, address.address);
+            }
+            (address, client, info)
+        });
+        let error = if answer.is_some() {
+            None
+        } else if let Some(other) = answers.first() {
+            Some(format!(
+                "{} now answers as a different host ({})",
+                candidates[other.0.index].address, other.2.hostname
+            ))
+        } else {
+            // The address in use says the most about why the host is offline.
+            Some(
+                errors
+                    .into_iter()
+                    .min_by_key(|(index, _)| *index)
+                    .map(|(_, e)| e)
+                    .unwrap_or_else(|| "host did not answer".into()),
+            )
+        };
+        Probe { answer, taken, error }
+    }
+
+    /// Talks to the host: `/serverinfo` on every address it is known by, and
+    /// for paired Hermes hosts the Hestia capabilities. Updates the stored
+    /// record (id, name, ports, the address in use...), merging it with
+    /// another record of the same host.
     pub fn refresh(&self, id: &str) -> Result<HostSnapshot> {
         let record = self.host(id)?;
-        let mut client = self.nvhttp(&record);
-        let info = match client.server_info() {
-            Ok(info) => info,
-            Err(e) => {
-                return Ok(HostSnapshot {
-                    paired: record.is_paired(),
-                    record,
-                    online: false,
-                    info: None,
-                    capabilities: None,
-                    diagnostics: None,
-                    error: Some(e.to_string()),
-                });
-            }
+        let probe = self.probe(&record);
+        let Some((address, mut client, mut info)) = probe.answer else {
+            let record = if probe.taken.is_empty() {
+                record
+            } else {
+                self.update_hosts(|hosts| {
+                    let h = hosts.iter_mut().find(|h| h.id == record.id)?;
+                    for taken in &probe.taken {
+                        h.forget_address(taken);
+                    }
+                    Some(h.clone())
+                })?
+                .unwrap_or(record)
+            };
+            return Ok(HostSnapshot {
+                paired: record.is_paired(),
+                record,
+                online: false,
+                info: None,
+                capabilities: None,
+                diagnostics: None,
+                error: probe.error,
+            });
         };
+
+        let asked_pinned = client.is_pinned();
+        let https_port = client.https_port();
+        let record = self.update_hosts(|hosts| {
+            // Start from the stored copy: it may have changed while we probed.
+            let mut updated = hosts
+                .iter()
+                .find(|h| h.id == record.id)
+                .cloned()
+                .unwrap_or_else(|| record.clone());
+            for taken in &probe.taken {
+                updated.forget_address(taken);
+            }
+            updated.set_active(address.clone());
+            if !info.unique_id.is_empty() {
+                updated.id = info.unique_id.clone();
+            }
+            if !info.hostname.is_empty() {
+                updated.name = info.hostname.clone();
+            }
+            updated.https_port = https_port;
+            updated.mac = info.mac.clone().or(updated.mac);
+            updated.last_seen = Some(now_secs());
+            // The host's own LAN address: lets a host first added through a
+            // VPN be reached directly once we're on its network. Hermes (like
+            // Sunshine) reports its own HTTP port as ExternalPort.
+            if let Some(ip) = info
+                .local_ip
+                .as_deref()
+                .and_then(|ip| ip.parse::<std::net::IpAddr>().ok())
+                && hostaddr::worth_keeping(ip)
+                && !address.is(&ip.to_string())
+            {
+                let port = if info.external_port == 0 {
+                    DEFAULT_HTTP_PORT
+                } else {
+                    info.external_port
+                };
+                updated.remember_address(HostAddress::new(ip.to_string(), port));
+            }
+            // A new address of a host we know (its Tailscale one, a new DHCP
+            // lease...) merges into that host's record, pairing included.
+            store_merged(hosts, &record.id, updated)
+        })?;
+
+        if record.is_paired() && !asked_pinned {
+            // We only learned this is a paired host from the answer (over
+            // plain HTTP): ask again with its certificate for the real status.
+            client.set_server_cert(record.server_cert_der());
+            match client.server_info() {
+                Ok(fresh) => info = fresh,
+                Err(e) => info.secure_error = Some(e.to_string()),
+            }
+        }
 
         // When only the HTTPS port failed (busy host, blocked port), plain
         // HTTP can't tell whether we're paired: keep what we know.
@@ -741,37 +1095,8 @@ impl HestiaClient {
                 }
             });
 
-        let updated = self.update_hosts(|hosts| {
-            let mut updated = record.clone();
-            if !info.unique_id.is_empty() {
-                updated.id = info.unique_id.clone();
-            }
-            if !info.hostname.is_empty() {
-                updated.name = info.hostname.clone();
-            }
-            updated.https_port = client.https_port();
-            updated.mac = info.mac.clone().or(updated.mac);
-            updated.last_seen = Some(now_secs());
-
-            // If another record already holds this unique id (e.g. the same PC
-            // was discovered and added by hand), merge into one entry.
-            if let Some(other) = hosts.iter().position(|h| h.id == updated.id && h.id != record.id) {
-                let other = hosts.remove(other);
-                if updated.server_cert_pem.is_none() {
-                    updated.server_cert_pem = other.server_cert_pem;
-                }
-                updated.manual |= other.manual;
-            }
-            if let Some(slot) = hosts.iter_mut().find(|h| h.id == record.id) {
-                *slot = updated.clone();
-            } else {
-                hosts.push(updated.clone());
-            }
-            updated
-        })?;
-
         Ok(HostSnapshot {
-            record: updated,
+            record,
             online: true,
             paired,
             info: Some(info),
@@ -803,24 +1128,20 @@ impl HestiaClient {
             let https_port = client.https_port();
             let host_id = record.id.clone();
             final_id = self.update_hosts(|hosts| {
-                let new_id = if info.unique_id.is_empty() {
-                    host_id.clone()
-                } else {
-                    info.unique_id.clone()
+                let Some(mut paired) = hosts.iter().find(|h| h.id == host_id).cloned() else {
+                    return host_id.clone();
                 };
-                // Drop a stale duplicate of the same host, if any.
-                if new_id != host_id {
-                    hosts.retain(|h| h.id != new_id);
+                paired.server_cert_pem = Some(cert_pem);
+                paired.https_port = https_port;
+                if !info.unique_id.is_empty() {
+                    paired.id = info.unique_id.clone();
                 }
-                if let Some(h) = hosts.iter_mut().find(|h| h.id == host_id) {
-                    h.server_cert_pem = Some(cert_pem);
-                    h.https_port = https_port;
-                    h.id = new_id.clone();
-                    if !info.hostname.is_empty() {
-                        h.name = info.hostname.clone();
-                    }
+                if !info.hostname.is_empty() {
+                    paired.name = info.hostname.clone();
                 }
-                new_id
+                // Another record of the same host (an older pairing, another
+                // address of it) merges in; this pairing wins.
+                store_merged(hosts, &host_id, paired).id
             })?;
         }
         Ok((outcome, final_id))
@@ -1210,6 +1531,14 @@ mod tests {
     }
 
     #[test]
+    fn host_records_saved_before_addresses_load() {
+        let json = r#"{"id":"UUID","name":"cachy","address":"192.168.0.10","http_port":47989,"manual":true}"#;
+        let record: HostRecord = serde_json::from_str(json).unwrap();
+        assert!(record.addresses.is_empty());
+        assert_eq!(record.known_addresses(), [HostAddress::new("192.168.0.10", 47989)]);
+    }
+
+    #[test]
     fn stream_config_preferences_and_fallbacks() {
         let s = session("rtsp://203.0.113.9:48010", CodecPreference::H264);
         let c = s.stream_config(&[HEVC, H264]).unwrap();
@@ -1225,5 +1554,118 @@ mod tests {
         );
 
         assert!(session("", CodecPreference::Auto).stream_config(&[HEVC10]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod host_records {
+    use super::*;
+
+    fn host(id: &str, address: &str) -> HostRecord {
+        HostRecord {
+            id: id.into(),
+            name: "cachy".into(),
+            address: address.into(),
+            addresses: vec![HostAddress::new(address, DEFAULT_HTTP_PORT)],
+            ..Default::default()
+        }
+    }
+
+    /// What `refresh` stores once a new address answered as a known host.
+    fn answered(pending: &HostRecord, id: &str) -> HostRecord {
+        let mut answered = pending.clone();
+        answered.set_active(pending.active_address());
+        answered.id = id.into();
+        answered
+    }
+
+    #[test]
+    fn tailscale_address_merges_into_the_paired_host() {
+        let mut lan = host("UUID", "192.168.0.10");
+        lan.server_cert_pem = Some("CERT".into());
+        lan.profile = Some("Couch".into());
+        let pending = host("pending:100.101.102.103:47989", "100.101.102.103");
+        let mut hosts = vec![lan, host("OTHER", "192.168.0.20"), pending.clone()];
+
+        let merged = store_merged(&mut hosts, &pending.id, answered(&pending, "UUID"));
+
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0], merged, "keeps the older record's place");
+        assert_eq!(hosts[1].id, "OTHER");
+        assert!(merged.is_paired());
+        assert_eq!(merged.profile.as_deref(), Some("Couch"));
+        assert_eq!(merged.address, "100.101.102.103");
+        assert!(merged.knows("192.168.0.10"));
+        assert!(merged.knows("100.101.102.103"));
+    }
+
+    #[test]
+    fn unknown_host_keeps_its_own_record() {
+        let pending = host("pending:192.168.0.30:47989", "192.168.0.30");
+        let mut hosts = vec![host("OTHER", "192.168.0.20"), pending.clone()];
+        let stored = store_merged(&mut hosts, &pending.id, answered(&pending, "NEW"));
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[1], stored);
+        assert_eq!(stored.id, "NEW");
+        assert!(!stored.is_paired());
+
+        let mut hosts = vec![host("OTHER", "192.168.0.20")];
+        store_merged(&mut hosts, "gone", host("NEW", "192.168.0.30"));
+        assert_eq!(hosts.len(), 2);
+    }
+
+    #[test]
+    fn pairing_again_keeps_the_new_certificate() {
+        let mut old = host("UUID", "192.168.0.10");
+        old.server_cert_pem = Some("OLD".into());
+        let mut fresh = host("pending:x", "100.101.102.103");
+        fresh.server_cert_pem = Some("NEW".into());
+        let mut hosts = vec![old, fresh.clone()];
+        fresh.id = "UUID".into();
+        let merged = store_merged(&mut hosts, "pending:x", fresh);
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(merged.server_cert_pem.as_deref(), Some("NEW"));
+        assert!(merged.knows("192.168.0.10"));
+    }
+
+    #[test]
+    fn new_lease_and_reused_address() {
+        let mut h = host("UUID", "192.168.0.10");
+        assert!(h.remember_address(HostAddress::new("192.168.0.11", DEFAULT_HTTP_PORT)));
+        assert!(!h.remember_address(HostAddress::new("192.168.0.11", DEFAULT_HTTP_PORT)));
+        assert_eq!(h.address, "192.168.0.10", "learning an address doesn't switch to it");
+
+        // The old lease went to another PC we know.
+        h.forget_address("192.168.0.10");
+        assert_eq!(h.address, "192.168.0.11");
+        assert!(!h.knows("192.168.0.10"));
+        // The last address stays.
+        h.forget_address("192.168.0.11");
+        assert_eq!(h.address, "192.168.0.11");
+    }
+
+    #[test]
+    fn records_from_before_addresses() {
+        let legacy = HostRecord {
+            id: "UUID".into(),
+            address: "192.168.0.10".into(),
+            http_port: 48000,
+            ..Default::default()
+        };
+        assert_eq!(legacy.known_addresses(), [HostAddress::new("192.168.0.10", 48000)]);
+        assert!(legacy.knows("192.168.0.10"));
+
+        let mut legacy = legacy;
+        assert!(legacy.remember_address(HostAddress::new("100.101.102.103", DEFAULT_HTTP_PORT)));
+        assert_eq!(
+            legacy.addresses,
+            [
+                HostAddress::new("192.168.0.10", 48000),
+                HostAddress::new("100.101.102.103", DEFAULT_HTTP_PORT)
+            ]
+        );
+        // The port of the address in use follows what we learn about it.
+        legacy.remember_address(HostAddress::new("192.168.0.10", DEFAULT_HTTP_PORT));
+        assert_eq!(legacy.http_port, DEFAULT_HTTP_PORT);
     }
 }
