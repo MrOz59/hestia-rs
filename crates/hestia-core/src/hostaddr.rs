@@ -92,9 +92,9 @@ fn ip_kind(ip: IpAddr) -> AddressKind {
     }
 }
 
-/// Whether an address learned from the network (mDNS, the host's own
-/// `LocalIP`) is worth remembering: not unspecified or loopback, and not IPv6
-/// link-local, which can't be reached without the interface it was seen on.
+/// Whether an address learned from the network (mDNS) is worth remembering:
+/// not unspecified or loopback, and not IPv6 link-local, which can't be
+/// reached without the interface it was seen on.
 pub fn worth_keeping(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => !v4.is_unspecified() && !v4.is_loopback() && !v4.is_broadcast(),

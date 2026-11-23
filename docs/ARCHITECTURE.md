@@ -70,8 +70,8 @@ The facade the apps use: `HestiaClient::open(data_dir)` loads or creates the
 identity and loads hosts and settings (JSON, atomic writes). Host records are
 keyed by the host's unique id once known, and the pinned certificate belongs
 to the record, not to an address. A record keeps every address the host has
-been reached at (`hostaddr`: added by hand, seen over mDNS, the host's own
-`LocalIP`), and `refresh()` asks them all at once: the LAN beats a VPN such as
+been reached at (`hostaddr`: added by hand or seen over mDNS), and
+`refresh()` asks them all at once: the LAN beats a VPN such as
 Tailscale, which beats the internet, and an address now answering as another
 known host is dropped. A new address that answers as a known host merges into
 its record, so its pairing carries over. `launch()` prepares a Hermes session when

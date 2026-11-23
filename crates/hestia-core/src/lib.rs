@@ -1030,23 +1030,6 @@ impl HestiaClient {
             updated.https_port = https_port;
             updated.mac = info.mac.clone().or(updated.mac);
             updated.last_seen = Some(now_secs());
-            // The host's own LAN address: lets a host first added through a
-            // VPN be reached directly once we're on its network. Hermes (like
-            // Sunshine) reports its own HTTP port as ExternalPort.
-            if let Some(ip) = info
-                .local_ip
-                .as_deref()
-                .and_then(|ip| ip.parse::<std::net::IpAddr>().ok())
-                && hostaddr::worth_keeping(ip)
-                && !address.is(&ip.to_string())
-            {
-                let port = if info.external_port == 0 {
-                    DEFAULT_HTTP_PORT
-                } else {
-                    info.external_port
-                };
-                updated.remember_address(HostAddress::new(ip.to_string(), port));
-            }
             // A new address of a host we know (its Tailscale one, a new DHCP
             // lease...) merges into that host's record, pairing included.
             store_merged(hosts, &record.id, updated)
