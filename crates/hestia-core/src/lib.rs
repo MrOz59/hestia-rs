@@ -76,6 +76,8 @@ pub struct HostRecord {
     /// first successful `/serverinfo`.
     pub id: String,
     pub name: String,
+    /// Local alias, not overwritten by discovery or a host's own hostname.
+    pub display_name: Option<String>,
     /// Address in use (IP or DNS name): the last one that answered.
     pub address: String,
     pub http_port: u16,
@@ -94,6 +96,10 @@ pub struct HostRecord {
     /// Stream profile this host launches with (by name); the regular
     /// settings when unset or gone.
     pub profile: Option<String>,
+    /// Profiles belong to this host, not to the application globally.
+    pub profiles: Vec<profiles::StreamProfile>,
+    /// Overrides the global stream-quality defaults for this host.
+    pub default_profile: Option<profiles::StreamProfile>,
 }
 
 impl Default for HostRecord {
@@ -101,6 +107,7 @@ impl Default for HostRecord {
         Self {
             id: String::new(),
             name: String::new(),
+            display_name: None,
             address: String::new(),
             http_port: DEFAULT_HTTP_PORT,
             addresses: Vec::new(),
@@ -110,6 +117,8 @@ impl Default for HostRecord {
             manual: false,
             last_seen: None,
             profile: None,
+            profiles: Vec::new(),
+            default_profile: None,
         }
     }
 }
@@ -118,6 +127,12 @@ impl Default for HostRecord {
 const PENDING_PREFIX: &str = "pending:";
 
 impl HostRecord {
+    pub fn display_name(&self) -> &str {
+        self.display_name.as_deref().filter(|name| !name.is_empty())
+            .or_else(|| (!self.name.is_empty()).then_some(self.name.as_str()))
+            .unwrap_or(&self.address)
+    }
+
     pub fn is_paired(&self) -> bool {
         self.server_cert_pem.is_some()
     }
@@ -196,6 +211,15 @@ impl HostRecord {
         self.server_cert_pem = self.server_cert_pem.take().or(other.server_cert_pem);
         self.mac = self.mac.take().or(other.mac);
         self.profile = self.profile.take().or(other.profile);
+        self.display_name = self.display_name.take().or(other.display_name);
+        if self.default_profile.is_none() {
+            self.default_profile = other.default_profile;
+        }
+        for profile in other.profiles {
+            if profiles::find(&self.profiles, &profile.name).is_none() {
+                profiles::upsert(&mut self.profiles, profile);
+            }
+        }
         self.manual |= other.manual;
         self.last_seen = self.last_seen.max(other.last_seen);
         if self.name.is_empty() {
@@ -571,7 +595,6 @@ pub struct HestiaClient {
     identity: Arc<ClientIdentity>,
     hosts: Mutex<Vec<HostRecord>>,
     settings: Mutex<StreamSettings>,
-    profiles: Mutex<Vec<profiles::StreamProfile>>,
 }
 
 fn now_secs() -> u64 {
@@ -599,21 +622,34 @@ impl HestiaClient {
                 identity
             }
         };
-        let hosts = store.load_hosts()?;
+        let mut hosts = store.load_hosts()?;
         let settings = store.load_settings().unwrap_or_else(|e| {
             warn!("ignoring unreadable settings: {e}");
             StreamSettings::default()
         });
-        let profiles = store.load_profiles().unwrap_or_else(|e| {
-            warn!("ignoring unreadable stream profiles: {e}");
-            Vec::new()
-        });
+        // One-time migration: previously all hosts shared profiles.json.
+        // Give each existing host its own copy, preserving every legacy choice.
+        // Keep a backup rather than deleting the old file.
+        if !hosts.is_empty() {
+            let legacy = store.load_profiles().unwrap_or_else(|e| {
+                warn!("could not read legacy stream profiles: {e}");
+                Vec::new()
+            });
+            if !legacy.is_empty() {
+                for host in &mut hosts {
+                    if host.profiles.is_empty() {
+                        host.profiles = legacy.clone();
+                    }
+                }
+                store.save_hosts(&hosts)?;
+                store.archive_legacy_profiles()?;
+            }
+        }
         Ok(Self {
             store,
             identity: Arc::new(identity),
             hosts: Mutex::new(hosts),
             settings: Mutex::new(settings),
-            profiles: Mutex::new(profiles),
         })
     }
 
@@ -643,59 +679,78 @@ impl HestiaClient {
     // Stream profiles
     // ------------------------------------------------------------------
 
-    fn lock_profiles(&self) -> std::sync::MutexGuard<'_, Vec<profiles::StreamProfile>> {
-        self.profiles.lock().unwrap_or_else(|p| p.into_inner())
+    /// Profiles for exactly one host. Names may repeat on different hosts.
+    pub fn profiles(&self, id: &str) -> Result<Vec<profiles::StreamProfile>> {
+        Ok(self.host(id)?.profiles)
     }
 
-    /// Saved profiles, by name.
-    pub fn profiles(&self) -> Vec<profiles::StreamProfile> {
-        self.lock_profiles().clone()
-    }
-
-    /// Saves `settings`' quality side as profile `name` (replacing one of
-    /// that name). Returns the name as kept.
-    pub fn save_profile(&self, name: &str, settings: &StreamSettings) -> Result<String> {
-        let name = profiles::clean_name(name).ok_or_else(|| CoreError::Invalid("the profile needs a name".into()))?;
-        let mut list = self.lock_profiles();
-        profiles::upsert(&mut list, profiles::StreamProfile::from_settings(&name, settings));
-        self.store.save_profiles(&list)?;
-        Ok(name)
-    }
-
-    /// Deletes profile `name`; hosts set to it go back to the settings.
-    pub fn delete_profile(&self, name: &str) -> Result<()> {
-        {
-            let mut list = self.lock_profiles();
-            list.retain(|p| !p.name.eq_ignore_ascii_case(name));
-            self.store.save_profiles(&list)?;
-        }
+    /// Save a named profile without changing any other host.
+    pub fn save_profile(&self, id: &str, name: &str, settings: &StreamSettings) -> Result<String> {
+        let name = profiles::clean_name(name)
+            .ok_or_else(|| CoreError::Invalid("the profile needs a name".into()))?;
         self.update_hosts(|hosts| {
-            for h in hosts.iter_mut() {
-                if h.profile.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(name)) {
-                    h.profile = None;
+            let host = hosts.iter_mut().find(|h| h.id == id)
+                .ok_or_else(|| CoreError::Invalid(format!("unknown host: {id}")))?;
+            profiles::upsert(&mut host.profiles, profiles::StreamProfile::from_settings(&name, settings));
+            Ok(name)
+        })?
+    }
+
+    /// Saves the current host's selected profile, or its own default quality
+    /// override when no named profile is selected.
+    pub fn set_host_settings(&self, id: &str, settings: &StreamSettings) -> Result<()> {
+        self.update_hosts(|hosts| {
+            let host = hosts.iter_mut().find(|h| h.id == id)
+                .ok_or_else(|| CoreError::Invalid(format!("unknown host: {id}")))?;
+            match host.profile.clone() {
+                Some(name) => {
+                    profiles::upsert(&mut host.profiles, profiles::StreamProfile::from_settings(&name, settings));
+                }
+                None => {
+                    host.default_profile = Some(profiles::StreamProfile::from_settings("Host defaults", settings));
                 }
             }
-        })
+            Ok(())
+        })?
     }
 
-    /// Makes host `id` launch with profile `name` (None: the settings).
-    pub fn set_host_profile(&self, id: &str, name: Option<&str>) -> Result<()> {
-        let name = name.map(str::to_owned);
+    /// Deleting a name only changes the owner host.
+    pub fn delete_profile(&self, id: &str, name: &str) -> Result<()> {
         self.update_hosts(|hosts| {
-            if let Some(h) = hosts.iter_mut().find(|h| h.id == id) {
-                h.profile = name;
+            let host = hosts.iter_mut().find(|h| h.id == id)
+                .ok_or_else(|| CoreError::Invalid(format!("unknown host: {id}")))?;
+            host.profiles.retain(|p| !p.name.eq_ignore_ascii_case(name));
+            if host.profile.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(name)) {
+                host.profile = None;
             }
-        })
+            Ok(())
+        })?
     }
 
-    /// What host `id` launches with: its profile over the settings, and
-    /// the profile's name.
+    pub fn set_host_profile(&self, id: &str, name: Option<&str>) -> Result<()> {
+        self.update_hosts(|hosts| {
+            let host = hosts.iter_mut().find(|h| h.id == id)
+                .ok_or_else(|| CoreError::Invalid(format!("unknown host: {id}")))?;
+            if name.is_some_and(|name| profiles::find(&host.profiles, name).is_none()) {
+                return Err(CoreError::Invalid("profile does not belong to this host".into()));
+            }
+            host.profile = name.map(str::to_owned);
+            Ok(())
+        })?
+    }
+
+    /// A profile only overrides host stream quality. Touch/decoder/UI options
+    /// always come from this device's settings.
     pub fn settings_for_host(&self, id: &str) -> (StreamSettings, Option<String>) {
         let settings = self.settings();
-        let chosen = self.host(id).ok().and_then(|h| h.profile);
-        let list = self.lock_profiles();
-        match chosen.as_deref().and_then(|name| profiles::find(&list, name)) {
-            Some(profile) => (profile.apply(&settings), Some(profile.name.clone())),
+        let Ok(host) = self.host(id) else { return (settings, None) };
+        if let Some(profile) = host.profile.as_deref()
+            .and_then(|name| profiles::find(&host.profiles, name))
+        {
+            return (profile.apply(&settings), Some(profile.name.clone()));
+        }
+        match host.default_profile {
+            Some(profile) => (profile.apply(&settings), None),
             None => (settings, None),
         }
     }
@@ -855,6 +910,34 @@ impl HestiaClient {
         }
         info!("Wake-on-LAN sent to {} ({sent} packets)", record.name);
         Ok(sent)
+    }
+
+    /// Locally rename this host; future /serverinfo and mDNS refreshes keep
+    /// the user's alias intact. Empty text resets to the host's name.
+    pub fn rename_host(&self, id: &str, alias: &str) -> Result<()> {
+        let alias = alias.trim();
+        if alias.chars().count() > 80 {
+            return Err(CoreError::Invalid("host name is too long".into()));
+        }
+        self.update_hosts(|hosts| {
+            let host = hosts.iter_mut().find(|h| h.id == id)
+                .ok_or_else(|| CoreError::Invalid(format!("unknown host: {id}")))?;
+            host.display_name = (!alias.is_empty()).then(|| alias.to_owned());
+            Ok(())
+        })?
+    }
+
+    /// Change the manually preferred address while retaining other known
+    /// LAN/VPN/DNS addresses and the original paired host identity.
+    pub fn change_host_address(&self, id: &str, address: &str) -> Result<()> {
+        let (name, port) = address::parse(address)?;
+        self.update_hosts(|hosts| {
+            let host = hosts.iter_mut().find(|h| h.id == id)
+                .ok_or_else(|| CoreError::Invalid(format!("unknown host: {id}")))?;
+            host.set_active(HostAddress::new(name, port));
+            host.manual = true;
+            Ok(())
+        })?
     }
 
     /// Forgets a host locally (the host keeps its own paired-client entry
