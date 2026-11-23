@@ -11,7 +11,7 @@ use crate::settings::{AudioLayout, CodecPreference, LaunchMode, StreamSettings};
 /// Longest profile name kept.
 pub const MAX_NAME_CHARS: usize = 40;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamProfile {
     pub name: String,
     pub width: u32,
