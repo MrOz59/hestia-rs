@@ -55,6 +55,10 @@ a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
   address is known) and waits for it to come up.
 - **Pairing** with the classic client PIN (typed into the Hermes web UI) or
   with Hermes' **OTP** (PIN and passphrase shown by the host).
+- **One host, every address**: the pairing belongs to the host, not to an IP.
+  The same PC reached over the LAN, over a VPN such as Tailscale, by name or
+  at a new DHCP address stays one paired host. Each check asks all of its
+  addresses at once and uses the LAN when you're on it.
 - **Apps**: list with box art and the running app marked; launch, resume and
   quit; "back" while starting cancels the launch.
 
