@@ -634,6 +634,11 @@ pub struct VideoRecoveryCounters {
     pub keyframes_received: AtomicU64,
     pub request_to_keyframe_us: AtomicU64,
     pub max_request_to_keyframe_us: AtomicU64,
+    pub keyframes_already_arriving: AtomicU64,
+    pub request_to_keyframe_packet_us: AtomicU64,
+    pub max_request_to_keyframe_packet_us: AtomicU64,
+    pub keyframe_packet_to_assembly_us: AtomicU64,
+    pub max_keyframe_packet_to_assembly_us: AtomicU64,
 }
 
 impl VideoRecoveryCounters {
@@ -661,11 +666,32 @@ impl VideoRecoveryCounters {
         emit(VideoFeedback::NeedIdr { loss_detected_at });
     }
 
-    fn recovered(&self, elapsed: Duration) {
-        let us = elapsed.as_micros() as u64;
-        self.request_to_keyframe_us.fetch_add(us, Ordering::Relaxed);
-        self.max_request_to_keyframe_us.fetch_max(us, Ordering::Relaxed);
+    fn recovered(&self, requested: Instant, frame: &AssembledFrame, assembled: Instant) {
+        let total_us = assembled.saturating_duration_since(requested).as_micros() as u64;
+        let assembly_us = assembled.saturating_duration_since(frame.received_at).as_micros() as u64;
+        self.request_to_keyframe_us.fetch_add(total_us, Ordering::Relaxed);
+        self.max_request_to_keyframe_us.fetch_max(total_us, Ordering::Relaxed);
+        self.keyframe_packet_to_assembly_us
+            .fetch_add(assembly_us, Ordering::Relaxed);
+        self.max_keyframe_packet_to_assembly_us
+            .fetch_max(assembly_us, Ordering::Relaxed);
+        if let Some(elapsed) = frame.received_at.checked_duration_since(requested) {
+            let first_packet_us = elapsed.as_micros() as u64;
+            self.request_to_keyframe_packet_us
+                .fetch_add(first_packet_us, Ordering::Relaxed);
+            self.max_request_to_keyframe_packet_us
+                .fetch_max(first_packet_us, Ordering::Relaxed);
+        } else {
+            // The keyframe was already arriving when we asked for one.
+            self.keyframes_already_arriving.fetch_add(1, Ordering::Relaxed);
+        }
         self.keyframes_received.fetch_add(1, Ordering::Relaxed);
+        debug!(
+            "video recovered with keyframe {} after {:.2} ms (first packet to assembly {:.2} ms)",
+            frame.frame,
+            total_us as f64 / 1000.0,
+            assembly_us as f64 / 1000.0,
+        );
     }
 }
 
@@ -984,7 +1010,7 @@ fn receive_loop(
                         let (request, loss) = idr.keyframe_arrived();
                         recovered_loss = loss.or(recovered_loss);
                         if let Some(request) = request {
-                            counters.recovery.recovered(request.elapsed());
+                            counters.recovery.recovered(request, &frame, Instant::now());
                             recovered_request = Some(request);
                         }
                     }
@@ -1477,6 +1503,45 @@ mod tests {
         assert_eq!(idr.keyframe_arrived(), (None, None));
         assert_eq!(idr.retry_due(ms(5000)), None);
         assert_eq!(idr.want(ms(5001), IdrReason::Loss), Some(IdrReason::Loss));
+    }
+
+    #[test]
+    fn burst_loss_replay_separates_keyframe_wait_from_assembly() {
+        let start = Instant::now();
+        let ms = |n| start + Duration::from_millis(n);
+        let mut asm = FrameAssembler::new(PACKET_SIZE as u32, VideoCodec::H264);
+        let partial = packetize(9, &h264_frame(4000, false), PACKET_SIZE, 20, 0, false);
+        let next = packetize(10, &h264_frame(500, false), PACKET_SIZE, 20, 8, false);
+        assert!(asm.add_at(&partial[0], start).is_empty());
+        assert!(asm.add_at(&next[0], start).is_empty());
+        let requested = start + REORDER_WINDOW;
+        assert!(matches!(&asm.expire(requested)[..], [AssemblerOutput::NeedIdr]));
+        assert_eq!(asm.stats.dropped_waiting_idr, 1);
+
+        let mut idr = IdrRequests::default();
+        assert_eq!(idr.want(requested, IdrReason::Loss), Some(IdrReason::Loss));
+        let recovery = VideoRecoveryCounters::default();
+        let packets = packetize(11, &h264_frame(4000, true), PACKET_SIZE, 20, 16, true);
+        assert!(asm.add_at(&packets[0], ms(400)).is_empty());
+        let assembled = ms(430);
+        let output: Vec<_> = packets[1..].iter().flat_map(|p| asm.add_at(p, assembled)).collect();
+        let [AssemblerOutput::Frame(frame)] = &output[..] else {
+            panic!("expected one assembled keyframe");
+        };
+        assert!(frame.keyframe);
+        let (request, _) = idr.keyframe_arrived();
+        recovery.recovered(request.unwrap(), frame, assembled);
+
+        // A second request went out after its keyframe had started arriving.
+        recovery.recovered(ms(420), frame, assembled);
+        let count = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        assert_eq!(count(&recovery.keyframes_received), 2);
+        assert_eq!(count(&recovery.keyframes_already_arriving), 1);
+        assert_eq!(count(&recovery.request_to_keyframe_packet_us), 394_000);
+        assert_eq!(count(&recovery.max_request_to_keyframe_packet_us), 394_000);
+        assert_eq!(count(&recovery.keyframe_packet_to_assembly_us), 60_000);
+        assert_eq!(count(&recovery.max_keyframe_packet_to_assembly_us), 30_000);
+        assert_eq!(count(&recovery.max_request_to_keyframe_us), 424_000);
     }
 
     #[test]
