@@ -27,6 +27,7 @@ use crate::ui::{Art, Screen, UiHandle, View};
 use crate::{platform, view};
 
 mod clipboard;
+mod debug;
 mod launch;
 mod profiles;
 mod report;
@@ -51,6 +52,9 @@ struct State {
     /// it so the launch thread knows to back out.
     launching: Option<(u64, String)>,
     launch_seq: u64,
+    /// Settings → Debug as saved, and the taps on About that unlock it.
+    debug: hestia_core::DebugOptions,
+    debug_taps: debug::Taps,
 }
 
 pub struct Controller {
@@ -247,6 +251,7 @@ impl Controller {
                 info!("device: {device}");
             }
             let settings = core.settings();
+            let debug = core.debug_options();
             c.touch_mode.store(settings.touch().index() as u8, Ordering::Relaxed);
             let client_id = core.identity().unique_id().to_owned();
             let dir = core.data_dir().display().to_string();
@@ -258,6 +263,7 @@ impl Controller {
                 ui.set_data_dir(dir.into());
                 ui.set_starting(false);
             });
+            c.apply_debug_options(debug);
             c.refresh_all(false);
             c.start_discovery();
         });

@@ -186,6 +186,12 @@ a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
   `~/.local/share/hestia-rs/reports/` on Linux (the CLI writes there too).
 - **App log** (Settings → Diagnostics): everything logged since the app
   started, with the hosts' last known state, shared the same way.
+- **Debug options**: tap Settings → About seven times (as with Android's
+  developer options) to show a Debug section at the end of Settings. It
+  previews the launch screen without a stream until Back, holds the launch
+  animation still, keeps every library's Debug lines in the app log and
+  reports (verbose log), and shows this device's details, display and
+  decoders, copied with a tap. It stays until hidden again.
 
 ### Platforms and UI
 

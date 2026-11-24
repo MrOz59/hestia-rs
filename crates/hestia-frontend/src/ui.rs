@@ -204,6 +204,12 @@ pub trait View {
     fn set_client_id(&self, id: String);
     fn set_data_dir(&self, path: String);
 
+    // Settings → Debug (About, tapped seven times) ----------------------
+    fn set_debug_options(&self, on: bool);
+    fn set_debug_verbose_log(&self, on: bool);
+    /// This device, display and decoders, a line each.
+    fn set_debug_info(&self, text: String);
+
     // Hosts --------------------------------------------------------------
     fn set_hosts(&self, hosts: Vec<HostCard>);
     fn set_scanning(&self, on: bool);

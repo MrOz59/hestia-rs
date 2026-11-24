@@ -25,6 +25,17 @@ pub struct StoredHosts {
     pub hosts: Vec<HostRecord>,
 }
 
+/// Settings → Debug, unlocked by tapping About seven times. Device-wide,
+/// never part of a host's settings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DebugOptions {
+    /// The Debug section shows in Settings.
+    pub unlocked: bool,
+    /// The app log and stream reports keep every library's Debug lines.
+    pub verbose_log: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Store {
     dir: PathBuf,
@@ -87,6 +98,14 @@ impl Store {
         self.write("settings.json", settings)
     }
 
+    pub fn load_debug_options(&self) -> io::Result<DebugOptions> {
+        Ok(self.read("debug.json")?.unwrap_or_default())
+    }
+
+    pub fn save_debug_options(&self, options: &DebugOptions) -> io::Result<()> {
+        self.write("debug.json", options)
+    }
+
     pub fn load_profiles(&self) -> io::Result<Vec<crate::profiles::StreamProfile>> {
         Ok(self.read("profiles.json")?.unwrap_or_default())
     }
@@ -110,3 +129,32 @@ fn restrict_permissions(path: &Path) {
 
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_options_default_off_and_round_trip() {
+        let dir = std::env::temp_dir().join(format!("hestia-store-debug-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        assert_eq!(store.load_debug_options().unwrap(), DebugOptions::default());
+        let on = DebugOptions {
+            unlocked: true,
+            verbose_log: true,
+        };
+        store.save_debug_options(&on).unwrap();
+        assert_eq!(store.load_debug_options().unwrap(), on);
+        // A file from an older build, without the newer fields.
+        fs::write(dir.join("debug.json"), br#"{"unlocked": true}"#).unwrap();
+        assert_eq!(
+            store.load_debug_options().unwrap(),
+            DebugOptions {
+                unlocked: true,
+                verbose_log: false
+            }
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

@@ -47,7 +47,7 @@ pub use presets::Preset;
 pub use settings::{
     AudioLayout, CodecPreference, LaunchMode, StreamOrientation, StreamSettings, TouchMode, VideoScale,
 };
-pub use store::Store;
+pub use store::{DebugOptions, Store};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
@@ -712,6 +712,23 @@ impl HestiaClient {
     pub fn set_settings(&self, settings: StreamSettings) -> Result<()> {
         self.store.save_settings(&settings)?;
         *self.settings.lock().unwrap_or_else(|p| p.into_inner()) = settings;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Debug options
+    // ------------------------------------------------------------------
+
+    /// Settings → Debug, as saved; off when never saved or unreadable.
+    pub fn debug_options(&self) -> DebugOptions {
+        self.store.load_debug_options().unwrap_or_else(|e| {
+            warn!("ignoring unreadable debug options: {e}");
+            DebugOptions::default()
+        })
+    }
+
+    pub fn set_debug_options(&self, options: DebugOptions) -> Result<()> {
+        self.store.save_debug_options(&options)?;
         Ok(())
     }
 
