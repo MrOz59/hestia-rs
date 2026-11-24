@@ -138,13 +138,13 @@ pub fn device_summary() -> Option<String> {
 }
 
 /// Streaming on/off: on Android, the chosen orientation, system bars
-/// hidden, screen kept on. Nothing on desktop (the window's full screen is
-/// its own toggle).
+/// hidden, screen kept on, Wi-Fi out of power save. Nothing on desktop (the
+/// window's full screen is its own toggle).
 pub fn set_stream_mode(on: bool, orientation: hestia_core::StreamOrientation) {
     #[cfg(target_os = "android")]
     {
         let result = with_helper(|env, activity, helper| {
-            use jni::objects::JValue;
+            use jni::objects::{JString, JValue};
             let orientation = match orientation {
                 hestia_core::StreamOrientation::Landscape => 0,
                 hestia_core::StreamOrientation::Portrait => 1,
@@ -160,6 +160,18 @@ pub fn set_stream_mode(on: bool, orientation: hestia_core::StreamOrientation) {
                     JValue::Int(orientation),
                 ],
             )?;
+            let wifi = env
+                .call_static_method(
+                    helper,
+                    "setWifiLowLatency",
+                    "(Landroid/app/Activity;Z)Ljava/lang/String;",
+                    &[JValue::Object(activity), JValue::Bool(u8::from(on))],
+                )?
+                .l()?;
+            if !wifi.is_null() {
+                let wifi: String = env.get_string(&JString::from(wifi))?.into();
+                log::info!("Wi-Fi for the stream: {wifi}");
+            }
             Ok(())
         });
         if let Err(e) = result {

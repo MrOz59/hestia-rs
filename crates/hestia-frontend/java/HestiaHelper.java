@@ -9,6 +9,7 @@ import android.content.pm.ActivityInfo;
 import android.graphics.PixelFormat;
 import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.PersistableBundle;
 import android.os.VibrationEffect;
@@ -88,6 +89,59 @@ public final class HestiaHelper {
     }
 
     private static KeyboardView sKeyboardView;
+
+    private static WifiManager.WifiLock sHighPerfWifiLock;
+    private static WifiManager.WifiLock sLowLatencyWifiLock;
+
+    /**
+     * Keeps Wi-Fi out of power save while a stream runs, as Moonlight does.
+     * In power save the radio naps between beacons: packets wait at the
+     * access point, arrive in bursts, and whole video frames go missing.
+     * The low-latency lock (Android 10+) applies while the app is in the
+     * foreground with the screen on, which a stream is. Returns what it
+     * did, for the log.
+     */
+    @SuppressWarnings("deprecation")
+    public static String setWifiLowLatency(final Activity activity, final boolean on) {
+        try {
+            if (!on) {
+                boolean held = false;
+                if (sLowLatencyWifiLock != null && sLowLatencyWifiLock.isHeld()) {
+                    sLowLatencyWifiLock.release();
+                    held = true;
+                }
+                if (sHighPerfWifiLock != null && sHighPerfWifiLock.isHeld()) {
+                    sHighPerfWifiLock.release();
+                    held = true;
+                }
+                return held ? "released" : "not held";
+            }
+            WifiManager wifi = (WifiManager) activity.getApplicationContext()
+                    .getSystemService(Context.WIFI_SERVICE);
+            if (wifi == null) {
+                return "no Wi-Fi on this device";
+            }
+            if (sHighPerfWifiLock == null) {
+                sHighPerfWifiLock = wifi.createWifiLock(
+                        WifiManager.WIFI_MODE_FULL_HIGH_PERF, "Hestia high performance");
+                sHighPerfWifiLock.setReferenceCounted(false);
+            }
+            sHighPerfWifiLock.acquire();
+            if (Build.VERSION.SDK_INT >= 29) {
+                if (sLowLatencyWifiLock == null) {
+                    sLowLatencyWifiLock = wifi.createWifiLock(
+                            WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "Hestia low latency");
+                    sLowLatencyWifiLock.setReferenceCounted(false);
+                }
+                sLowLatencyWifiLock.acquire();
+                return "low-latency lock held";
+            }
+            return "high-performance lock held (low latency needs Android 10)";
+        } catch (RuntimeException e) {
+            // Some devices refuse the lock even with WAKE_LOCK granted.
+            return "lock refused: " + e;
+        }
+    }
 
     /**
      * Streaming on: the chosen orientation (0 landscape, 1 portrait, either
