@@ -766,7 +766,7 @@ impl Controller {
         if repeat {
             return;
         }
-        if let Some(keymap::Mapped::Key(key)) = keymap::map(text) {
+        if let Some(keymap::Mapped::Key { code: key, .. }) = keymap::map(text) {
             let route = self
                 .active_stream()
                 .as_ref()
