@@ -173,16 +173,16 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
 
     let fps = config.fps;
     let (tx, rx) = mpsc::channel();
-    let session = host.connect(
-        config,
-        video_sink,
-        if opts.play_audio {
-            hestia_media::default_audio_sink()
-        } else {
-            Box::new(NullAudioSink::default())
-        },
-        Arc::new(Forward(tx.clone())),
-    );
+    let (audio_sink, audio_stats) = if opts.play_audio {
+        let (sink, stats) = hestia_media::default_audio_sink_with_stats();
+        (sink, Some(stats))
+    } else {
+        (
+            Box::new(NullAudioSink::default()) as Box<dyn hestia_media::AudioSink>,
+            None,
+        )
+    };
+    let session = host.connect(config, video_sink, audio_sink, Arc::new(Forward(tx.clone())));
     let session = match session {
         Ok(session) => session,
         Err(e) => {
@@ -327,9 +327,15 @@ pub fn run(client: &HestiaClient, host_id: &str, opts: Options) -> Result<()> {
             Err(RecvTimeoutError::Disconnected) => break None,
         }
     };
-    let video_stats = session.stop_with_stats();
-    if let Some(video) = video_stats {
+    let totals = session.stop_with_stats();
+    if let Some(video) = totals.video {
         report.video_transport(&video);
+    }
+    if let Some(audio) = totals.audio {
+        report.audio_transport(&audio);
+    }
+    for (label, value) in audio_stats.iter().flat_map(|stats| stats.report()) {
+        report.field("Audio playback", label, value);
     }
     if let Some(d) = &decode_stats {
         report.decoder_totals(

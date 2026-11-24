@@ -35,6 +35,10 @@ pub(super) struct ActiveStream {
     report: SharedReport,
     decode: Arc<DecodeStats>,
     present: Arc<Presentation>,
+    /// The audio playback path's counters, for the report at the end.
+    audio: Arc<hestia_media::AudioStats>,
+    /// Bluetooth and Wi-Fi as they were when the stream started.
+    radio: Vec<(String, String)>,
 }
 
 /// The session's input side: everything for the host goes through here, so
@@ -493,13 +497,9 @@ impl Controller {
             ui.set_stream_direct_video(direct);
             ui.set_stream_status("Waiting for video…".into());
         });
+        let (audio_sink, audio) = hestia_media::default_audio_sink_with_stats();
         let session = host
-            .connect(
-                config,
-                Box::new(sink),
-                hestia_media::default_audio_sink(),
-                listener.clone(),
-            )
+            .connect(config, Box::new(sink), audio_sink, listener.clone())
             .map_err(|e| {
                 present.close();
                 e.to_string()
@@ -514,6 +514,17 @@ impl Controller {
         info!("streaming {size} {codec} from {}", launched.host.name);
         *listener.video.lock().unwrap_or_else(|p| p.into_inner()) = format!("{size}@{} {codec}", launched.request.fps);
         session.report_negotiation(&mut report::lock(&session_report));
+        // Bluetooth shares 2.4 GHz with Wi-Fi: a report with stalls needs to
+        // say whether it was on, and on which band the stream came in.
+        let radio = platform::radio_summary();
+        if !radio.is_empty() {
+            let summary: Vec<String> = radio.iter().map(|(k, v)| format!("{k}: {v}")).collect();
+            info!("radio at stream start: {}", summary.join("; "));
+            let mut r = report::lock(&session_report);
+            for (label, value) in &radio {
+                r.field("Radio", label, value);
+            }
+        }
 
         // A stream replacing another keeps the laid-out view and its focus
         // (no new layout or focus event comes for it).
@@ -551,6 +562,8 @@ impl Controller {
             report: session_report,
             decode,
             present,
+            audio,
+            radio,
         });
         if let Some(previous) = previous {
             previous.present.close();
@@ -600,13 +613,42 @@ impl Controller {
                 report: session_report,
                 decode,
                 present,
+                audio,
+                radio,
                 ..
             } = active;
-            let video_stats = session.stop_with_stats();
+            let totals = session.stop_with_stats();
+            let radio_at_end = if radio.is_empty() {
+                Vec::new()
+            } else {
+                platform::radio_summary()
+            };
+            let audio_device = audio.device_id.load(Ordering::Relaxed);
+            let audio_route = (audio_device > 0)
+                .then(|| platform::audio_output_name(audio_device))
+                .flatten();
+            if let Some(route) = &audio_route {
+                info!("audio played on {route} (device {audio_device})");
+            }
             {
                 let mut r = report::lock(&session_report);
-                if let Some(video) = video_stats {
+                if let Some(video) = totals.video {
                     r.video_transport(&video);
+                }
+                if let Some(transport) = totals.audio {
+                    r.audio_transport(&transport);
+                }
+                for (label, value) in audio.report() {
+                    r.field("Audio playback", label, value);
+                }
+                if let Some(route) = audio_route {
+                    r.field("Audio playback", "output", route);
+                }
+                // What changed while streaming (the Wi-Fi signal always does).
+                for (label, value) in radio_at_end {
+                    if !radio.iter().any(|(l, v)| *l == label && *v == value) {
+                        r.field("Radio", &format!("{label} at the end"), value);
+                    }
                 }
                 r.decoder_totals(
                     decode.decoded.load(Ordering::Relaxed),

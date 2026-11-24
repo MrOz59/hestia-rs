@@ -394,6 +394,12 @@ impl Drop for StreamHost {
     }
 }
 
+/// A stream's final network counters ([`ManagedStream::stop_with_stats`]).
+pub struct SessionTotals {
+    pub video: Option<report::VideoTransportStats>,
+    pub audio: Option<report::AudioTransportStats>,
+}
+
 /// A local stream and the Hermes resources it owns. Field order releases the
 /// host resources before tearing down the GameStream connection.
 pub struct ManagedStream {
@@ -445,10 +451,14 @@ impl ManagedStream {
     }
 
     /// Snapshot final counters after the receive and control workers have stopped.
-    pub fn stop_with_stats(self) -> Option<report::VideoTransportStats> {
-        let counters = self.stream.video_counters();
+    pub fn stop_with_stats(self) -> SessionTotals {
+        let video = self.stream.video_counters();
+        let audio = self.stream.audio_counters();
         self.stop();
-        counters.as_deref().map(report::VideoTransportStats::from)
+        SessionTotals {
+            video: video.as_deref().map(report::VideoTransportStats::from),
+            audio: audio.as_deref().map(report::AudioTransportStats::from),
+        }
     }
 }
 
