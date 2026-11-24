@@ -42,7 +42,7 @@ pub enum Screen {
     #[default]
     Hosts,
     Apps,
-    /// Launching an app, and launch errors.
+    /// Launch details and errors.
     Session,
     Settings,
     Stream,
@@ -50,10 +50,12 @@ pub enum Screen {
     Tools,
     /// The last stream report.
     Report,
+    /// Launch animation, through the first displayable video frame.
+    Launching,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 7] = [
+    pub const ALL: [Screen; 8] = [
         Screen::Hosts,
         Screen::Apps,
         Screen::Session,
@@ -61,6 +63,7 @@ impl Screen {
         Screen::Stream,
         Screen::Tools,
         Screen::Report,
+        Screen::Launching,
     ];
 
     /// The page's number, in [`Screen::ALL`] order.

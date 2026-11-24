@@ -1,0 +1,135 @@
+import { Theme, Nav, IconButton } from "theme.slint";
+
+// All lengths follow the emblem. The clock belongs to this page, so the
+// render loop stops when the page is destroyed, even on a static stream.
+export component SessionLaunch inherits Rectangle {
+    in property <string> stage;
+    in property <bool> leaving;
+    callback cancel();
+    private property <length> emblem: min(360px, root.width * 0.52, root.height * 0.42);
+    private property <length> top: (root.height - root.emblem * 1.78) / 2;
+    private property <duration> clock: Theme.launch-motion ? animation-tick() : 0ms;
+    private property <angle> orbit: 360deg * mod(root.clock, 8s) / 8s;
+    private property <float> pulse: (1 - cos(360deg * mod(root.clock, 3s) / 3s)) / 2;
+    clip: true;
+    background: Theme.launch-night;
+
+    Rectangle {
+        width: root.emblem * 3.2;
+        height: self.width;
+        x: (parent.width - self.width) / 2;
+        y: root.top + (root.emblem - self.height) / 2;
+        background: @radial-gradient(circle, Theme.launch-accent.with-alpha(0.34), Theme.launch-accent.with-alpha(0.10) 40%, Theme.launch-accent.with-alpha(0) 70%);
+    }
+
+    for i in 23: Rectangle {
+        x: root.width * mod(17 + i * 37, 101) / 101;
+        y: root.height * mod(11 + i * 53, 97) / 97;
+        width: mod(i, 5) == 0 ? 3px : 1.5px;
+        height: self.width;
+        border-radius: self.width;
+        background: Theme.launch-highlight.with-alpha(mod(i, 5) == 0 ? 0.75 : 0.40);
+    }
+    for i in 4: Path {
+        width: root.width * (mod(i, 2) == 0 ? 0.31 : 0.21);
+        height: self.width * 0.34;
+        x: root.width * (i < 2 ? 0.08 + 0.14 * i : 0.58 + 0.06 * (i - 2));
+        y: root.top + root.emblem * (i < 2 ? 0.59 + 0.21 * i : -0.13 + 0.47 * (i - 2));
+        viewbox-width: 100; viewbox-height: 34;
+        commands: "M0 34 L52 15.2 L100 0 L53 16.6 Z";
+        fill: @linear-gradient(90deg, Theme.launch-accent.with-alpha(0), Theme.launch-accent.with-alpha(0.85) 46%, Theme.launch-highlight 54%, Theme.launch-accent.with-alpha(0) 100%);
+    }
+
+    mark := Rectangle {
+        width: root.emblem;
+        height: self.width;
+        x: (parent.width - self.width) / 2;
+        y: root.top;
+        for ring in 2: Rectangle {
+            width: parent.width * (1 - ring * 0.11);
+            height: self.width;
+            x: (parent.width - self.width) / 2;
+            y: self.x;
+            border-radius: self.width / 2;
+            border-width: max(1px, root.emblem / 150);
+            border-color: Theme.launch-accent.with-alpha(0.21 - ring * 0.08);
+        }
+        // A fixed path rotates as a single layer. The flame stays upright.
+        Path {
+            width: 100%; height: 100%;
+            viewbox-width: 100; viewbox-height: 100;
+            transform-rotation: root.orbit;
+            stroke: @linear-gradient(125deg, Theme.launch-highlight, Theme.launch-accent 58%, Theme.launch-accent.with-alpha(0.25));
+            stroke-width: max(2px, root.emblem * 0.013);
+            commands: "M50 12 A38 38 0 0 1 74 20.5 M79 25.5 A38 38 0 0 1 88 50 M87.4 57 A38 38 0 0 1 74 79.5 M67 84 A38 38 0 0 1 50 88 M44 87.5 A38 38 0 0 1 20.5 74 M17 69 A38 38 0 0 1 12 50 M12.6 43 A38 38 0 0 1 26 20.5 M33 16 A38 38 0 0 1 43 12.6";
+        }
+        Path {
+            width: 100%; height: 100%;
+            viewbox-width: 100; viewbox-height: 100;
+            fill: @linear-gradient(165deg, Theme.launch-text, Theme.launch-highlight 50%, Theme.launch-accent);
+            commands: "M50 23 C54 31 66 37 62 54 Q65 52 67 47 C77 65 66 77 50 77 C33 77 24 60 36 44 Q37 54 40 52 C43 44 47 32 50 23 Z";
+        }
+        Path {
+            width: 100%; height: 100%;
+            viewbox-width: 100; viewbox-height: 100;
+            fill: @linear-gradient(180deg, Theme.launch-accent, Theme.launch-accent.darker(0.3), Theme.launch-highlight);
+            commands: "M51 51 C52 57 59 61 58 68 C57 75 53 77 50 77 C42 75 40 70 43 64 Q46 57 51 51 Z";
+            transform-scale: 0.98 + 0.02 * root.pulse;
+        }
+        Path {
+            width: 100%; height: 100%;
+            viewbox-width: 100; viewbox-height: 100;
+            fill: Theme.launch-highlight.with-alpha(0.76);
+            commands: "M50 64 C51 68 54 70 54 72 C54 75 52 77 50 77 C47 76 46 74 46 72 C46 70 49 67 50 64 Z";
+        }
+    }
+
+    title := Text {
+        y: mark.y + mark.height;
+        width: 100%; height: root.emblem * 0.24;
+        text: "HESTIA";
+        horizontal-alignment: center; vertical-alignment: center;
+        font-size: root.emblem * 0.19; font-weight: 600;
+        letter-spacing: root.emblem * 0.075;
+        color: Theme.launch-text;
+    }
+    subtitle := Text {
+        y: title.y + title.height + root.emblem * 0.03;
+        width: 100%; height: root.emblem * 0.15;
+        text: "Preparing your session…";
+        font-size: max(16px, root.emblem * 0.102);
+        horizontal-alignment: center; vertical-alignment: center;
+        color: Theme.launch-highlight;
+    }
+    rail := Rectangle {
+        width: min(root.width - 48px, root.emblem * 1.56);
+        height: max(4px, root.emblem * 0.032);
+        x: (root.width - self.width) / 2;
+        y: subtitle.y + subtitle.height + root.emblem * 0.10;
+        border-radius: self.height / 2;
+        background: Theme.launch-accent.with-alpha(0.24);
+        Rectangle {
+            width: parent.width * 0.46;
+            height: 100%;
+            x: (parent.width - self.width) * root.pulse;
+            border-radius: self.height / 2;
+            background: @linear-gradient(90deg, Theme.launch-accent, Theme.launch-highlight, Theme.launch-accent);
+        }
+    }
+    Text {
+        y: rail.y + rail.height + root.emblem * 0.075;
+        x: 16px; width: parent.width - 32px;
+        text: root.stage; wrap: word-wrap;
+        horizontal-alignment: center;
+        font-size: max(13px, root.emblem * 0.072);
+        color: Theme.launch-text.with-alpha(0.72);
+    }
+    IconButton {
+        x: 8px; y: 8px;
+        icon: "back"; label: "Cancel launch";
+        tint: Theme.launch-highlight;
+        enabled: !root.leaving;
+        want-focus: Nav.keyboard && !root.leaving;
+        clicked => { root.cancel(); }
+    }
+}

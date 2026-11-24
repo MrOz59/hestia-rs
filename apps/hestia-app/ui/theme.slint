@@ -21,7 +21,7 @@
 //   new textures. Motion here is made of them.
 // * Over the stream, everything redraws with every picture: overlays there
 //   only move, without shadows or fades.
-// * Nothing animates continuously; `Loader` steps on a slow timer.
+// * Loader steps on a slow timer. Only the launch artwork animates continuously.
 // * Android's "Remove animations" turns every `animate` off (Slint reads
 //   it); timers then only flip states.
 
@@ -61,6 +61,13 @@ export global Theme {
     out property <color> info: #9ec5ea;
     out property <color> scrim: #0a0807c8;
     out property <string> font: "Outfit";
+
+    // Session launch artwork. Theme providers can override these roles at runtime.
+    in-out property <color> launch-night: #090b1d;
+    in-out property <color> launch-accent: #9053ff;
+    in-out property <color> launch-highlight: #e6caff;
+    in-out property <color> launch-text: #f8f5ff;
+    in-out property <bool> launch-motion: true;
 
     // The window's size (set by the window). Phones in portrait are
     // compact; desktops are wide; landscape phones and TVs (960 × 540 dp)

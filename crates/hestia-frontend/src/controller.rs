@@ -27,6 +27,7 @@ use crate::ui::{Art, Screen, UiHandle, View};
 use crate::{platform, view};
 
 mod clipboard;
+mod launch;
 mod profiles;
 mod report;
 mod streaming;
@@ -798,7 +799,11 @@ impl Controller {
             ui.set_session_subtitle(host_name.clone());
             ui.set_session_lines(lines(&["Starting on the host…"]));
             ui.set_session_busy(true);
-            ui.set_screen(Screen::Session);
+            ui.set_screen(Screen::Launching);
+            let launch = launch::Launch {
+                seq,
+                shown_at: std::time::Instant::now(),
+            };
 
             // This display, landscape (streams are), else the window.
             let mut device = DeviceInfo::default();
@@ -870,10 +875,8 @@ impl Controller {
                             ));
                         }
                         c.ui(|ui| ui.set_session_lines(lines(&["Connecting to the stream…"])));
-                        match c.start_stream(id.clone(), &session, host, decoder, session_report.clone(), seq) {
+                        match c.start_stream(id.clone(), &session, host, decoder, session_report.clone(), launch) {
                             Ok(()) => {
-                                c.finish_launch(seq);
-                                c.ui(|ui| ui.set_session_busy(false));
                                 c.refresh_current_running();
                                 return;
                             }
@@ -917,14 +920,17 @@ impl Controller {
                         vec![format!("Could not start the app: {e}")]
                     }
                 };
-                c.finish_launch(seq);
                 let show_report = c.finish_report(session_report, &failure, Some(id.clone()));
+                let controller = c.clone();
                 c.ui(move |ui| {
+                    let current = controller.launch_current(seq);
+                    controller.finish_launch(seq);
+                    if !current || ui.screen() != Screen::Launching {
+                        return;
+                    }
                     ui.set_session_lines(text);
                     ui.set_session_busy(false);
-                    if show_report && ui.screen() == Screen::Session {
-                        ui.set_screen(Screen::Report);
-                    }
+                    ui.set_screen(if show_report { Screen::Report } else { Screen::Session });
                 });
                 c.refresh_current_running();
             });
@@ -946,7 +952,7 @@ impl Controller {
     /// Cancels the launch in progress, if any: back to the apps right away;
     /// the launch thread backs out and Hermes gets its display back.
     fn cancel_launch(self: &Shared) -> bool {
-        {
+        let seq = {
             let mut state = self.state();
             if !state
                 .launching
@@ -955,8 +961,11 @@ impl Controller {
             {
                 return false;
             }
+            let seq = state.launch_seq;
             state.launch_seq += 1;
-        }
+            seq
+        };
+        self.stop_launch_stream(seq);
         info!("launch cancelled by the user");
         self.ui(|ui| {
             ui.set_session_busy(false);

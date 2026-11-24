@@ -16,17 +16,20 @@ use hestia_core::{LaunchedSession, ManagedStream, StreamHost};
 use hestia_media::{DecodeStats, DecodingSink};
 use log::{info, warn};
 
+use super::launch::{Launch, LaunchAudio, LaunchStatus};
 use super::report::{self, SharedReport};
 use super::{Controller, Shared, spawn};
 use crate::input::{PointerPhase, RawPointer};
 use crate::presentation::{Presentation, UiPresenter};
 use crate::stream_input::{self, GestureAction, Held, ImeEvent, Picture, StreamInput, VideoRect};
-use crate::ui::Screen;
+use crate::ui::{Screen, View};
 use crate::video_backend::StreamVideo;
 use crate::virtual_pad::PadState;
 use crate::{hostinfo, keymap, platform, typing};
 
 pub(super) struct ActiveStream {
+    launch: Launch,
+    revealed: Arc<AtomicBool>,
     generation: u64,
     out: Output,
     host_id: String,
@@ -180,6 +183,8 @@ struct Listener {
     video: Mutex<String>,
     first_frame: AtomicBool,
     provenance_requested: AtomicBool,
+    // The supervisor can terminate before connect() hands us the session.
+    terminated: Mutex<Option<String>>,
     /// Seconds in a row with frames arriving and none decoded.
     undecoded_secs: AtomicU32,
 }
@@ -387,6 +392,7 @@ impl SessionListener for Listener {
             StreamEvent::Rumble { gamepad, low, high } => platform::rumble(gamepad, low, high),
             StreamEvent::Terminated { reason, graceful } => {
                 info!("stream ended (graceful: {graceful}): {reason}");
+                *self.terminated.lock().unwrap_or_else(|p| p.into_inner()) = Some(reason.clone());
                 self.controller.end_stream(Some(self.generation), Some(reason), false);
             }
         }
@@ -433,7 +439,7 @@ impl Controller {
         host: StreamHost,
         video: StreamVideo,
         session_report: SharedReport,
-        launch_seq: u64,
+        launch: Launch,
     ) -> Result<(), String> {
         let (decoder, formats) = video.decoder;
         let config = launched.stream_config(&formats).map_err(|e| e.to_string())?;
@@ -473,6 +479,7 @@ impl Controller {
             video: Mutex::new(size.clone()),
             first_frame: AtomicBool::new(false),
             provenance_requested: AtomicBool::new(false),
+            terminated: Mutex::default(),
             undecoded_secs: AtomicU32::new(0),
         });
         // Android direct video: the helper adds the surface now, while the
@@ -493,20 +500,27 @@ impl Controller {
             ui.set_stream_direct_video(direct);
             ui.set_stream_status("Waiting for video…".into());
         });
+        let revealed = Arc::new(AtomicBool::new(false));
+        let audio = LaunchAudio {
+            output: hestia_media::default_audio_sink(),
+            revealed: revealed.clone(),
+        };
         let session = host
-            .connect(
-                config,
-                Box::new(sink),
-                hestia_media::default_audio_sink(),
-                listener.clone(),
-            )
+            .connect(config, Box::new(sink), Box::new(audio), listener.clone())
             .map_err(|e| {
                 present.close();
+                if direct {
+                    Self::stop_direct_video();
+                }
                 e.to_string()
             })?;
-        if !self.launch_current(launch_seq) {
+        let connected = Instant::now();
+        if !self.launch_current(launch.seq) {
             present.close();
             session.stop();
+            if direct {
+                Self::stop_direct_video();
+            }
             return Err("cancelled".into());
         }
         let details = session.details();
@@ -515,17 +529,16 @@ impl Controller {
         *listener.video.lock().unwrap_or_else(|p| p.into_inner()) = format!("{size}@{} {codec}", launched.request.fps);
         session.report_negotiation(&mut report::lock(&session_report));
 
-        // A stream replacing another keeps the laid-out view and its focus
-        // (no new layout or focus event comes for it).
+        // Preserve the last video geometry while the launch page owns focus.
         let previous = self
             .active_stream()
             .as_ref()
-            .map(|a| (a.input.view_size(), a.input.scale(), a.input.video(), a.input.focused));
-        let (view, scale, video, focused) = previous.unwrap_or(((0.0, 0.0), 1.0, VideoRect::default(), true));
+            .map(|a| (a.input.view_size(), a.input.scale(), a.input.video()));
+        let (view, scale, video) = previous.unwrap_or(((0.0, 0.0), 1.0, VideoRect::default()));
         let mut input = StreamInput::new(stream_width, view, launched.settings.onscreen_controller);
         input.resize(view.0, view.1, scale);
         input.set_video(video);
-        input.focused = focused;
+        input.focused = false; // StreamView takes focus when the first picture is revealed.
         input.pen_and_touch = details.pen_and_touch();
         let view = input.view_size();
         // Hermes host offering clipboard sync (the menu's actions, and the
@@ -537,7 +550,10 @@ impl Controller {
             .and_then(|s| s.capabilities.as_ref())
             .is_some_and(|c| c.features.clipboard_sync);
         let clipboard_host = host_id.clone();
+        platform::set_stream_mode(true, launched.settings.orientation);
         let previous = self.active_stream().replace(ActiveStream {
+            launch,
+            revealed,
             generation,
             out: Output {
                 session,
@@ -556,11 +572,19 @@ impl Controller {
             previous.present.close();
             spawn("hestia-stream-stop", move || previous.out.session.stop());
         }
+        if let Some(reason) = listener.terminated.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            self.end_stream(Some(generation), Some(reason), false);
+            return Ok(());
+        }
         let pad = launched.settings.onscreen_controller;
         if clipboard && launched.settings.clipboard_sync {
             self.start_clipboard_sync(generation, clipboard_host);
         }
+        let c = self.clone();
         self.ui(move |ui| {
+            if !c.stream_is(generation) {
+                return;
+            }
             ui.set_stream_stats(format!("{size} {codec}"));
             ui.set_stream_pad_visible(pad);
             ui.set_stream_clipboard(clipboard);
@@ -571,15 +595,74 @@ impl Controller {
             ui.set_stream_pan_y(0.0);
             ui.set_stream_mouse_capture(false);
             ui.set_pointer_capture(false);
-            ui.set_screen(Screen::Stream);
+            ui.set_session_lines(vec!["Waiting for the first video frame…".into()]);
+            c.await_launch_picture(ui, generation, connected);
         });
-        // Orientation, no system bars, screen on (Android); controllers on.
-        platform::set_stream_mode(true, launched.settings.orientation);
-        platform::set_gamepads_streaming(true);
         if pad && view.0 > 0.0 {
             self.push_pad_view();
         }
         Ok(())
+    }
+
+    fn stop_direct_video() {
+        #[cfg(target_os = "android")]
+        hestia_media::direct_video::set_wanted(false);
+        platform::set_direct_video(false, 0, 0, 0);
+    }
+
+    pub(super) fn stop_launch_stream(self: &Shared, seq: u64) {
+        let generation = self
+            .active_stream()
+            .as_ref()
+            .filter(|a| a.launch.seq == seq)
+            .map(|a| a.generation);
+        if let Some(generation) = generation {
+            self.end_stream(Some(generation), None, false);
+        }
+    }
+
+    fn await_launch_picture(self: &Shared, ui: &dyn View, generation: u64, connected: Instant) {
+        let (launch, ready, revealed) = {
+            let guard = self.active_stream();
+            let Some(active) = guard.as_ref().filter(|a| a.generation == generation) else {
+                return;
+            };
+            let handoff = active.present.delivered.load(Ordering::Relaxed) != 0;
+            // MediaCodec can drain output while its native surface is gone.
+            #[cfg(target_os = "android")]
+            let handoff = active
+                .decode
+                .direct_video
+                .counts()
+                .visible_releases
+                .map_or(handoff, |count| count > 0);
+            let ready = handoff || active.present.gpu.drawn.load(Ordering::Relaxed) != 0;
+            (active.launch, ready, active.revealed.clone())
+        };
+        if !self.launch_current(launch.seq) || ui.screen() != Screen::Launching {
+            self.end_stream(Some(generation), None, false);
+            return;
+        }
+        match launch.status(Instant::now(), connected, ready) {
+            LaunchStatus::Wait(delay) => {
+                let c = self.clone();
+                self.ui_after(delay, move |ui| c.await_launch_picture(ui, generation, connected));
+            }
+            LaunchStatus::Reveal => {
+                self.finish_launch(launch.seq);
+                ui.set_session_busy(false);
+                ui.set_screen(Screen::Stream);
+                revealed.store(true, Ordering::Relaxed);
+                platform::set_gamepads_streaming(true);
+            }
+            LaunchStatus::TimedOut => {
+                self.end_stream(
+                    Some(generation),
+                    Some("Timed out waiting for the first displayable video frame".into()),
+                    false,
+                );
+            }
+        }
     }
 
     /// Stops the stream (`generation`: only if it is still that stream).
@@ -600,6 +683,7 @@ impl Controller {
                 report: session_report,
                 decode,
                 present,
+                launch,
                 ..
             } = active;
             let video_stats = session.stop_with_stats();
@@ -705,17 +789,23 @@ impl Controller {
             let show_report = c.finish_report(session_report, &outcome, Some(host_id.clone()));
             platform::set_keyboard_visible(false);
             platform::set_stream_mode(false, hestia_core::StreamOrientation::default());
-            #[cfg(target_os = "android")]
-            hestia_media::direct_video::set_wanted(false);
-            platform::set_direct_video(false, 0, 0, 0);
+            Self::stop_direct_video();
             platform::set_gamepads_streaming(false);
+            let controller = c.clone();
+            let startup_error = reason.clone();
             c.ui(move |ui| {
+                let starting = controller.launch_current(launch.seq);
+                controller.finish_launch(launch.seq);
                 ui.set_stream_direct_video(false);
                 if ui.stream_fullscreen() {
                     ui.set_window_fullscreen(false);
                     ui.set_stream_fullscreen(false);
                 }
-                if ui.screen() == Screen::Stream {
+                if starting && ui.screen() == Screen::Launching {
+                    ui.set_session_busy(false);
+                    ui.set_session_lines(startup_error.into_iter().collect());
+                    ui.set_screen(if show_report { Screen::Report } else { Screen::Session });
+                } else if ui.screen() == Screen::Stream {
                     ui.set_screen(if show_report { Screen::Report } else { Screen::Apps });
                 }
                 ui.clear_video();

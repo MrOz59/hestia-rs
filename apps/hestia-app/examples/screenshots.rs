@@ -276,7 +276,7 @@ fn main() {
             ("report", 6, false, false),
             ("hosts", 0, false, false),
             ("apps", 1, false, false),
-            ("launching", 2, false, false),
+            ("launching", 7, false, false),
             ("settings", 3, false, false),
             ("pairing", 0, true, false),
             ("stream", 4, false, false),

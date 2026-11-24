@@ -34,7 +34,8 @@ pub const FLAG_EOF: u8 = 0x2;
 pub const FLAG_SOF: u8 = 0x4;
 
 const PING_INTERVAL: Duration = Duration::from_millis(500);
-const FIRST_DATA_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long startup may wait for video once the video transport is running.
+pub const FIRST_DATA_TIMEOUT: Duration = Duration::from_secs(10);
 const VIDEO_STALL_PROBE: Duration = Duration::from_secs(2);
 const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(6);
 const REORDER_WINDOW: Duration = Duration::from_millis(6);
