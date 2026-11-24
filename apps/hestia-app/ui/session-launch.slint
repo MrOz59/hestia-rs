@@ -124,6 +124,12 @@ export component SessionLaunch inherits Rectangle {
         font-size: max(13px, root.emblem * 0.072);
         color: Theme.launch-text.with-alpha(0.72);
     }
+    // Following a touch launch, keep Back/Escape in the page's focus scope
+    // without putting a keyboard focus ring on the cancel button.
+    FocusScope {
+        width: 0px; height: 0px;
+        init => { if !Nav.keyboard { self.focus(); } }
+    }
     IconButton {
         x: 8px; y: 8px;
         icon: "back"; label: "Cancel launch";
