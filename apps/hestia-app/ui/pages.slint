@@ -1402,6 +1402,18 @@ export component SettingsPage inherits Page {
     callback save;
     callback open-last-report;
     callback open-app-log;
+    // Debug, hidden until About is tapped seven times (like Android's
+    // developer options).
+    in property <bool> debug-options;
+    in property <bool> debug-verbose-log;
+    in property <string> debug-info;
+    // The launch preview is open over the page.
+    in property <bool> previewing;
+    callback about-tapped;
+    callback preview-launch;
+    callback debug-verbose-log-toggled(bool);
+    callback debug-copy-info;
+    callback debug-hide;
 
     property <[string]> preset-names: ["Custom", "Fast", "Balanced", "Quality", "Battery saver"];
     in property <[string]> codec-names;
@@ -1413,7 +1425,8 @@ export component SettingsPage inherits Page {
 
     // Focus: the header's Back (-2) and Save (-3), then the rows in page
     // order: 0…4, Metered bitrate (24), 5…7, Direct video (19), 8…18,
-    // saved profiles (100…), keyboard shortcuts (25…27), 20…23.
+    // saved profiles (100…), keyboard shortcuts (25…27), 20…23, then Debug
+    // (28…32) once unlocked.
     property <int> nav: -1;
     focus-first => {
         if (root.nav == -1) {
@@ -1435,6 +1448,22 @@ export component SettingsPage inherits Page {
     property <int> profile-count: root.profile-names.length;
     // The shortcut rows, shown with a physical keyboard only.
     property <int> shortcut-count: root.physical-keyboard ? 3 : 0;
+    property <int> debug-count: root.debug-options ? 5 : 0;
+    changed debug-options => {
+        if (!root.debug-options && root.nav >= 28 && root.nav < 100) {
+            root.nav = 23;
+        }
+    }
+    // Back from the launch preview: the remote lands where it left.
+    changed previewing => {
+        if (!root.previewing) {
+            if (Nav.keyboard) {
+                root.nav = 28;
+            } else {
+                home-scope.focus();
+            }
+        }
+    }
     changed profile-count => {
         if (root.nav >= 100 + root.profile-count) {
             root.nav = root.profile-count > 0 ? 100 + root.profile-count - 1 : 18;
@@ -1448,6 +1477,7 @@ export component SettingsPage inherits Page {
     pure function pos(i: int) -> int {
         return i < 19 ? i
             : i >= 100 ? 19 + (i - 100)
+            : i >= 28 ? 23 + root.profile-count + root.shortcut-count + (i - 28)
             : i >= 25 ? 19 + root.profile-count + (i - 25)
             : 19 + root.profile-count + root.shortcut-count + (i - 20);
     }
@@ -1455,7 +1485,8 @@ export component SettingsPage inherits Page {
         return p < 19 ? p
             : p < 19 + root.profile-count ? 100 + (p - 19)
             : p < 19 + root.profile-count + root.shortcut-count ? 25 + (p - 19 - root.profile-count)
-            : 20 + (p - 19 - root.profile-count - root.shortcut-count);
+            : p < 23 + root.profile-count + root.shortcut-count ? 20 + (p - 19 - root.profile-count - root.shortcut-count)
+            : 28 + (p - 23 - root.profile-count - root.shortcut-count);
     }
     pure function valid(i: int) -> bool {
         return (i != 8 || root.mediacodec || root.gpu-conversion) && (i != 10 || root.android)
@@ -1467,7 +1498,7 @@ export component SettingsPage inherits Page {
         if (from == 19) { return dir > 0 ? 8 : 7; }
         if (root.mediacodec && ((from == 7 && dir > 0) || (from == 8 && dir < 0))) { return 19; }
         let p = root.pos(from) + dir;
-        let last = 22 + root.profile-count + root.shortcut-count;
+        let last = 22 + root.profile-count + root.shortcut-count + root.debug-count;
         if (p < 0 || p > last) {
             return from;
         }
@@ -2051,6 +2082,10 @@ export component SettingsPage inherits Page {
                             entered => {
                                 root.nav = 23;
                             }
+                            // Seven taps unlock Debug.
+                            clicked => {
+                                root.about-tapped();
+                            }
                             HorizontalLayout {
                                 spacing: 10px;
                                 VerticalLayout {
@@ -2080,6 +2115,110 @@ export component SettingsPage inherits Page {
                                 color: Theme.muted;
                                 font-size: Theme.caption-size;
                                 wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    if root.debug-options: Group {
+                        title: "Debug";
+                        ActionRow {
+                            label: "Launch screen preview";
+                            hint: "The launch animation with no stream behind it, until Back";
+                            icon: "play";
+                            want-focus: root.at(28);
+                            nav(k) => {
+                                return root.move(28, k);
+                            }
+                            entered => {
+                                root.nav = 28;
+                            }
+                            clicked => {
+                                // Off the row while the preview holds the
+                                // focus, so coming back focuses it again.
+                                root.nav = -1;
+                                root.preview-launch();
+                            }
+                        }
+                        SwitchRow {
+                            label: "Launch animation";
+                            hint: "Off holds the launch screen still, until the app restarts";
+                            checked: Theme.launch-motion;
+                            want-focus: root.at(29);
+                            nav(k) => {
+                                return root.move(29, k);
+                            }
+                            entered => {
+                                root.nav = 29;
+                            }
+                            toggled(on) => {
+                                Theme.launch-motion = on;
+                            }
+                        }
+                        SwitchRow {
+                            label: "Verbose log";
+                            hint: "Debug lines from every library in the app log and stream reports";
+                            checked: root.debug-verbose-log;
+                            want-focus: root.at(30);
+                            nav(k) => {
+                                return root.move(30, k);
+                            }
+                            entered => {
+                                root.nav = 30;
+                            }
+                            toggled(on) => {
+                                root.debug-verbose-log-toggled(on);
+                            }
+                        }
+                        InfoRow {
+                            want-focus: root.at(31);
+                            nav(k) => {
+                                return root.move(31, k);
+                            }
+                            entered => {
+                                root.nav = 31;
+                            }
+                            clicked => {
+                                root.debug-copy-info();
+                            }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: "This device";
+                                    color: Theme.text;
+                                    font-size: Theme.body-size;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Icon {
+                                        name: "clipboard";
+                                        tint: Theme.muted;
+                                    }
+                                }
+                            }
+                            Text {
+                                text: root.debug-info == "" ? "Reading…" : root.debug-info;
+                                color: Theme.muted;
+                                font-size: Theme.caption-size;
+                                wrap: word-wrap;
+                            }
+                        }
+                        ActionRow {
+                            label: "Hide debug options";
+                            hint: "Turns everything here off; About unlocks them again";
+                            icon: "close";
+                            want-focus: root.at(32);
+                            nav(k) => {
+                                return root.move(32, k);
+                            }
+                            entered => {
+                                root.nav = 32;
+                            }
+                            clicked => {
+                                Theme.launch-motion = true;
+                                root.debug-hide();
                             }
                         }
                     }

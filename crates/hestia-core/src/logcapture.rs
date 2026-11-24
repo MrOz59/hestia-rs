@@ -2,14 +2,16 @@
 //!
 //! [`install`] wraps the platform logger (env_logger, android_logger…): every
 //! record still goes there, and records at Info and above, plus Debug from
-//! Hestia's own crates, are also kept in a bounded ring buffer. A report
-//! takes a [`mark`] when a session starts and collects [`lines_since`] it.
+//! Hestia's own crates (from every crate with [`set_verbose`]), are also
+//! kept in a bounded ring buffer. A report takes a [`mark`] when a session
+//! starts and collects [`lines_since`] it.
 
 use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
 use log::{LevelFilter, Log, Metadata, Record};
@@ -141,8 +143,18 @@ pub fn previous_run(dir: &Path) -> Option<String> {
     fs::read_to_string(dir.join(PREVIOUS_LOG)).ok()
 }
 
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+/// Keeps Debug lines from every crate (decoders, the UI toolkit, the
+/// network stack…), not only Hestia's. Settings → Debug → Verbose log.
+pub fn set_verbose(on: bool) {
+    VERBOSE.store(on, Ordering::Relaxed);
+}
+
 fn captured(meta: &Metadata<'_>) -> bool {
-    meta.level() <= log::Level::Info || (meta.level() <= log::Level::Debug && meta.target().starts_with("hestia"))
+    meta.level() <= log::Level::Info
+        || (meta.level() <= log::Level::Debug
+            && (meta.target().starts_with("hestia") || VERBOSE.load(Ordering::Relaxed)))
 }
 
 struct Tee {
@@ -203,6 +215,21 @@ mod tests {
             ["[… 1 earlier lines dropped from the log buffer]", "c", "d", "e"]
         );
         assert!(b.since(b.mark()).is_empty());
+    }
+
+    #[test]
+    fn verbose_keeps_debug_from_every_crate() {
+        let at = |level, target| Metadata::builder().level(level).target(target).build();
+        assert!(captured(&at(log::Level::Debug, "hestia_stream::video")));
+        assert!(captured(&at(log::Level::Info, "cros_codecs")));
+        assert!(!captured(&at(log::Level::Trace, "hestia_core")));
+        set_verbose(true);
+        let debug_elsewhere = captured(&at(log::Level::Debug, "cros_codecs"));
+        let trace_elsewhere = captured(&at(log::Level::Trace, "cros_codecs"));
+        set_verbose(false);
+        assert!(debug_elsewhere);
+        assert!(!trace_elsewhere);
+        assert!(!captured(&at(log::Level::Debug, "cros_codecs")));
     }
 
     #[test]

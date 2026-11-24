@@ -147,6 +147,16 @@ impl View for SlintView<'_> {
         self.0.set_data_dir(path.into());
     }
 
+    fn set_debug_options(&self, on: bool) {
+        self.0.set_debug_options(on);
+    }
+    fn set_debug_verbose_log(&self, on: bool) {
+        self.0.set_debug_verbose_log(on);
+    }
+    fn set_debug_info(&self, text: String) {
+        self.0.set_debug_info(text.into());
+    }
+
     fn set_hosts(&self, hosts: Vec<ui::HostCard>) {
         self.0.set_hosts(model(hosts.into_iter().map(host_card).collect()));
     }
@@ -568,6 +578,14 @@ pub(crate) fn wire(ui: &AppWindow, controller: &Arc<Controller>) {
     ui.on_open_last_report(move || c.open_last_report());
     let c = controller.clone();
     ui.on_open_app_log(move || c.open_app_log());
+    let c = controller.clone();
+    ui.on_debug_tap(move || c.debug_tap());
+    let c = controller.clone();
+    ui.on_debug_hide(move || c.hide_debug_options());
+    let c = controller.clone();
+    ui.on_debug_verbose_log_toggled(move |on| c.set_verbose_log(on));
+    let c = controller.clone();
+    ui.on_debug_copy_info(move || c.copy_debug_info());
 
     let c = controller.clone();
     ui.on_stream_key(move |text, pressed, repeat, ctrl, alt, shift, meta| {
