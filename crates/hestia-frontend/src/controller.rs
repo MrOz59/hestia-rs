@@ -50,6 +50,10 @@ struct State {
     /// it so the launch thread knows to back out.
     launching: Option<(u64, String)>,
     launch_seq: u64,
+    /// The app held back by the shared-band warning, and whether the user
+    /// chose to stream anyway (not asked again until the app restarts).
+    pending_launch: Option<u32>,
+    shared_band_acknowledged: bool,
 }
 
 pub struct Controller {
@@ -759,8 +763,36 @@ impl Controller {
         });
     }
 
-    /// Starts (or resumes) an app on the open host and streams it.
+    /// Starts (or resumes) an app on the open host and streams it. With
+    /// Bluetooth on and the Wi-Fi on 2.4 GHz it asks first: the two share
+    /// that band, and the stream stutters ([`platform::shared_band_warning`]).
     pub fn launch(self: &Shared, app_id: u32) {
+        self.launch_after_checks(app_id, false);
+    }
+
+    /// "Stream anyway" in the shared-band warning: starts the app it held
+    /// back, and doesn't ask again until the app restarts.
+    pub fn launch_despite_shared_band(self: &Shared) {
+        let pending = {
+            let mut st = self.state();
+            st.shared_band_acknowledged = true;
+            st.pending_launch.take()
+        };
+        if let Some(app_id) = pending {
+            info!("streaming despite Bluetooth on 2.4 GHz Wi-Fi");
+            self.launch_after_checks(app_id, true);
+        }
+    }
+
+    /// Cancel in the shared-band warning.
+    pub fn cancel_shared_band_launch(self: &Shared) {
+        if self.state().pending_launch.take().is_some() {
+            info!("stream cancelled at the Bluetooth / 2.4 GHz Wi-Fi warning");
+        }
+    }
+
+    /// `warned`: the user saw the shared-band warning for this launch.
+    fn launch_after_checks(self: &Shared, app_id: u32, warned: bool) {
         let Some(id) = self.state().current_host.clone() else {
             return;
         };
@@ -780,6 +812,13 @@ impl Controller {
         };
         if other_running {
             self.toast("Another app is running on this host. Quit it first.");
+            return;
+        }
+        let acknowledged = warned || self.state().shared_band_acknowledged;
+        if !acknowledged && let Some(text) = platform::shared_band_warning() {
+            info!("Bluetooth is on and the Wi-Fi is on 2.4 GHz: asking before streaming");
+            self.state().pending_launch = Some(app_id);
+            self.ui(move |ui| ui.show_shared_band_warning(text));
             return;
         }
 
@@ -814,6 +853,13 @@ impl Controller {
             spawn("hestia-launch", move || {
                 let Some(core) = c.core() else { return };
                 let session_report = report::begin(&title, &host_name, &device);
+                if warned {
+                    report::lock(&session_report).field(
+                        "Radio",
+                        "warned before the stream",
+                        "Bluetooth on with 2.4 GHz Wi-Fi; streamed anyway",
+                    );
+                }
                 let failure: String;
                 // The host's stream profile, if it has one, over the settings.
                 let (mut settings, profile) = core.settings_for_host(&id);

@@ -197,6 +197,10 @@ impl View for SlintView<'_> {
     fn set_host_name(&self, text: String) {
         self.0.set_host_name(text.into());
     }
+    fn show_shared_band_warning(&self, text: String) {
+        self.0.set_band_warning_text(text.into());
+        self.0.set_band_warning_visible(true);
+    }
     fn set_host_edit_visible(&self, on: bool) {
         self.0.set_host_edit_visible(on);
     }
@@ -554,6 +558,10 @@ pub(crate) fn wire(ui: &AppWindow, controller: &Arc<Controller>) {
 
     let c = controller.clone();
     ui.on_launch_app(move |app_id| c.launch(app_id.max(0) as u32));
+    let c = controller.clone();
+    ui.on_band_warning_stream(move || c.launch_despite_shared_band());
+    let c = controller.clone();
+    ui.on_band_warning_cancel(move || c.cancel_shared_band_launch());
     let c = controller.clone();
     ui.on_quit_app(move || c.quit_app());
     let c = controller.clone();

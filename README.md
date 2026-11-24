@@ -153,6 +153,11 @@ a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
   the same stream. Closing it disconnects and leaves the game running on the host.
 - Statistics overlay, "Fix picture" (asks for a fresh keyframe), disconnect
   or quit the app.
+- Android asks before a stream when Bluetooth is on and the Wi-Fi is on
+  2.4 GHz: the two share that band, and Bluetooth headphones in particular
+  make the picture stutter and the sound drop out. Streaming over the
+  router's 5 GHz network, leaving 2.4 GHz to Bluetooth, avoids it. The
+  session report says when Bluetooth was on and where the audio played.
 
 ### Settings
 
