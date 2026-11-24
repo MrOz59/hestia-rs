@@ -6,7 +6,7 @@ export component SessionLaunch inherits Rectangle {
     in property <string> stage;
     in property <bool> leaving;
     callback cancel();
-    private property <length> emblem: min(360px, root.width * 0.52, root.height * 0.42);
+    private property <length> emblem: min(root.width * 0.52, root.height * 0.42);
     private property <length> top: (root.height - root.emblem * 1.78) / 2;
     private property <duration> clock: Theme.launch-motion ? animation-tick() : 0ms;
     private property <angle> orbit: 360deg * mod(root.clock, 8s) / 8s;
@@ -22,19 +22,30 @@ export component SessionLaunch inherits Rectangle {
         background: @radial-gradient(circle, Theme.launch-accent.with-alpha(0.34), Theme.launch-accent.with-alpha(0.10) 40%, Theme.launch-accent.with-alpha(0) 70%);
     }
 
+    // Each star wraps outside the viewport. The nearer stars cross the
+    // screen faster, while every star keeps its own starting position.
     for i in 23: Rectangle {
-        x: root.width * mod(17 + i * 37, 101) / 101;
+        private property <bool> near-star: mod(i, 5) == 0;
+        private property <duration> crossing: self.near-star ? 28s : 54s;
+        private property <float> travel: mod(root.clock, self.crossing) / self.crossing;
+        private property <float> start-x: mod(17 + i * 37, 101) / 101;
+        x: (root.width + self.width) * mod(self.start-x + self.travel, 1) - self.width;
         y: root.height * mod(11 + i * 53, 97) / 97;
-        width: mod(i, 5) == 0 ? 3px : 1.5px;
+        width: max(1.5px, root.emblem * 0.005) * (self.near-star ? 2 : 1);
         height: self.width;
         border-radius: self.width;
-        background: Theme.launch-highlight.with-alpha(mod(i, 5) == 0 ? 0.75 : 0.40);
+        background: Theme.launch-highlight.with-alpha(self.near-star ? 0.75 : 0.40);
     }
+    // Slide each fixed vector along its own diagonal; only the position
+    // changes. Stagger the phases so all four trails never turn together.
     for i in 4: Path {
+        private property <duration> drift-period: mod(i, 2) == 0 ? 9s : 7s;
+        private property <length> drift: self.width * 0.21
+            * sin(360deg * mod(root.clock, self.drift-period) / self.drift-period + i * 87deg);
         width: root.width * (mod(i, 2) == 0 ? 0.31 : 0.21);
         height: self.width * 0.34;
-        x: root.width * (i < 2 ? 0.08 + 0.14 * i : 0.58 + 0.06 * (i - 2));
-        y: root.top + root.emblem * (i < 2 ? 0.59 + 0.21 * i : -0.13 + 0.47 * (i - 2));
+        x: root.width * (i < 2 ? 0.08 + 0.14 * i : 0.58 + 0.06 * (i - 2)) + self.drift;
+        y: root.top + root.emblem * (i < 2 ? 0.59 + 0.21 * i : -0.13 + 0.47 * (i - 2)) - self.drift * 0.34;
         viewbox-width: 100; viewbox-height: 34;
         commands: "M0 34 L52 15.2 L100 0 L53 16.6 Z";
         fill: @linear-gradient(90deg, Theme.launch-accent.with-alpha(0), Theme.launch-accent.with-alpha(0.85) 46%, Theme.launch-highlight 54%, Theme.launch-accent.with-alpha(0) 100%);
