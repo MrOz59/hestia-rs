@@ -16,7 +16,7 @@ use crate::input::{self, InputEvent};
 use crate::rtsp::{self, HandshakeConfig, Negotiated};
 use crate::sdp;
 use crate::sink::{AudioSink, VideoSink};
-use crate::video::{VideoConfig, VideoCounters, VideoFeedback, VideoReceiver};
+use crate::video::{RoundTrip, VideoConfig, VideoCounters, VideoFeedback, VideoReceiver};
 use crate::{SessionListener, StreamConfig, StreamError, StreamEvent, StreamStage, StreamStats};
 
 enum SessionFeedback {
@@ -98,6 +98,7 @@ impl StreamSession {
         let video_feedback = feedback.clone();
         let queued_fec_reports = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let queued_fec = queued_fec_reports.clone();
+        let round_trip = Arc::new(RoundTrip::default());
         let video = VideoReceiver::start_with_events(
             VideoConfig {
                 report_fec: negotiated.supports_fec_status,
@@ -110,6 +111,8 @@ impl StreamSession {
                 fps: config.fps,
                 decrypt_key: (negotiated.encryption_enabled & sdp::SS_ENC_VIDEO != 0)
                     .then_some(config.remote_input_key),
+                round_trip: round_trip.clone(),
+                show_through_loss: config.show_video_through_loss,
             },
             video_sink,
             move |event| {
@@ -245,6 +248,10 @@ impl StreamSession {
                         }
                         if last_stats.elapsed() >= STATS_INTERVAL {
                             last_stats = Instant::now();
+                            // The video loop times keyframe requests from it.
+                            if let Some((rtt, variance)) = control.measured_round_trip() {
+                                round_trip.set(rtt, variance);
+                            }
                             let (rtt, rtt_var) = control.round_trip();
                             listener.on_event(StreamEvent::Stats(StreamStats {
                                 frames: counters.frames.load(Ordering::Relaxed),
@@ -382,6 +389,7 @@ mod tests {
             remote_input_key: key,
             remote_input_key_id: 7,
             streaming_remotely: false,
+            show_video_through_loss: false,
         }
     }
 

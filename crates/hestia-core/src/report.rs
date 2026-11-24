@@ -50,6 +50,11 @@ pub struct VideoTransportStats {
     max_request_to_keyframe_packet_us: u64,
     keyframe_packet_to_assembly_us: u64,
     max_keyframe_packet_to_assembly_us: u64,
+    shown_through_loss: u64,
+    reorder_window_us: u64,
+    max_reorder_window_us: u64,
+    retry_after_us: u64,
+    min_gap_us: u64,
 }
 
 impl From<&VideoCounters> for VideoTransportStats {
@@ -82,6 +87,11 @@ impl From<&VideoCounters> for VideoTransportStats {
             max_request_to_keyframe_packet_us: recovery.max_request_to_keyframe_packet_us.load(Ordering::Relaxed),
             keyframe_packet_to_assembly_us: recovery.keyframe_packet_to_assembly_us.load(Ordering::Relaxed),
             max_keyframe_packet_to_assembly_us: recovery.max_keyframe_packet_to_assembly_us.load(Ordering::Relaxed),
+            shown_through_loss: video.shown_through_loss.load(Ordering::Relaxed),
+            reorder_window_us: video.reorder_window_us.load(Ordering::Relaxed),
+            max_reorder_window_us: video.max_reorder_window_us.load(Ordering::Relaxed),
+            retry_after_us: recovery.retry_after_us.load(Ordering::Relaxed),
+            min_gap_us: recovery.min_gap_us.load(Ordering::Relaxed),
         }
     }
 }
@@ -249,6 +259,7 @@ impl StreamReport {
             ("lost frames whose packets still arrived", video.late_frames),
             ("packets arriving after their frame was lost", video.late_packets),
             ("complete frames skipped waiting for IDR", video.dropped_waiting_idr),
+            ("frames shown through a loss (experimental)", video.shown_through_loss),
             ("packets recovered by FEC", video.recovered),
             ("FEC block reports sent to host", video.fec_reports_sent),
             ("IDR requests from assembly loss", video.loss_requests),
@@ -260,6 +271,29 @@ impl StreamReport {
         ];
         for (label, value) in values {
             self.field("Video transport and recovery", label, value);
+        }
+        let ms = |us: u64| us as f64 / 1000.0;
+        if video.max_reorder_window_us > 0 {
+            self.field(
+                "Video transport and recovery",
+                "reorder window (widened by late packets)",
+                format!(
+                    "{:.1} ms at the end / {:.1} ms widest",
+                    ms(video.reorder_window_us),
+                    ms(video.max_reorder_window_us)
+                ),
+            );
+        }
+        if video.retry_after_us > 0 {
+            self.field(
+                "Video transport and recovery",
+                "keyframe request timing (follows the round trip)",
+                format!(
+                    "retry after {:.0} ms, separate losses at least {:.0} ms apart",
+                    ms(video.retry_after_us),
+                    ms(video.min_gap_us)
+                ),
+            );
         }
         if video.late_packets > 0 {
             let limits = hestia_stream::video::LATE_BUCKETS_MS;

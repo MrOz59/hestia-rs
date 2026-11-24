@@ -579,6 +579,7 @@ impl LaunchedSession {
             remote_input_key: self.request.remote_input_key,
             remote_input_key_id: self.request.remote_input_key_id,
             streaming_remotely,
+            show_video_through_loss: self.settings.show_video_through_loss,
         })
     }
 }

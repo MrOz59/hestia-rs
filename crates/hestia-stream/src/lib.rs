@@ -62,6 +62,9 @@ pub struct StreamConfig {
     pub remote_input_key: [u8; 16],
     pub remote_input_key_id: u32,
     pub streaming_remotely: bool,
+    /// Experimental: keep decoding delta frames after a lost frame while
+    /// the keyframe is on its way (artifacts) instead of freezing.
+    pub show_video_through_loss: bool,
 }
 
 impl StreamConfig {

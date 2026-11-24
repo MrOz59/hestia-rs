@@ -19,6 +19,25 @@ reassembles one access unit per frame. A frame that cannot be recovered is
 dropped and everything after it is skipped until the next IDR, which is
 requested over the control stream (no reference frame invalidation yet).
 
+* **When a frame counts as lost.** An incomplete frame waits 6 ms once a
+  newer frame has started (or until three newer frames are in). Packets that
+  still arrive shortly after their frame was given up on widen that window,
+  up to 25 ms; it narrows again after two seconds without them. Waiting
+  longer would delay every real loss by as much.
+* **Keyframe request timing.** One request is in flight at a time. Until the
+  control stream has measured the round trip, an unanswered request is
+  repeated after 1 s and a fresh loss right after a recovery waits 250 ms
+  from the last request. Once it has, those follow the link: the retry after
+  RTT + 4 × its variance + two frames (200 ms to 1 s), the spacing after
+  RTT + two frames (100 to 250 ms). On a 50 ms home link that turns a lost
+  keyframe into a ~0.2 s freeze instead of a full second.
+* **Keep video moving after a loss** (Settings → Decoding, experimental).
+  Instead of holding the frames after a lost one until the keyframe lands,
+  they go on to the decoder: the picture smears where the lost frame changed
+  it and heals with the keyframe, but it keeps moving. The very first
+  keyframe, and one the decoder asked for after an error, are still waited
+  for. The report counts these frames as *frames shown through a loss*.
+
 Each complete frame becomes an `EncodedFrame` (Annex B bytes, frame number,
 keyframe flag, when its first packet arrived, and when an IDR was requested
 for it) handed to the session's `VideoSink`.
@@ -177,7 +196,8 @@ GPU path matters even more there.
 The report's video sections, from the network to the screen:
 
 * **Video transport**: packets, frames assembled, frames lost, FEC
-  recoveries, IDR requests by cause.
+  recoveries, IDR requests by cause, the reorder window, and the keyframe
+  request timing the round trip gave.
 * **Decoder totals**: the decoder in use as it calls itself (fallbacks and
   the GPU/CPU colour switch show up here), decoded, dropped, errors, resets,
   backlog drops, mean decode time (decode plus CPU colour conversion).
