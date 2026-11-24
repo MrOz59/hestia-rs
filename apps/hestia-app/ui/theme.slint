@@ -62,11 +62,17 @@ export global Theme {
     out property <color> scrim: #0a0807c8;
     out property <string> font: "Outfit";
 
-    // Session launch artwork. Theme providers can override these roles at runtime.
-    in-out property <color> launch-night: #090b1d;
-    in-out property <color> launch-accent: #9053ff;
-    in-out property <color> launch-highlight: #e6caff;
-    in-out property <color> launch-text: #f8f5ff;
+    // Session launch (session-launch.slint). Each role follows the palette
+    // above until a theme sets it at run time (`Theme` is exported to Rust),
+    // so a new palette alone already recolours the launch. Without
+    // `launch-motion` the scene holds still.
+    in-out property <color> launch-backdrop: root.bg.darker(0.25);
+    in-out property <color> launch-accent: root.accent;
+    // The flame's gold: the accent warmed toward a pale flare.
+    in-out property <color> launch-highlight: root.accent.mix(#ffd9a0, 40%);
+    in-out property <color> launch-core: root.text.mix(root.launch-highlight, 75%);
+    in-out property <color> launch-text: root.text;
+    in-out property <color> launch-muted: root.muted;
     in-out property <bool> launch-motion: true;
 
     // The window's size (set by the window). Phones in portrait are
