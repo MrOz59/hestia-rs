@@ -1,24 +1,32 @@
 //! Connects Opus decoding to a platform's PCM playback callback.
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use hestia_stream::{AudioFormat, AudioSink};
-use log::warn;
+use log::{info, warn};
 
 use crate::audio_fifo::{Fifo, SAMPLE_RATE, fill, lock};
+use crate::audio_stats::AudioStats;
 
 /// Borrowed, interleaved 48 kHz PCM. An empty slice means no decoder output yet.
 pub struct DecodedAudio<'a> {
     pub samples: &'a [f32],
     pub channels: usize,
+    /// Frames of lost audio after `samples` that the decoder could not
+    /// conceal: the playback buffer plays silence for them, faded in and out.
+    pub gap_frames: usize,
 }
 
 pub trait AudioDecoder: Send {
     fn configure(&mut self, format: &AudioFormat) -> Result<(), String>;
-    /// An empty packet signals a loss. The decoder supplies concealment or silence.
+    /// An empty packet signals a loss. The decoder supplies concealment, or
+    /// reports the lost frames as [`DecodedAudio::gap_frames`].
     fn decode(&mut self, packet: &[u8]) -> Result<DecodedAudio<'_>, String>;
     /// Release decoder resources so the backend can be configured again.
     fn cleanup(&mut self);
+    /// Where to count decoder-specific trouble (a busy hardware decoder).
+    fn attach_stats(&mut self, _stats: Arc<AudioStats>) {}
 }
 
 /// The audio callback's side of the PCM buffer.
@@ -26,6 +34,7 @@ pub trait AudioDecoder: Send {
 pub struct PcmReader {
     fifo: Arc<Mutex<Fifo>>,
     channels: usize,
+    stats: Arc<AudioStats>,
 }
 
 impl PcmReader {
@@ -34,15 +43,28 @@ impl PcmReader {
         self.channels
     }
 
+    /// Where the output counts its own side (device, callbacks).
+    pub fn stats(&self) -> &Arc<AudioStats> {
+        &self.stats
+    }
+
     /// Fill the device buffer in GameStream speaker order without waiting for decoding.
     pub fn read<T: Copy>(&self, out: &mut [T], channels: usize, convert: impl Fn(f32) -> T, silence: T) {
-        fill(&self.fifo, out, channels, channels, convert, silence);
+        fill(&self.fifo, &self.stats, out, channels, channels, convert, silence);
     }
 
     /// In a backend without speaker positions, only use the first two outputs.
     #[cfg(feature = "audio")]
     pub(crate) fn read_stereo<T: Copy>(&self, out: &mut [T], channels: usize, convert: impl Fn(f32) -> T, silence: T) {
-        fill(&self.fifo, out, channels, channels.min(2), convert, silence);
+        fill(
+            &self.fifo,
+            &self.stats,
+            out,
+            channels,
+            channels.min(2),
+            convert,
+            silence,
+        );
     }
 }
 
@@ -60,15 +82,47 @@ pub struct PlaybackSink<D: AudioDecoder, O: PcmOutput> {
     decoder: D,
     output: O,
     reader: Option<PcmReader>,
+    stats: Arc<AudioStats>,
+    /// Underruns already logged (they happen in the output callback, which
+    /// must not log; this thread reports them, with their time).
+    underruns_seen: u64,
+    underrun_logs: u64,
 }
 
 impl<D: AudioDecoder, O: PcmOutput> PlaybackSink<D, O> {
     pub fn new(decoder: D, output: O) -> Self {
+        let stats = Arc::new(AudioStats::default());
+        let mut decoder = decoder;
+        decoder.attach_stats(stats.clone());
         Self {
             decoder,
             output,
             reader: None,
+            stats,
+            underruns_seen: 0,
+            underrun_logs: 0,
         }
+    }
+
+    /// Logs underruns since the last packet, the first ones and then every
+    /// 25th, so the log shows when the audio stopped next to what the
+    /// network did.
+    fn log_underruns(&mut self) {
+        let underruns = self.stats.underruns.load(Ordering::Relaxed);
+        if underruns <= self.underruns_seen {
+            return;
+        }
+        self.underruns_seen = underruns;
+        self.underrun_logs += 1;
+        if self.underrun_logs <= 20 || self.underrun_logs.is_multiple_of(25) {
+            let target_ms = self.stats.target_frames.load(Ordering::Relaxed) * 1000 / u64::from(SAMPLE_RATE);
+            info!("audio buffer ran dry ({underruns} so far); now keeping {target_ms} ms ahead");
+        }
+    }
+
+    /// Counters for the whole playback path, kept across streams.
+    pub fn stats(&self) -> Arc<AudioStats> {
+        self.stats.clone()
     }
 }
 
@@ -87,8 +141,9 @@ impl<D: AudioDecoder, O: PcmOutput> AudioSink for PlaybackSink<D, O> {
         }
         let channels = usize::from(format.channels);
         let reader = PcmReader {
-            fifo: Arc::new(Mutex::new(Fifo::new(channels))),
+            fifo: Arc::new(Mutex::new(Fifo::new(channels, self.stats.clone()))),
             channels,
+            stats: self.stats.clone(),
         };
         if let Err(e) = self.output.start(reader.clone()) {
             self.cleanup();
@@ -103,15 +158,32 @@ impl<D: AudioDecoder, O: PcmOutput> AudioSink for PlaybackSink<D, O> {
             return;
         };
         self.output.maintain();
+        let counter = if packet.is_empty() {
+            &self.stats.concealed
+        } else {
+            &self.stats.decoded
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
         let decoded = match self.decoder.decode(packet) {
-            Ok(decoded) if !decoded.samples.is_empty() => decoded,
+            Ok(decoded) if !decoded.samples.is_empty() || decoded.gap_frames > 0 => decoded,
             Ok(_) => return,
             Err(e) => {
-                warn!("opus decode: {e}");
+                let errors = self.stats.decode_errors.fetch_add(1, Ordering::Relaxed) + 1;
+                if errors <= 5 || errors.is_multiple_of(500) {
+                    warn!("opus decode ({errors} errors): {e}");
+                }
                 return;
             }
         };
-        lock(&reader.fifo).push(decoded.samples, decoded.channels);
+        let mut fifo = lock(&reader.fifo);
+        if !decoded.samples.is_empty() {
+            fifo.push(decoded.samples, decoded.channels);
+        }
+        if decoded.gap_frames > 0 {
+            fifo.push_gap(decoded.gap_frames, decoded.channels);
+        }
+        drop(fifo);
+        self.log_underruns();
     }
 
     fn cleanup(&mut self) {
@@ -153,6 +225,7 @@ mod tests {
             Ok(DecodedAudio {
                 samples: &self.packet,
                 channels: 1,
+                gap_frames: 0,
             })
         }
 
@@ -196,6 +269,50 @@ mod tests {
         sink.setup(&AudioFormat::stereo()).unwrap();
         sink.output.reader.as_ref().unwrap().read(&mut out, 2, |s| s, 0.0);
         assert_eq!(out, [0.0; 4], "no leftovers from the previous stream");
+    }
+
+    /// A decoder that can't conceal: a lost packet is a gap.
+    #[derive(Default)]
+    struct Gappy {
+        silence: Vec<f32>,
+        packet: Vec<f32>,
+    }
+
+    impl AudioDecoder for Gappy {
+        fn configure(&mut self, _: &AudioFormat) -> Result<(), String> {
+            self.packet = vec![1.0; 240 * 2];
+            Ok(())
+        }
+
+        fn decode(&mut self, packet: &[u8]) -> Result<DecodedAudio<'_>, String> {
+            if packet == [0xff] {
+                return Err("bad packet".into());
+            }
+            Ok(DecodedAudio {
+                samples: if packet.is_empty() { &self.silence } else { &self.packet },
+                channels: 2,
+                gap_frames: if packet.is_empty() { 240 } else { 0 },
+            })
+        }
+
+        fn cleanup(&mut self) {}
+    }
+
+    #[test]
+    fn losses_become_faded_gaps_and_everything_is_counted() {
+        let mut sink = PlaybackSink::new(Gappy::default(), Output::default());
+        sink.setup(&AudioFormat::stereo()).unwrap();
+        for packet in [&[1u8][..], &[], &[1], &[0xff]] {
+            sink.submit(packet);
+        }
+        let stats = sink.stats();
+        let get = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed);
+        assert_eq!(
+            (get(&stats.decoded), get(&stats.concealed), get(&stats.decode_errors)),
+            (3, 1, 1)
+        );
+        let fifo = lock(&sink.reader.as_ref().unwrap().fifo);
+        assert_eq!(fifo.queued_frames(), 720, "packet, gap, packet");
     }
 
     #[test]

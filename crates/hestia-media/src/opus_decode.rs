@@ -62,6 +62,7 @@ impl AudioDecoder for LibOpusDecoder {
         Ok(DecodedAudio {
             samples: &self.pcm[..samples * self.channels],
             channels: self.channels,
+            gap_frames: 0,
         })
     }
 

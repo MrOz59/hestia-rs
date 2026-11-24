@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use hestia_stream::audio::AudioCounters;
 use hestia_stream::video::VideoCounters;
 
 /// Reports kept on disk; older ones are deleted.
@@ -50,6 +51,11 @@ pub struct VideoTransportStats {
     max_request_to_keyframe_packet_us: u64,
     keyframe_packet_to_assembly_us: u64,
     max_keyframe_packet_to_assembly_us: u64,
+    shown_through_loss: u64,
+    reorder_window_us: u64,
+    max_reorder_window_us: u64,
+    retry_after_us: u64,
+    min_gap_us: u64,
 }
 
 impl From<&VideoCounters> for VideoTransportStats {
@@ -82,6 +88,39 @@ impl From<&VideoCounters> for VideoTransportStats {
             max_request_to_keyframe_packet_us: recovery.max_request_to_keyframe_packet_us.load(Ordering::Relaxed),
             keyframe_packet_to_assembly_us: recovery.keyframe_packet_to_assembly_us.load(Ordering::Relaxed),
             max_keyframe_packet_to_assembly_us: recovery.max_keyframe_packet_to_assembly_us.load(Ordering::Relaxed),
+            shown_through_loss: video.shown_through_loss.load(Ordering::Relaxed),
+            reorder_window_us: video.reorder_window_us.load(Ordering::Relaxed),
+            max_reorder_window_us: video.max_reorder_window_us.load(Ordering::Relaxed),
+            retry_after_us: recovery.retry_after_us.load(Ordering::Relaxed),
+            min_gap_us: recovery.min_gap_us.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Final audio receive counters, captured after the session stops.
+#[derive(Debug, Clone, Copy)]
+pub struct AudioTransportStats {
+    packets: u64,
+    lost: u64,
+    late: u64,
+    reordered: u64,
+    duplicates: u64,
+    gaps_50ms: u64,
+    gaps_100ms: u64,
+    max_gap_us: u64,
+}
+
+impl From<&AudioCounters> for AudioTransportStats {
+    fn from(audio: &AudioCounters) -> Self {
+        Self {
+            packets: audio.packets.load(Ordering::Relaxed),
+            lost: audio.lost.load(Ordering::Relaxed),
+            late: audio.late.load(Ordering::Relaxed),
+            reordered: audio.reordered.load(Ordering::Relaxed),
+            duplicates: audio.duplicates.load(Ordering::Relaxed),
+            gaps_50ms: audio.arrival_gaps_50ms.load(Ordering::Relaxed),
+            gaps_100ms: audio.arrival_gaps_100ms.load(Ordering::Relaxed),
+            max_gap_us: audio.max_arrival_gap_us.load(Ordering::Relaxed),
         }
     }
 }
@@ -249,6 +288,7 @@ impl StreamReport {
             ("lost frames whose packets still arrived", video.late_frames),
             ("packets arriving after their frame was lost", video.late_packets),
             ("complete frames skipped waiting for IDR", video.dropped_waiting_idr),
+            ("frames shown through a loss (experimental)", video.shown_through_loss),
             ("packets recovered by FEC", video.recovered),
             ("FEC block reports sent to host", video.fec_reports_sent),
             ("IDR requests from assembly loss", video.loss_requests),
@@ -260,6 +300,29 @@ impl StreamReport {
         ];
         for (label, value) in values {
             self.field("Video transport and recovery", label, value);
+        }
+        let ms = |us: u64| us as f64 / 1000.0;
+        if video.max_reorder_window_us > 0 {
+            self.field(
+                "Video transport and recovery",
+                "reorder window (widened by late packets)",
+                format!(
+                    "{:.1} ms at the end / {:.1} ms widest",
+                    ms(video.reorder_window_us),
+                    ms(video.max_reorder_window_us)
+                ),
+            );
+        }
+        if video.retry_after_us > 0 {
+            self.field(
+                "Video transport and recovery",
+                "keyframe request timing (follows the round trip)",
+                format!(
+                    "retry after {:.0} ms, separate losses at least {:.0} ms apart",
+                    ms(video.retry_after_us),
+                    ms(video.min_gap_us)
+                ),
+            );
         }
         if video.late_packets > 0 {
             let limits = hestia_stream::video::LATE_BUCKETS_MS;
@@ -325,6 +388,30 @@ impl StreamReport {
                 "recovered keyframes already arriving before request",
                 video.keyframes_already_arriving,
             );
+        }
+    }
+
+    /// The network side of the audio (the playback side comes from the
+    /// client's audio backend).
+    pub fn audio_transport(&mut self, audio: &AudioTransportStats) {
+        let values = [
+            ("packets received", audio.packets.to_string()),
+            ("packets that never came", audio.lost.to_string()),
+            ("packets too late or repeated (dropped)", audio.late.to_string()),
+            ("packets put back in order", audio.reordered.to_string()),
+            ("duplicate packets", audio.duplicates.to_string()),
+            (
+                "silences between packets (50 ms+ / 100 ms+)",
+                format!(
+                    "{} / {} (longest {:.0} ms)",
+                    audio.gaps_50ms,
+                    audio.gaps_100ms,
+                    audio.max_gap_us as f64 / 1000.0
+                ),
+            ),
+        ];
+        for (label, value) in values {
+            self.field("Audio", label, value);
         }
     }
 

@@ -35,6 +35,108 @@ pub(super) struct ActiveStream {
     report: SharedReport,
     decode: Arc<DecodeStats>,
     present: Arc<Presentation>,
+    /// The audio playback path's counters, for the report at the end.
+    audio: Arc<hestia_media::AudioStats>,
+    /// Bluetooth, Wi-Fi and the audio route while the stream runs.
+    radio: Arc<Mutex<RadioWatch>>,
+}
+
+/// How often Bluetooth and the Wi-Fi link are read during a stream (the
+/// audio route is checked every second, and a change reads them at once).
+const RADIO_POLL_SECS: u32 = 5;
+
+/// Bluetooth, Wi-Fi and the audio route while a stream runs. Headphones
+/// connected mid-stream are what a report with stalls has to show, so the
+/// changes go to the log and the report's events, with their time.
+#[derive(Default)]
+struct RadioWatch {
+    /// As the stream started; empty where the platform can't tell.
+    start: Vec<(String, String)>,
+    /// As last read.
+    last: Vec<(String, String)>,
+    /// The audio output last seen (0: not open yet).
+    device: i64,
+    secs: u32,
+    bluetooth_on_secs: u32,
+    bluetooth_audio_secs: u32,
+    /// The helper's note about the shared band, the first time it came.
+    note: Option<String>,
+}
+
+impl RadioWatch {
+    fn begin(&mut self, radio: Vec<(String, String)>) {
+        self.note = platform::radio_value(&radio, "Note").map(str::to_owned);
+        self.last = radio.clone();
+        self.start = radio;
+    }
+
+    /// One second of the stream, with the audio output now: what changed,
+    /// for the log. `route` names an output, `read` reads the radios.
+    fn tick(
+        &mut self,
+        device: i64,
+        route: impl FnOnce(i64) -> Option<String>,
+        read: impl FnOnce() -> Vec<(String, String)>,
+    ) -> Vec<String> {
+        if self.start.is_empty() {
+            return Vec::new();
+        }
+        self.secs += 1;
+        if platform::radio_value(&self.last, "Bluetooth") == Some("on") {
+            self.bluetooth_on_secs += 1;
+        }
+        if platform::radio_value(&self.last, "Bluetooth audio outputs").is_some_and(|o| o != "none") {
+            self.bluetooth_audio_secs += 1;
+        }
+        let mut changes = Vec::new();
+        let moved = device > 0 && device != self.device;
+        if moved {
+            self.device = device;
+            if let Some(name) = route(device) {
+                changes.push(format!("audio output: {name}"));
+            }
+        }
+        if moved || self.secs.is_multiple_of(RADIO_POLL_SECS) {
+            let now = read();
+            for (label, value) in &now {
+                let before = platform::radio_value(&self.last, label);
+                let changed = match label.as_str() {
+                    // The signal always moves; the band is what matters.
+                    "Wi-Fi" => before.map(platform::wifi_band) != Some(platform::wifi_band(value)),
+                    "Note" => {
+                        self.note.get_or_insert_with(|| value.clone());
+                        false
+                    }
+                    _ => before != Some(value.as_str()),
+                };
+                if changed {
+                    changes.push(format!("{label}: {value}"));
+                }
+            }
+            if !now.is_empty() {
+                self.last = now;
+            }
+        }
+        changes
+    }
+
+    /// The report's summary lines for the radios over the whole stream.
+    fn totals(&self) -> Vec<(&'static str, String)> {
+        let mut lines = Vec::new();
+        let of = |secs: u32| format!("{secs} s of {} s", self.secs);
+        if self.bluetooth_on_secs > 0 {
+            lines.push(("Bluetooth on for", of(self.bluetooth_on_secs)));
+        }
+        if self.bluetooth_audio_secs > 0 {
+            lines.push(("Bluetooth audio connected for", of(self.bluetooth_audio_secs)));
+        }
+        if platform::radio_value(&self.start, "Note").is_none()
+            && let Some(note) = &self.note
+        {
+            lines.push(("Note", note.clone()));
+        }
+        lines
+    }
 }
 
 /// The session's input side: everything for the host goes through here, so
@@ -182,9 +284,32 @@ struct Listener {
     provenance_requested: AtomicBool,
     /// Seconds in a row with frames arriving and none decoded.
     undecoded_secs: AtomicU32,
+    /// The audio playback path's counters (its output, for the radio watch).
+    audio: Arc<hestia_media::AudioStats>,
+    radio: Arc<Mutex<RadioWatch>>,
 }
 
 impl Listener {
+    /// Once a second: Bluetooth turned on, headphones connected, the audio
+    /// moving to them, or the Wi-Fi changing band go to the log and the
+    /// report's events.
+    fn watch_radio(&self) {
+        let device = self.audio.device_id.load(Ordering::Relaxed);
+        let changes = self.radio.lock().unwrap_or_else(|p| p.into_inner()).tick(
+            device,
+            platform::audio_output_name,
+            platform::radio_summary,
+        );
+        if changes.is_empty() {
+            return;
+        }
+        let mut r = report::lock(&self.report);
+        for change in changes {
+            info!("during the stream: {change}");
+            r.event(change);
+        }
+    }
+
     /// Once frames flow and the RTT has been measured, asks Hermes how it
     /// serves the stream (capture path, encoder, GPU) and shows it briefly.
     fn request_provenance(&self, rtt_ms: u32) {
@@ -350,6 +475,7 @@ impl SessionListener for Listener {
                 if self.first_frame.load(Ordering::Relaxed) {
                     self.request_provenance(stats.rtt_ms);
                 }
+                self.watch_radio();
                 if let Some((sample, verdict)) = self.sample(stats) {
                     // Frames arrive, none decode: say so on the picture even
                     // with statistics hidden (it says "Waiting for video").
@@ -451,6 +577,8 @@ impl Controller {
             }),
         );
         let decode = sink.stats();
+        let (audio_sink, audio) = hestia_media::default_audio_sink_with_stats();
+        let radio = Arc::new(Mutex::new(RadioWatch::default()));
         let stream_width = config.width;
         let size = format!("{}×{}", config.width, config.height);
         let listener = Arc::new(Listener {
@@ -474,6 +602,8 @@ impl Controller {
             first_frame: AtomicBool::new(false),
             provenance_requested: AtomicBool::new(false),
             undecoded_secs: AtomicU32::new(0),
+            audio: audio.clone(),
+            radio: radio.clone(),
         });
         // Android direct video: the helper adds the surface now, while the
         // RTSP handshake runs; the decoder waits a little for it.
@@ -494,12 +624,7 @@ impl Controller {
             ui.set_stream_status("Waiting for video…".into());
         });
         let session = host
-            .connect(
-                config,
-                Box::new(sink),
-                hestia_media::default_audio_sink(),
-                listener.clone(),
-            )
+            .connect(config, Box::new(sink), audio_sink, listener.clone())
             .map_err(|e| {
                 present.close();
                 e.to_string()
@@ -514,6 +639,18 @@ impl Controller {
         info!("streaming {size} {codec} from {}", launched.host.name);
         *listener.video.lock().unwrap_or_else(|p| p.into_inner()) = format!("{size}@{} {codec}", launched.request.fps);
         session.report_negotiation(&mut report::lock(&session_report));
+        // Bluetooth shares 2.4 GHz with Wi-Fi: a report with stalls needs to
+        // say whether it was on, and on which band the stream came in.
+        let at_start = platform::radio_summary();
+        if !at_start.is_empty() {
+            let summary: Vec<String> = at_start.iter().map(|(k, v)| format!("{k}: {v}")).collect();
+            info!("radio at stream start: {}", summary.join("; "));
+            let mut r = report::lock(&session_report);
+            for (label, value) in &at_start {
+                r.field("Radio", label, value);
+            }
+        }
+        radio.lock().unwrap_or_else(|p| p.into_inner()).begin(at_start);
 
         // A stream replacing another keeps the laid-out view and its focus
         // (no new layout or focus event comes for it).
@@ -551,6 +688,8 @@ impl Controller {
             report: session_report,
             decode,
             present,
+            audio,
+            radio,
         });
         if let Some(previous) = previous {
             previous.present.close();
@@ -600,13 +739,48 @@ impl Controller {
                 report: session_report,
                 decode,
                 present,
+                audio,
+                radio,
                 ..
             } = active;
-            let video_stats = session.stop_with_stats();
+            let totals = session.stop_with_stats();
+            let radio = std::mem::take(&mut *radio.lock().unwrap_or_else(|p| p.into_inner()));
+            let radio_at_end = if radio.start.is_empty() {
+                Vec::new()
+            } else {
+                platform::radio_summary()
+            };
+            let audio_device = audio.device_id.load(Ordering::Relaxed);
+            let audio_route = (audio_device > 0)
+                .then(|| platform::audio_output_name(audio_device))
+                .flatten();
+            if let Some(route) = &audio_route {
+                info!("audio played on {route} (device {audio_device})");
+            }
             {
                 let mut r = report::lock(&session_report);
-                if let Some(video) = video_stats {
+                if let Some(video) = totals.video {
                     r.video_transport(&video);
+                }
+                if let Some(transport) = totals.audio {
+                    r.audio_transport(&transport);
+                }
+                for (label, value) in audio.report() {
+                    r.field("Audio playback", label, value);
+                }
+                if let Some(route) = audio_route {
+                    r.field("Audio playback", "output", route);
+                }
+                // What differs from the start (the Wi-Fi signal always
+                // does), and how long Bluetooth was on: the changes in
+                // between are in the events.
+                for (label, value) in radio_at_end {
+                    if label != "Note" && platform::radio_value(&radio.start, &label) != Some(value.as_str()) {
+                        r.field("Radio", &format!("{label} at the end"), value);
+                    }
+                }
+                for (label, value) in radio.totals() {
+                    r.field("Radio", label, value);
                 }
                 r.decoder_totals(
                     decode.decoded.load(Ordering::Relaxed),
@@ -1342,5 +1516,85 @@ mod tests {
         // Its release went to another window; then S is typed on its own.
         assert_eq!(route_key(&keys, &mut swallowed, s, true, NONE), KeyRoute::Host);
         assert_eq!(route_key(&keys, &mut swallowed, s, false, NONE), KeyRoute::Host);
+    }
+
+    fn radio(bluetooth: &str, outputs: &str, wifi: &str) -> Vec<(String, String)> {
+        [
+            ("Bluetooth", bluetooth),
+            ("Bluetooth audio outputs", outputs),
+            ("Wi-Fi", wifi),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect()
+    }
+
+    #[test]
+    fn radio_watch_reports_bluetooth_turning_on_mid_stream() {
+        let wifi = |dbm: i32| format!("2.4 GHz (channel 9, 2452 MHz), {dbm} dBm");
+        let mut w = RadioWatch::default();
+        w.begin(radio("off", "none", &wifi(-52)));
+        let speaker = |_| Some("built-in speaker".to_owned());
+        let headphones = |_| Some("Bluetooth A2DP".to_owned());
+        // Second 1: the output opens (and the radios are read at once); the
+        // signal moving is not a change.
+        assert_eq!(
+            w.tick(3, speaker, || radio("off", "none", &wifi(-51))),
+            ["audio output: built-in speaker"]
+        );
+        // Seconds 2-4: only the output is checked.
+        for _ in 2..5 {
+            assert!(w.tick(3, speaker, || unreachable!("read every 5 s")).is_empty());
+        }
+        // Second 5: Bluetooth was turned on.
+        let mut on = radio("on", "none", &wifi(-50));
+        on.push(("Note".into(), "shared band".into()));
+        assert_eq!(w.tick(3, speaker, || on.clone()), ["Bluetooth: on"]);
+        // Second 6: headphones connect and the audio moves to them.
+        assert_eq!(
+            w.tick(10723, headphones, || radio("on", "Bluetooth A2DP", &wifi(-49))),
+            [
+                "audio output: Bluetooth A2DP",
+                "Bluetooth audio outputs: Bluetooth A2DP"
+            ]
+        );
+        for _ in 7..11 {
+            assert!(
+                w.tick(10723, headphones, || radio("on", "Bluetooth A2DP", &wifi(-49)))
+                    .is_empty()
+            );
+        }
+        // Second 11: Bluetooth off, and the phone moved to 5 GHz.
+        assert_eq!(
+            w.tick(3, speaker, || radio(
+                "off",
+                "none",
+                "5 GHz (channel 36, 5180 MHz), -60 dBm"
+            )),
+            [
+                "audio output: built-in speaker",
+                "Bluetooth: off",
+                "Bluetooth audio outputs: none",
+                "Wi-Fi: 5 GHz (channel 36, 5180 MHz), -60 dBm"
+            ]
+        );
+        assert_eq!(
+            w.totals(),
+            [
+                ("Bluetooth on for", "6 s of 11 s".to_owned()),
+                ("Bluetooth audio connected for", "5 s of 11 s".to_owned()),
+                ("Note", "shared band".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn radio_watch_stays_quiet_where_the_platform_cannot_tell() {
+        let mut w = RadioWatch::default();
+        w.begin(Vec::new());
+        for _ in 0..10 {
+            assert!(w.tick(3, |_| unreachable!(), || unreachable!()).is_empty());
+        }
+        assert!(w.totals().is_empty());
     }
 }

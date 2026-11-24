@@ -10,6 +10,7 @@ use ndk_sys as aaudio;
 
 use crate::audio_fifo::SAMPLE_RATE;
 use crate::audio_playback::{PcmOutput, PcmReader};
+use crate::audio_stats::AudioStats;
 
 #[derive(Default)]
 pub struct AAudioOutput {
@@ -31,6 +32,7 @@ impl PcmOutput for AAudioOutput {
             && let Some(reader) = &self.reader
         {
             self.stream = None;
+            reader.stats().reopened.fetch_add(1, Ordering::Relaxed);
             match open_output(reader, &self.lost) {
                 Ok(output) => self.stream = Some(output),
                 Err(e) => warn!("reopening audio output failed: {e}"),
@@ -54,6 +56,7 @@ struct CallbackState {
 struct Output {
     stream: *mut aaudio::AAudioStream,
     _callback: Box<CallbackState>,
+    stats: Arc<AudioStats>,
 }
 
 // SAFETY: the producer thread owns all stream operations. AAudio's callback
@@ -64,6 +67,10 @@ impl Drop for Output {
     fn drop(&mut self) {
         // SAFETY: the stream is live and close waits for its callbacks to finish.
         unsafe {
+            let xruns = aaudio::AAudioStream_getXRunCount(self.stream);
+            self.stats
+                .device_xruns
+                .fetch_add(xruns.max(0) as u64, Ordering::Relaxed);
             aaudio::AAudioStream_requestStop(self.stream);
             aaudio::AAudioStream_close(self.stream);
         }
@@ -151,6 +158,7 @@ fn open_stream(
         let output = Output {
             stream,
             _callback: callback,
+            stats: reader.stats().clone(),
         };
         if aaudio::AAudioStream_getChannelCount(stream) != channels as i32
             || aaudio::AAudioStream_getSampleRate(stream) != SAMPLE_RATE as i32
@@ -159,10 +167,19 @@ fn open_stream(
             return Err("AAudio returned an unexpected PCM format".into());
         }
         check("start", aaudio::AAudioStream_requestStart(stream))?;
+        let device = aaudio::AAudioStream_getDeviceId(stream);
+        let burst = aaudio::AAudioStream_getFramesPerBurst(stream);
+        let buffer = aaudio::AAudioStream_getBufferSizeInFrames(stream);
+        let stats = reader.stats();
+        stats.device_id.store(i64::from(device), Ordering::Relaxed);
+        stats.burst_frames.store(burst.max(0) as u64, Ordering::Relaxed);
+        stats.buffer_frames.store(buffer.max(0) as u64, Ordering::Relaxed);
         info!(
-            "audio output: AAudio {SAMPLE_RATE} Hz (host {} ch, stream {channels} ch, burst {} frames)",
+            "audio output: AAudio {SAMPLE_RATE} Hz (host {} ch, stream {channels} ch, burst {burst} frames, \
+             buffer {buffer} frames, device {device}, performance mode {}, sharing mode {})",
             reader.channels(),
-            aaudio::AAudioStream_getFramesPerBurst(stream)
+            aaudio::AAudioStream_getPerformanceMode(stream),
+            aaudio::AAudioStream_getSharingMode(stream),
         );
         Ok(output)
     }
@@ -187,6 +204,7 @@ unsafe extern "C" fn render(
         // buffer whose format was checked before playback started.
         let state = unsafe { &*userdata.cast::<CallbackState>() };
         let out = unsafe { std::slice::from_raw_parts_mut(data.cast::<f32>(), frames as usize * state.channels) };
+        state.reader.stats().note_callback(frames as u64);
         state.reader.read(out, state.channels, |s| s.clamp(-1.0, 1.0), 0.0);
     }
     aaudio::AAUDIO_CALLBACK_RESULT_CONTINUE as _
