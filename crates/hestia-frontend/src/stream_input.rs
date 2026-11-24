@@ -442,13 +442,18 @@ fn trackpad_events(outputs: Vec<touch::Output>) -> impl Iterator<Item = InputEve
     })
 }
 
-pub(crate) fn key(text: &str, pressed: bool, modifiers: Modifiers) -> Option<InputEvent> {
+pub(crate) fn key(text: &str, pressed: bool, mut modifiers: Modifiers) -> Option<InputEvent> {
     match keymap::map(text) {
-        Some(Mapped::Key(key)) => Some(InputEvent::Key {
-            key,
-            pressed,
-            modifiers,
-        }),
+        Some(Mapped::Key { code, implied_shift }) => {
+            // A printable fallback can arrive without the Shift that produced it.
+            // For shortcuts, use the modifiers the toolkit actually reported.
+            modifiers.shift |= implied_shift && !(modifiers.ctrl || modifiers.alt || modifiers.meta);
+            Some(InputEvent::Key {
+                key: code,
+                pressed,
+                modifiers,
+            })
+        }
         Some(Mapped::Text(text)) if pressed => Some(InputEvent::Text(text)),
         _ => None,
     }
@@ -575,8 +580,25 @@ pub(crate) fn pen(pointer: &RawPointer, (x, y): (f32, f32), (width, height): (f3
     })
 }
 
-pub(crate) fn ime(event: ImeEvent, mut emit: impl FnMut(InputEvent)) {
+pub(crate) fn ime(event: ImeEvent, hermes: bool, mut emit: impl FnMut(InputEvent)) {
     match event {
+        ImeEvent::Text(text) if hermes && text.bytes().all(|byte| (b' '..=b'~').contains(&byte)) => {
+            // Hermes' Linux keyboard can inject UTF-8 via Ctrl+Shift+U and
+            // Return. A greeter can see the Return as a submit. Use the same
+            // US-layout key mapping as the soft keyboard's ordinary keys.
+            for (key, shift) in text.chars().filter_map(vk::from_char) {
+                for pressed in [true, false] {
+                    emit(InputEvent::Key {
+                        key,
+                        pressed,
+                        modifiers: Modifiers {
+                            shift,
+                            ..Modifiers::default()
+                        },
+                    });
+                }
+            }
+        }
         ImeEvent::Text(text) => typing::edit_events("", &text).into_iter().for_each(emit),
         ImeEvent::DeleteBefore(count) => {
             for _ in 0..count.min(256) {
@@ -596,6 +618,113 @@ pub(crate) fn scroll(dx: f32, dy: f32) -> Option<InputEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn character_fallback_preserves_shifted_text_and_shortcut_modifiers() {
+        let none = Modifiers::default();
+        let ctrl = Modifiers { ctrl: true, ..none };
+        let shift = Modifiers { shift: true, ..none };
+        for (text, code, modifiers, expected) in [
+            ("!", b'1' as u16, none, shift),
+            ("A", b'A' as u16, none, shift),
+            ("a", b'A' as u16, none, none),
+            ("C", b'C' as u16, ctrl, ctrl),
+            ("\t", vk::TAB, shift, shift),
+        ] {
+            for pressed in [true, false] {
+                assert_eq!(
+                    super::key(text, pressed, modifiers),
+                    Some(InputEvent::Key {
+                        key: code,
+                        pressed,
+                        modifiers: expected,
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hermes_ime_commits_ascii_as_key_taps_with_implied_shift() {
+        let mut keys = Vec::new();
+        ime(ImeEvent::Text("aA! ".into()), true, |event| match event {
+            InputEvent::Key {
+                key,
+                pressed,
+                modifiers,
+            } => keys.push((key, pressed, modifiers.shift)),
+            _ => panic!("expected keyboard events"),
+        });
+        assert_eq!(
+            keys,
+            [
+                (b'A' as u16, true, false),
+                (b'A' as u16, false, false),
+                (b'A' as u16, true, true),
+                (b'A' as u16, false, true),
+                (b'1' as u16, true, true),
+                (b'1' as u16, false, true),
+                (vk::SPACE, true, false),
+                (vk::SPACE, false, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn ime_preserves_utf8_for_other_hosts_and_non_ascii_text() {
+        for (text, hermes) in [("A!", false), ("café", true), ("a\nb", true)] {
+            let mut events = Vec::new();
+            ime(ImeEvent::Text(text.into()), hermes, |event| events.push(event));
+            assert!(matches!(&events[..], [InputEvent::Text(actual)] if actual == text));
+        }
+    }
+
+    #[test]
+    fn hermes_ime_never_submits_printable_ascii() {
+        let text: String = (' '..='~').collect();
+        let mut events = Vec::new();
+        ime(ImeEvent::Text(text.clone()), true, |event| events.push(event));
+        assert_eq!(events.len(), text.len() * 2);
+        for pair in events.chunks_exact(2) {
+            let [
+                InputEvent::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                },
+                InputEvent::Key {
+                    key: released,
+                    pressed: false,
+                    modifiers: released_modifiers,
+                },
+            ] = pair
+            else {
+                panic!("expected a key press and release for each printable character");
+            };
+            assert_ne!(*key, vk::RETURN);
+            assert_eq!(key, released);
+            assert_eq!(modifiers, released_modifiers);
+        }
+
+        events.clear();
+        ime(ImeEvent::DeleteBefore(1), true, |event| events.push(event));
+        assert_eq!(events, typing::special_key_events("backspace"));
+        assert!(matches!(
+            &typing::special_key_events("enter")[..],
+            [
+                InputEvent::Key {
+                    key: vk::RETURN,
+                    pressed: true,
+                    ..
+                },
+                InputEvent::Key {
+                    key: vk::RETURN,
+                    pressed: false,
+                    ..
+                }
+            ]
+        ));
+    }
 
     #[test]
     fn direct_touch_sends_position_before_click_and_clamps_to_video() {
