@@ -28,6 +28,9 @@ const REORDER_DEPTH: usize = 4;
 const REORDER_WAIT: Duration = Duration::from_millis(25);
 /// A jump this far ahead is the stream starting over, not a gap.
 const MAX_AHEAD: u16 = 64;
+/// The longest jump ahead counted as packets lost (10 s of 5 ms packets);
+/// a longer one is the host starting over.
+const MAX_OUTAGE: u16 = 2000;
 /// The most packets concealed for one gap. A longer outage is left to the
 /// playback buffer, which plays silence and buffers more afterwards.
 const MAX_CONCEALED: usize = 16;
@@ -253,7 +256,13 @@ impl Reorder {
         }
         if offset >= MAX_AHEAD {
             // The stream jumped ahead: play what is waiting, start over here.
+            // An outage (Wi-Fi gone quiet for half a second) counts as lost;
+            // the playback buffer plays silence for it.
             self.release_all(out);
+            let skipped = seq.wrapping_sub(self.next.unwrap_or(seq));
+            if skipped <= MAX_OUTAGE {
+                self.stats.lost += u64::from(skipped);
+            }
             self.next = Some(seq);
             offset = 0;
         }
@@ -395,10 +404,14 @@ mod tests {
         r.release(t + REORDER_WAIT, &mut out);
         assert_eq!(out.iter().filter(|p| p.is_none()).count(), MAX_CONCEALED);
         assert_eq!(r.stats.lost, 39);
-        // 1000 ahead: a restart, not 1000 losses.
-        assert_eq!(feed(&mut r, 1141, t), vec![Some(1141u16 as u8)]);
-        assert_eq!(r.stats.lost, 39);
-        assert_eq!(feed(&mut r, 1142, t), vec![Some(1142u16 as u8)]);
+        // 101 missing (half a second without packets): played on from
+        // there, and counted as lost.
+        assert_eq!(feed(&mut r, 242, t), vec![Some(242)]);
+        assert_eq!(r.stats.lost, 140);
+        // 5000 ahead: a restart, not 5000 losses.
+        assert_eq!(feed(&mut r, 5243, t), vec![Some(5243u16 as u8)]);
+        assert_eq!(r.stats.lost, 140);
+        assert_eq!(feed(&mut r, 5244, t), vec![Some(5244u16 as u8)]);
     }
 
     #[test]
