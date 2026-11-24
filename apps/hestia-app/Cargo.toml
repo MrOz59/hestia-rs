@@ -79,6 +79,15 @@ name = "android.permission.ACCESS_NETWORK_STATE"
 [[package.metadata.android.uses_permission]]
 name = "android.permission.ACCESS_WIFI_STATE"
 
+# Wi-Fi locks that keep the radio out of power save during a stream.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.WAKE_LOCK"
+
+# Whether Bluetooth is on, for the session report.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.BLUETOOTH"
+max_sdk_version = 30
+
 # Controller rumble on the phone when the controller has no motor.
 [[package.metadata.android.uses_permission]]
 name = "android.permission.VIBRATE"

@@ -98,6 +98,7 @@ fn run_output(reader: PcmReader, stop: Arc<AtomicBool>, ready: mpsc::Sender<Resu
             device.build_output_stream(
                 &stream_config,
                 move |out: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                    reader.stats().note_callback((out.len() / channels.max(1)) as u64);
                     reader.read_stereo(out, channels, |s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16, 0)
                 },
                 on_error,
@@ -108,7 +109,10 @@ fn run_output(reader: PcmReader, stop: Arc<AtomicBool>, ready: mpsc::Sender<Resu
             let reader = reader.clone();
             device.build_output_stream(
                 &stream_config,
-                move |out: &mut [f32], _: &cpal::OutputCallbackInfo| reader.read_stereo(out, channels, |s| s, 0.0),
+                move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    reader.stats().note_callback((out.len() / channels.max(1)) as u64);
+                    reader.read_stereo(out, channels, |s| s, 0.0)
+                },
                 on_error,
                 None,
             )

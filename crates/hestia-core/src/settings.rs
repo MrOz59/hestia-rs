@@ -200,6 +200,12 @@ pub struct StreamSettings {
     /// the picture going through the UI's frame. Off, or when that surface
     /// can't be set up: the zero-copy or CPU path above.
     pub direct_video: bool,
+    /// Experimental: when a frame is lost, keep decoding the frames after
+    /// it while the keyframe that repairs the picture is on its way. The
+    /// picture smears where the lost frame changed it, but it keeps moving
+    /// instead of freezing (lossy Wi-Fi, hosts without reference frame
+    /// invalidation).
+    pub show_video_through_loss: bool,
     /// Touch mode; unset in settings saved before it existed, which only
     /// had `touch_trackpad` (see [`StreamSettings::touch`]).
     pub touch_mode: Option<TouchMode>,
@@ -235,6 +241,7 @@ impl Default for StreamSettings {
             hardware_decoding: true,
             gpu_video: true,
             direct_video: true,
+            show_video_through_loss: false,
             touch_mode: None,
             onscreen_controller: false,
             orientation: StreamOrientation::Landscape,
@@ -292,6 +299,11 @@ impl StreamSettings {
             "Settings",
             "hardware decoding",
             if self.hardware_decoding { "on" } else { "off" },
+        );
+        r.field(
+            "Settings",
+            "video through losses",
+            if self.show_video_through_loss { "on" } else { "off" },
         );
         let on = if self.gpu_video { "on" } else { "off" };
         if cfg!(target_os = "android") {

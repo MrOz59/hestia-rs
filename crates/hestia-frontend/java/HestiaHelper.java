@@ -1,14 +1,21 @@
 package com.mroz59.hestia;
 
 import android.app.Activity;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothManager;
 import android.content.ClipData;
 import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
 import android.graphics.PixelFormat;
+import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
 import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
+import android.net.wifi.ScanResult;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.PersistableBundle;
 import android.os.VibrationEffect;
@@ -30,6 +37,8 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.FrameLayout;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 /**
  * Hestia RS's Android glue that needs the UI thread or a Java class:
@@ -88,6 +97,280 @@ public final class HestiaHelper {
     }
 
     private static KeyboardView sKeyboardView;
+
+    private static WifiManager.WifiLock sHighPerfWifiLock;
+    private static WifiManager.WifiLock sLowLatencyWifiLock;
+
+    /**
+     * Keeps Wi-Fi out of power save while a stream runs, as Moonlight does.
+     * In power save the radio naps between beacons: packets wait at the
+     * access point, arrive in bursts, and whole video frames go missing.
+     * The low-latency lock (Android 10+) applies while the app is in the
+     * foreground with the screen on, which a stream is. Returns what it
+     * did, for the log.
+     */
+    @SuppressWarnings("deprecation")
+    public static String setWifiLowLatency(final Activity activity, final boolean on) {
+        try {
+            if (!on) {
+                boolean held = false;
+                if (sLowLatencyWifiLock != null && sLowLatencyWifiLock.isHeld()) {
+                    sLowLatencyWifiLock.release();
+                    held = true;
+                }
+                if (sHighPerfWifiLock != null && sHighPerfWifiLock.isHeld()) {
+                    sHighPerfWifiLock.release();
+                    held = true;
+                }
+                return held ? "released" : "not held";
+            }
+            WifiManager wifi = (WifiManager) activity.getApplicationContext()
+                    .getSystemService(Context.WIFI_SERVICE);
+            if (wifi == null) {
+                return "no Wi-Fi on this device";
+            }
+            if (sHighPerfWifiLock == null) {
+                sHighPerfWifiLock = wifi.createWifiLock(
+                        WifiManager.WIFI_MODE_FULL_HIGH_PERF, "Hestia high performance");
+                sHighPerfWifiLock.setReferenceCounted(false);
+            }
+            sHighPerfWifiLock.acquire();
+            if (Build.VERSION.SDK_INT >= 29) {
+                if (sLowLatencyWifiLock == null) {
+                    sLowLatencyWifiLock = wifi.createWifiLock(
+                            WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "Hestia low latency");
+                    sLowLatencyWifiLock.setReferenceCounted(false);
+                }
+                sLowLatencyWifiLock.acquire();
+                return "low-latency lock held";
+            }
+            return "high-performance lock held (low latency needs Android 10)";
+        } catch (RuntimeException e) {
+            // Some devices refuse the lock even with WAKE_LOCK granted.
+            return "lock refused: " + e;
+        }
+    }
+
+    /**
+     * The radios that share the air with a stream, for the session report,
+     * as "label\tvalue" lines: Bluetooth on or off, the Bluetooth audio
+     * outputs connected (on 2.4 GHz they take air time from Wi-Fi, and many
+     * phones share one antenna between the two), and the Wi-Fi link's band,
+     * signal and rate. Device names are left out, since reports get shared.
+     */
+    public static String radioSummary(final Activity activity) {
+        String bluetooth = bluetoothState(activity);
+        Set<String> outputs = bluetoothOutputs(activity);
+        WifiLink wifi = wifiLink(activity);
+        StringBuilder out = new StringBuilder();
+        out.append("Bluetooth\t").append(bluetooth).append('\n');
+        out.append("Bluetooth audio outputs\t")
+                .append(outputs.isEmpty() ? "none" : String.join(", ", outputs))
+                .append('\n');
+        out.append("Wi-Fi\t").append(wifi.summary).append('\n');
+        if (wifi.band24 && "on".equals(bluetooth)) {
+            out.append("Note\tBluetooth is on and Wi-Fi is on 2.4 GHz: they share air time,")
+                    .append(" which shows up as short two-way stalls (worst with Bluetooth audio);")
+                    .append(" a 5 GHz network avoids most of it\n");
+        }
+        return out.toString();
+    }
+
+    /** What an audio output is ("Bluetooth A2DP", "built-in speaker"), by id. */
+    public static String audioOutputName(final Activity activity, final int id) {
+        if (id <= 0) {
+            return "unspecified";
+        }
+        try {
+            AudioManager audio = (AudioManager) activity.getSystemService(Context.AUDIO_SERVICE);
+            if (audio != null) {
+                for (AudioDeviceInfo device : audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+                    if (device.getId() == id) {
+                        return audioDeviceKind(device.getType());
+                    }
+                }
+            }
+            return "device " + id + " (gone)";
+        } catch (RuntimeException e) {
+            return "device " + id + " (" + e.getClass().getSimpleName() + ")";
+        }
+    }
+
+    private static String bluetoothState(Activity activity) {
+        try {
+            BluetoothManager manager = (BluetoothManager) activity.getSystemService(Context.BLUETOOTH_SERVICE);
+            BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
+            if (adapter == null) {
+                return "not on this device";
+            }
+            // Needs no runtime permission (BLUETOOTH, install-time, up to Android 11).
+            switch (adapter.getState()) {
+                case BluetoothAdapter.STATE_ON:
+                    return "on";
+                case BluetoothAdapter.STATE_OFF:
+                    return "off";
+                case BluetoothAdapter.STATE_TURNING_ON:
+                    return "turning on";
+                case BluetoothAdapter.STATE_TURNING_OFF:
+                    return "turning off";
+                default:
+                    return "state " + adapter.getState();
+            }
+        } catch (RuntimeException e) {
+            return "unknown (" + e.getClass().getSimpleName() + ")";
+        }
+    }
+
+    private static Set<String> bluetoothOutputs(Activity activity) {
+        Set<String> found = new LinkedHashSet<>();
+        try {
+            AudioManager audio = (AudioManager) activity.getSystemService(Context.AUDIO_SERVICE);
+            if (audio == null) {
+                return found;
+            }
+            for (AudioDeviceInfo device : audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+                if (isBluetooth(device.getType())) {
+                    found.add(audioDeviceKind(device.getType()));
+                }
+            }
+        } catch (RuntimeException e) {
+            found.add("unknown (" + e.getClass().getSimpleName() + ")");
+        }
+        return found;
+    }
+
+    private static boolean isBluetooth(int type) {
+        switch (type) {
+            case AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+            case AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
+            case AudioDeviceInfo.TYPE_HEARING_AID:
+            case AudioDeviceInfo.TYPE_BLE_HEADSET:
+            case AudioDeviceInfo.TYPE_BLE_SPEAKER:
+            case AudioDeviceInfo.TYPE_BLE_BROADCAST:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static String audioDeviceKind(int type) {
+        switch (type) {
+            case AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+                return "Bluetooth A2DP";
+            case AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
+                return "Bluetooth SCO (call audio)";
+            case AudioDeviceInfo.TYPE_HEARING_AID:
+                return "Bluetooth hearing aid";
+            case AudioDeviceInfo.TYPE_BLE_HEADSET:
+                return "Bluetooth LE Audio headset";
+            case AudioDeviceInfo.TYPE_BLE_SPEAKER:
+                return "Bluetooth LE Audio speaker";
+            case AudioDeviceInfo.TYPE_BLE_BROADCAST:
+                return "Bluetooth LE Audio broadcast";
+            case AudioDeviceInfo.TYPE_BUILTIN_SPEAKER:
+            case AudioDeviceInfo.TYPE_BUILTIN_SPEAKER_SAFE:
+                return "built-in speaker";
+            case AudioDeviceInfo.TYPE_BUILTIN_EARPIECE:
+                return "earpiece";
+            case AudioDeviceInfo.TYPE_WIRED_HEADSET:
+            case AudioDeviceInfo.TYPE_WIRED_HEADPHONES:
+                return "wired headphones";
+            case AudioDeviceInfo.TYPE_USB_HEADSET:
+            case AudioDeviceInfo.TYPE_USB_DEVICE:
+            case AudioDeviceInfo.TYPE_USB_ACCESSORY:
+                return "USB audio";
+            case AudioDeviceInfo.TYPE_HDMI:
+            case AudioDeviceInfo.TYPE_HDMI_ARC:
+            case AudioDeviceInfo.TYPE_HDMI_EARC:
+                return "HDMI";
+            default:
+                return "type " + type;
+        }
+    }
+
+    private static final class WifiLink {
+        final String summary;
+        final boolean band24;
+
+        WifiLink(String summary, boolean band24) {
+            this.summary = summary;
+            this.band24 = band24;
+        }
+    }
+
+    /**
+     * The Wi-Fi link, from WifiManager (still answered on Android 12+ for
+     * these fields; only the network's name and address are hidden), so it
+     * reads the radio even when the stream goes through a VPN.
+     */
+    @SuppressWarnings("deprecation")
+    private static WifiLink wifiLink(Activity activity) {
+        try {
+            WifiManager manager = (WifiManager) activity.getApplicationContext()
+                    .getSystemService(Context.WIFI_SERVICE);
+            if (manager == null) {
+                return new WifiLink("not on this device", false);
+            }
+            if (!manager.isWifiEnabled()) {
+                return new WifiLink("off", false);
+            }
+            WifiInfo info = manager.getConnectionInfo();
+            int mhz = info == null ? 0 : info.getFrequency();
+            if (mhz <= 0) {
+                return new WifiLink("not connected", false);
+            }
+            boolean band24 = mhz < 2500;
+            String band;
+            int channel;
+            if (band24) {
+                band = "2.4 GHz";
+                channel = mhz == 2484 ? 14 : (mhz - 2407) / 5;
+            } else if (mhz < 5925) {
+                band = "5 GHz";
+                channel = (mhz - 5000) / 5;
+            } else {
+                band = "6 GHz";
+                channel = mhz == 5935 ? 2 : (mhz - 5950) / 5;
+            }
+            StringBuilder out = new StringBuilder();
+            out.append(band).append(" (channel ").append(channel).append(", ").append(mhz).append(" MHz), ");
+            out.append(info.getRssi()).append(" dBm, ");
+            if (Build.VERSION.SDK_INT >= 29) {
+                out.append("link ").append(info.getTxLinkSpeedMbps()).append('/')
+                        .append(info.getRxLinkSpeedMbps()).append(" Mbps (send/receive)");
+            } else {
+                out.append("link ").append(info.getLinkSpeed()).append(" Mbps");
+            }
+            if (Build.VERSION.SDK_INT >= 30) {
+                String standard = wifiStandard(info.getWifiStandard());
+                if (standard != null) {
+                    out.append(", ").append(standard);
+                }
+            }
+            return new WifiLink(out.toString(), band24);
+        } catch (RuntimeException e) {
+            return new WifiLink("unknown (" + e.getClass().getSimpleName() + ")", false);
+        }
+    }
+
+    private static String wifiStandard(int standard) {
+        switch (standard) {
+            case ScanResult.WIFI_STANDARD_LEGACY:
+                return "802.11a/b/g";
+            case ScanResult.WIFI_STANDARD_11N:
+                return "Wi-Fi 4 (802.11n)";
+            case ScanResult.WIFI_STANDARD_11AC:
+                return "Wi-Fi 5 (802.11ac)";
+            case ScanResult.WIFI_STANDARD_11AX:
+                return "Wi-Fi 6 (802.11ax)";
+            case ScanResult.WIFI_STANDARD_11AD:
+                return "802.11ad";
+            case ScanResult.WIFI_STANDARD_11BE:
+                return "Wi-Fi 7 (802.11be)";
+            default:
+                return null;
+        }
+    }
 
     /**
      * Streaming on: the chosen orientation (0 landscape, 1 portrait, either

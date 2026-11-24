@@ -34,6 +34,7 @@ pub mod audio_fifo;
 #[cfg(feature = "audio")]
 pub mod audio_out;
 pub mod audio_playback;
+pub mod audio_stats;
 pub mod color;
 pub mod decode;
 #[cfg(target_os = "android")]
@@ -58,6 +59,7 @@ pub mod software_h264;
 pub mod vaapi;
 pub mod video_decoder;
 
+pub use audio_stats::AudioStats;
 pub use color::Colorimetry;
 pub use decode::{
     DecodeStats, DecodedFrame, DecodingSink, FrameBuffer, FrameDecoder, FramePresenter, LatencyHistogram,
@@ -105,22 +107,30 @@ pub fn video_backends() -> Vec<BackendInfo> {
 
 /// Audio playback when this build has it, otherwise a sink that only counts.
 pub fn default_audio_sink() -> Box<dyn AudioSink> {
+    default_audio_sink_with_stats().0
+}
+
+/// [`default_audio_sink`], and the counters of its playback path for the
+/// session report (left at zero by the counting sink).
+pub fn default_audio_sink_with_stats() -> (Box<dyn AudioSink>, std::sync::Arc<AudioStats>) {
     #[cfg(target_os = "android")]
     {
-        Box::new(audio_playback::PlaybackSink::new(
+        let sink = audio_playback::PlaybackSink::new(
             android_audio::MediaCodecOpusDecoder::default(),
             aaudio::AAudioOutput::default(),
-        ))
+        );
+        let stats = sink.stats();
+        (Box::new(sink), stats)
     }
     #[cfg(all(feature = "audio", not(target_os = "android")))]
     {
-        Box::new(audio_playback::PlaybackSink::new(
-            opus_decode::LibOpusDecoder::default(),
-            audio_out::CpalOutput::default(),
-        ))
+        let sink =
+            audio_playback::PlaybackSink::new(opus_decode::LibOpusDecoder::default(), audio_out::CpalOutput::default());
+        let stats = sink.stats();
+        (Box::new(sink), stats)
     }
     #[cfg(not(any(feature = "audio", target_os = "android")))]
     {
-        Box::new(null::NullAudioSink::default())
+        (Box::new(null::NullAudioSink::default()), std::sync::Arc::default())
     }
 }

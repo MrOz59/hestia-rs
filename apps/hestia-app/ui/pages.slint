@@ -1379,6 +1379,7 @@ export component SettingsPage inherits Page {
     in-out property <bool> hardware-decoding;
     in-out property <bool> gpu-video;
     in-out property <bool> direct-video;
+    in-out property <bool> show-video-through-loss;
     in property <bool> android;
     in property <bool> physical-keyboard;
     in property <string> host-name;
@@ -1424,9 +1425,9 @@ export component SettingsPage inherits Page {
     property <string> profile-text;
 
     // Focus: the header's Back (-2) and Save (-3), then the rows in page
-    // order: 0…4, Metered bitrate (24), 5…7, Direct video (19), 8…18,
-    // saved profiles (100…), keyboard shortcuts (25…27), 20…23, then Debug
-    // (28…32) once unlocked.
+    // order: 0…4, Metered bitrate (24), 5…7, Direct video (19), 8, Video
+    // through losses (28), 9…18, saved profiles (100…), keyboard shortcuts
+    // (25…27), 20…23, then Debug (29…33) once unlocked.
     property <int> nav: -1;
     focus-first => {
         if (root.nav == -1) {
@@ -1450,7 +1451,7 @@ export component SettingsPage inherits Page {
     property <int> shortcut-count: root.physical-keyboard ? 3 : 0;
     property <int> debug-count: root.debug-options ? 5 : 0;
     changed debug-options => {
-        if (!root.debug-options && root.nav >= 28 && root.nav < 100) {
+        if (!root.debug-options && root.nav >= 29 && root.nav < 100) {
             root.nav = 23;
         }
     }
@@ -1458,7 +1459,7 @@ export component SettingsPage inherits Page {
     changed previewing => {
         if (!root.previewing) {
             if (Nav.keyboard) {
-                root.nav = 28;
+                root.nav = 29;
             } else {
                 home-scope.focus();
             }
@@ -1472,12 +1473,12 @@ export component SettingsPage inherits Page {
     pure function at(i: int) -> bool {
         return root.sheet < 0 && root.nav == i;
     }
-    // Rows 24 (metered bitrate) and 19 (direct video) sit out of order;
-    // `step` places them.
+    // Rows 24 (metered bitrate), 19 (direct video) and 28 (video through
+    // losses) sit out of order; `step` places them.
     pure function pos(i: int) -> int {
         return i < 19 ? i
             : i >= 100 ? 19 + (i - 100)
-            : i >= 28 ? 23 + root.profile-count + root.shortcut-count + (i - 28)
+            : i >= 29 ? 23 + root.profile-count + root.shortcut-count + (i - 29)
             : i >= 25 ? 19 + root.profile-count + (i - 25)
             : 19 + root.profile-count + root.shortcut-count + (i - 20);
     }
@@ -1486,7 +1487,7 @@ export component SettingsPage inherits Page {
             : p < 19 + root.profile-count ? 100 + (p - 19)
             : p < 19 + root.profile-count + root.shortcut-count ? 25 + (p - 19 - root.profile-count)
             : p < 23 + root.profile-count + root.shortcut-count ? 20 + (p - 19 - root.profile-count - root.shortcut-count)
-            : 28 + (p - 23 - root.profile-count - root.shortcut-count);
+            : 29 + (p - 23 - root.profile-count - root.shortcut-count);
     }
     pure function valid(i: int) -> bool {
         return (i != 8 || root.mediacodec || root.gpu-conversion) && (i != 10 || root.android)
@@ -1496,6 +1497,10 @@ export component SettingsPage inherits Page {
         if (from == 24) { return dir > 0 ? 5 : 4; }
         if (root.android && ((from == 4 && dir > 0) || (from == 5 && dir < 0))) { return 24; }
         if (from == 19) { return dir > 0 ? 8 : 7; }
+        // 28 closes the Decoding group, after 8 when that row is shown.
+        if (from == 28) { return dir > 0 ? 9 : root.valid(8) ? 8 : 7; }
+        if (dir > 0 && (from == 8 || (from == 7 && !root.valid(8)))) { return 28; }
+        if (from == 9 && dir < 0) { return 28; }
         if (root.mediacodec && ((from == 7 && dir > 0) || (from == 8 && dir < 0))) { return 19; }
         let p = root.pos(from) + dir;
         let last = 22 + root.profile-count + root.shortcut-count + root.debug-count;
@@ -1799,6 +1804,14 @@ export component SettingsPage inherits Page {
                             entered => {
                                 root.nav = 8;
                             }
+                        }
+                        SwitchRow {
+                            label: "Keep video moving after a loss";
+                            hint: "Experimental. When a frame is lost, keep showing the next ones, smeared until the next keyframe, instead of freezing";
+                            checked <=> root.show-video-through-loss;
+                            want-focus: root.at(28);
+                            nav(k) => { return root.move(28, k); }
+                            entered => { root.nav = 28; }
                         }
                     }
 
@@ -2125,12 +2138,12 @@ export component SettingsPage inherits Page {
                             label: "Launch screen preview";
                             hint: "The launch animation with no stream behind it, until Back";
                             icon: "play";
-                            want-focus: root.at(28);
+                            want-focus: root.at(29);
                             nav(k) => {
-                                return root.move(28, k);
+                                return root.move(29, k);
                             }
                             entered => {
-                                root.nav = 28;
+                                root.nav = 29;
                             }
                             clicked => {
                                 // Off the row while the preview holds the
@@ -2143,12 +2156,12 @@ export component SettingsPage inherits Page {
                             label: "Launch animation";
                             hint: "Off holds the launch screen still, until the app restarts";
                             checked: Theme.launch-motion;
-                            want-focus: root.at(29);
+                            want-focus: root.at(30);
                             nav(k) => {
-                                return root.move(29, k);
+                                return root.move(30, k);
                             }
                             entered => {
-                                root.nav = 29;
+                                root.nav = 30;
                             }
                             toggled(on) => {
                                 Theme.launch-motion = on;
@@ -2158,24 +2171,24 @@ export component SettingsPage inherits Page {
                             label: "Verbose log";
                             hint: "Debug lines from every library in the app log and stream reports";
                             checked: root.debug-verbose-log;
-                            want-focus: root.at(30);
-                            nav(k) => {
-                                return root.move(30, k);
-                            }
-                            entered => {
-                                root.nav = 30;
-                            }
-                            toggled(on) => {
-                                root.debug-verbose-log-toggled(on);
-                            }
-                        }
-                        InfoRow {
                             want-focus: root.at(31);
                             nav(k) => {
                                 return root.move(31, k);
                             }
                             entered => {
                                 root.nav = 31;
+                            }
+                            toggled(on) => {
+                                root.debug-verbose-log-toggled(on);
+                            }
+                        }
+                        InfoRow {
+                            want-focus: root.at(32);
+                            nav(k) => {
+                                return root.move(32, k);
+                            }
+                            entered => {
+                                root.nav = 32;
                             }
                             clicked => {
                                 root.debug-copy-info();
@@ -2209,12 +2222,12 @@ export component SettingsPage inherits Page {
                             label: "Hide debug options";
                             hint: "Turns everything here off; About unlocks them again";
                             icon: "close";
-                            want-focus: root.at(32);
+                            want-focus: root.at(33);
                             nav(k) => {
-                                return root.move(32, k);
+                                return root.move(33, k);
                             }
                             entered => {
-                                root.nav = 32;
+                                root.nav = 33;
                             }
                             clicked => {
                                 Theme.launch-motion = true;

@@ -181,6 +181,7 @@ pub struct SettingsForm {
     pub hardware_decoding: bool,
     pub gpu_video: bool,
     pub direct_video: bool,
+    pub show_video_through_loss: bool,
     pub orientation: i32,
 }
 
@@ -231,6 +232,13 @@ pub trait View {
 
     // Apps ---------------------------------------------------------------
     fn set_host_name(&self, text: String);
+    /// Asks before a stream: Bluetooth on with the Wi-Fi on 2.4 GHz.
+    /// "Stream anyway" calls [`Controller::launch_despite_shared_band`],
+    /// Cancel [`Controller::cancel_shared_band_launch`].
+    ///
+    /// [`Controller::launch_despite_shared_band`]: crate::Controller::launch_despite_shared_band
+    /// [`Controller::cancel_shared_band_launch`]: crate::Controller::cancel_shared_band_launch
+    fn show_shared_band_warning(&self, text: String);
     fn set_host_edit_visible(&self, on: bool);
     fn set_host_edit_name(&self, text: String);
     fn set_host_edit_address(&self, text: String);

@@ -86,6 +86,11 @@ export component AppWindow inherits Window {
     in property <bool> app-running;
     in property <bool> host-hermes;
     callback launch-app(int);
+    // Asked before a stream: Bluetooth on with the Wi-Fi on 2.4 GHz.
+    in-out property <bool> band-warning-visible;
+    in property <string> band-warning-text;
+    callback band-warning-stream();
+    callback band-warning-cancel();
     callback quit-app();
     callback forget-host();
     callback back-to-hosts();
@@ -230,6 +235,7 @@ export component AppWindow inherits Window {
     in-out property <bool> cfg-hardware-decoding: true;
     in-out property <bool> cfg-gpu-video: true;
     in-out property <bool> cfg-direct-video: true;
+    in-out property <bool> cfg-show-video-through-loss: false;
     in property <[string]> cfg-profile-names;
     in-out property <int> cfg-profile-pick;
     callback settings-save-profile(string);
@@ -276,6 +282,11 @@ export component AppWindow inherits Window {
     // Escape (and the Android back key) closes dialogs and walks back
     // through the screens.
     function go-back() -> bool {
+        if (root.band-warning-visible) {
+            root.band-warning-visible = false;
+            root.band-warning-cancel();
+            return true;
+        }
         if (root.launch-preview) {
             root.launch-preview = false;
             return true;
@@ -351,6 +362,14 @@ export component AppWindow inherits Window {
     changed add-visible => {
         if (root.add-visible) {
             root.dlg = !root.is-android || Nav.keyboard ? 0 : -1;
+        } else {
+            root.dlg = -1;
+            root.take-focus();
+        }
+    }
+    changed band-warning-visible => {
+        if (root.band-warning-visible) {
+            root.dlg = Nav.keyboard ? 1 : -1;
         } else {
             root.dlg = -1;
             root.take-focus();
@@ -736,6 +755,7 @@ export component AppWindow inherits Window {
             hardware-decoding <=> root.cfg-hardware-decoding;
             gpu-video <=> root.cfg-gpu-video;
             direct-video <=> root.cfg-direct-video;
+            show-video-through-loss <=> root.cfg-show-video-through-loss;
             android: root.is-android;
             physical-keyboard: root.cfg-physical-keyboard;
             host-name: root.cfg-host-name;
@@ -866,6 +886,54 @@ export component AppWindow inherits Window {
                     }
                     entered => { root.dlg = 3; }
                     clicked => { root.save-host-edit(root.host-edit-name, root.host-edit-address); }
+                }
+            }
+        }
+
+        // Before a stream: Bluetooth on with the Wi-Fi on 2.4 GHz, the band
+        // they share. Cancel (0), Stream anyway (1)
+        // ---------------------------------------------------------------
+        if root.band-warning-visible: Modal {
+            width: 100%;
+            height: 100%;
+            hold-focus: root.dlg < 0;
+            arrow => { root.dlg = 1; }
+            dismissed => {
+                root.band-warning-visible = false;
+                root.band-warning-cancel();
+            }
+
+            DialogTitle { text: "Bluetooth shares this Wi-Fi band"; }
+            DialogText { text: root.band-warning-text; }
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: end;
+                ActionButton {
+                    text: "Cancel";
+                    want-focus: root.dlg == 0;
+                    nav(k) => {
+                        if (k == Key.RightArrow) { root.dlg = 1; return true; }
+                        return false;
+                    }
+                    entered => { root.dlg = 0; }
+                    clicked => {
+                        root.band-warning-visible = false;
+                        root.band-warning-cancel();
+                    }
+                }
+                ActionButton {
+                    text: "Stream anyway";
+                    kind: 1;
+                    want-focus: root.dlg == 1;
+                    nav(k) => {
+                        if (k == Key.LeftArrow) { root.dlg = 0; return true; }
+                        return false;
+                    }
+                    entered => { root.dlg = 1; }
+                    clicked => {
+                        root.band-warning-visible = false;
+                        root.band-warning-stream();
+                    }
                 }
             }
         }

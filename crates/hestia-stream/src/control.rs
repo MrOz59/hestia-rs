@@ -197,6 +197,11 @@ impl ControlStream {
         self.lock().enet.round_trip()
     }
 
+    /// See [`EnetClient::measured_round_trip`].
+    pub fn measured_round_trip(&self) -> Option<(u32, u32)> {
+        self.lock().enet.measured_round_trip()
+    }
+
     /// Starts the receive and ping threads. Host events go to `events`.
     pub fn run(&mut self, events: Sender<ControlEvent>) -> io::Result<()> {
         self.run_with_events(move |event| {

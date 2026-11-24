@@ -10,6 +10,7 @@ mod input;
 mod keyboard;
 #[cfg(target_os = "android")]
 mod network;
+mod radio;
 mod reports;
 
 #[cfg(target_os = "android")]
@@ -30,4 +31,5 @@ pub use keyboard::{has_physical_keyboard, has_soft_keyboard, set_ime_sink, set_k
 pub use network::route_for;
 #[cfg(target_os = "android")]
 pub(crate) use network::{configure_stream_network, stream_network_metered};
+pub use radio::{audio_output_name, radio_summary, radio_value, shared_band_warning, wifi_band};
 pub use reports::{export_label, export_report, open_url, reports_dir};

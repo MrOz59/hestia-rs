@@ -262,6 +262,13 @@ impl EnetClient {
         (self.rtt, self.rtt_var)
     }
 
+    /// The smoothed round trip and its variance in ms, once an
+    /// acknowledgement has measured one (before that, [`round_trip`](Self::round_trip)
+    /// reports ENet's 500 ms default).
+    pub fn measured_round_trip(&self) -> Option<(u32, u32)> {
+        self.have_rtt.then_some((self.rtt, self.rtt_var))
+    }
+
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
     }

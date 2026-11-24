@@ -2,7 +2,9 @@
 //! Reed–Solomon recovery and frame depacketization. Ported from
 //! moonlight-common-c `VideoStream.c`, `RtpVideoQueue.c` and
 //! `VideoDepacketizer.c`, simplified to "drop until the next IDR" on loss
-//! (we don't use reference frame invalidation).
+//! (we don't use reference frame invalidation). Experimentally, delta frames
+//! can keep flowing to the decoder while that IDR is on its way
+//! ([`VideoConfig::show_through_loss`]).
 //!
 //! Wire layout of one shard (`packet_size + 16` bytes):
 //! `RTP(12) | reserved(4) | NV_VIDEO_PACKET(16) | payload`. The payload of the
@@ -38,7 +40,18 @@ const PING_INTERVAL: Duration = Duration::from_millis(500);
 pub const FIRST_DATA_TIMEOUT: Duration = Duration::from_secs(10);
 const VIDEO_STALL_PROBE: Duration = Duration::from_secs(2);
 const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(6);
+/// How long an incomplete frame waits once a newer one has started, at
+/// least: packets reordered by more than this mean a lost frame and a
+/// keyframe request. It is also the receive loop's polling interval.
 const REORDER_WINDOW: Duration = Duration::from_millis(6);
+/// The most the window grows to when packets keep arriving just after their
+/// frame was given up (see [`FrameAssembler::note_late`]). Waiting longer
+/// would delay every real loss by as much, and at 60 fps
+/// [`MAX_FRAME_LOOKAHEAD`] gives up on a frame after about this long anyway.
+const MAX_REORDER_WINDOW: Duration = Duration::from_millis(25);
+/// A widened window halves its extra time after this long without a
+/// packet that needed it.
+const REORDER_WINDOW_HOLD: Duration = Duration::from_secs(2);
 const MAX_FRAME_LOOKAHEAD: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +126,12 @@ pub struct AssemblerStats {
     /// [`LATE_BUCKETS_MS`] buckets (the last one is everything later).
     pub late_buckets: [u64; LATE_BUCKETS_MS.len() + 1],
     pub late_max_us: u64,
+    /// Delta frames forwarded while a keyframe was on its way after a loss
+    /// ([`FrameAssembler::show_through_loss`]).
+    pub shown_through_loss: u64,
+    /// The reorder window now, and the widest it got.
+    pub reorder_window_us: u64,
+    pub max_reorder_window_us: u64,
 }
 
 /// Upper bounds of the lateness buckets in [`AssemblerStats::late_buckets`].
@@ -125,6 +144,8 @@ struct ExpiredFrame {
     number: u32,
     at: Instant,
     late: bool,
+    /// The reorder window it was given up under.
+    window: Duration,
 }
 
 /// Sunshine's SS_FRAME_FEC_STATUS, packed in network byte order.
@@ -229,7 +250,22 @@ pub struct FrameAssembler {
     codec: VideoCodec,
     next_frame: Option<u32>,
     pending: Vec<FrameState>,
+    /// A keyframe was asked for: after a loss, or because the decoder
+    /// needs one.
     waiting_for_idr: bool,
+    /// The decoder has no reference to decode a delta frame against: at the
+    /// start, and after it asked for a keyframe itself.
+    needs_keyframe: bool,
+    /// Experimental: after a transport loss, keep forwarding delta frames
+    /// while the keyframe is on its way instead of holding them back. The
+    /// picture smears where the lost frame changed it, until the keyframe
+    /// lands, but it keeps moving.
+    pub show_through_loss: bool,
+    /// See [`REORDER_WINDOW`]; widened by late packets, up to `max_reorder_window`.
+    reorder_window: Duration,
+    max_reorder_window: Duration,
+    /// When a late packet last widened the window.
+    widened_at: Option<Instant>,
     /// Recently lost frames, oldest first (late-arrival accounting only).
     expired: std::collections::VecDeque<ExpiredFrame>,
     pub stats: AssemblerStats,
@@ -253,8 +289,17 @@ impl FrameAssembler {
             pending: Vec::with_capacity(MAX_FRAME_LOOKAHEAD as usize + 2),
             report_fec: false,
             waiting_for_idr: true,
+            needs_keyframe: true,
+            show_through_loss: false,
+            reorder_window: REORDER_WINDOW,
+            max_reorder_window: MAX_REORDER_WINDOW,
+            widened_at: None,
             expired: std::collections::VecDeque::with_capacity(LATE_TRACKED_FRAMES),
-            stats: AssemblerStats::default(),
+            stats: AssemblerStats {
+                reorder_window_us: REORDER_WINDOW.as_micros() as u64,
+                max_reorder_window_us: REORDER_WINDOW.as_micros() as u64,
+                ..AssemblerStats::default()
+            },
         }
     }
 
@@ -262,9 +307,11 @@ impl FrameAssembler {
         self.shard_len
     }
 
-    /// Suppresses delta frames until the decoder has a fresh reference.
+    /// Suppresses delta frames until the decoder has a fresh reference
+    /// (even with [`show_through_loss`](Self::show_through_loss)).
     pub fn wait_for_keyframe(&mut self) {
         self.waiting_for_idr = true;
+        self.needs_keyframe = true;
     }
 
     pub fn add(&mut self, packet: &[u8]) -> Vec<AssemblerOutput> {
@@ -351,6 +398,7 @@ impl FrameAssembler {
     }
 
     fn drain(&mut self, now: Instant, out: &mut Vec<AssemblerOutput>) {
+        self.relax_reorder_window(now);
         while let Some(first) = self.pending.first_mut() {
             let next = self.next_frame.expect("buffered frames have a sequence start");
             let number = first.number;
@@ -360,8 +408,17 @@ impl FrameAssembler {
                 self.pending.remove(0);
                 self.next_frame = Some(next.wrapping_add(1));
                 match result {
-                    Some(frame) if !self.waiting_for_idr || frame.keyframe => {
-                        self.waiting_for_idr = false;
+                    Some(frame)
+                        if frame.keyframe
+                            || !self.waiting_for_idr
+                            || (self.show_through_loss && !self.needs_keyframe) =>
+                    {
+                        if frame.keyframe {
+                            self.waiting_for_idr = false;
+                            self.needs_keyframe = false;
+                        } else if self.waiting_for_idr {
+                            self.stats.shown_through_loss += 1;
+                        }
                         self.stats.frames += 1;
                         out.push(AssemblerOutput::Frame(frame));
                     }
@@ -382,7 +439,7 @@ impl FrameAssembler {
             };
             let newest = self.pending.last().expect("we have at least one future frame");
             if newest.number.wrapping_sub(next) <= MAX_FRAME_LOOKAHEAD
-                && now.saturating_duration_since(oldest_arrival) < REORDER_WINDOW
+                && now.saturating_duration_since(oldest_arrival) < self.reorder_window
             {
                 break;
             }
@@ -423,6 +480,7 @@ impl FrameAssembler {
             number,
             at,
             late: false,
+            window: self.reorder_window,
         });
     }
 
@@ -433,6 +491,7 @@ impl FrameAssembler {
             return;
         };
         let late = now.saturating_duration_since(frame.at);
+        let needed = frame.window + late + Duration::from_millis(2);
         self.stats.late_packets += 1;
         if !frame.late {
             frame.late = true;
@@ -445,6 +504,37 @@ impl FrameAssembler {
             .unwrap_or(LATE_BUCKETS_MS.len());
         self.stats.late_buckets[bucket] += 1;
         self.stats.late_max_us = self.stats.late_max_us.max(late.as_micros() as u64);
+
+        // This packet came shortly after its frame was given up on: a
+        // slightly longer window would have kept the frame (and spared a
+        // keyframe). Widen it, but only as far as a link's jitter is worth
+        // waiting for; packets later than that stay lost.
+        if needed <= self.max_reorder_window {
+            self.reorder_window = self.reorder_window.max(needed);
+            self.widened_at = Some(now);
+            self.note_reorder_window();
+        }
+    }
+
+    /// Narrows a widened window again once the late packets stop.
+    fn relax_reorder_window(&mut self, now: Instant) {
+        if let Some(at) = self.widened_at
+            && now.saturating_duration_since(at) >= REORDER_WINDOW_HOLD
+        {
+            let extra = self.reorder_window.saturating_sub(REORDER_WINDOW) / 2;
+            self.reorder_window = REORDER_WINDOW + extra;
+            self.widened_at = (extra >= Duration::from_millis(1)).then_some(now);
+            if self.widened_at.is_none() {
+                self.reorder_window = REORDER_WINDOW;
+            }
+            self.note_reorder_window();
+        }
+    }
+
+    fn note_reorder_window(&mut self) {
+        let us = self.reorder_window.as_micros() as u64;
+        self.stats.reorder_window_us = us;
+        self.stats.max_reorder_window_us = self.stats.max_reorder_window_us.max(us);
     }
 
     fn mark_lost(&mut self, count: u32, out: &mut Vec<AssemblerOutput>) {
@@ -589,6 +679,34 @@ pub struct VideoConfig {
     pub fps: u32,
     /// `Some(key)` when the host encrypts video.
     pub decrypt_key: Option<[u8; 16]>,
+    /// The control link's round trip, which times keyframe requests.
+    pub round_trip: Arc<RoundTrip>,
+    /// See [`FrameAssembler::show_through_loss`].
+    pub show_through_loss: bool,
+}
+
+/// The control link's smoothed round trip and its variance, shared with the
+/// video receive loop. Empty until the control stream has measured one.
+#[derive(Debug, Default)]
+pub struct RoundTrip(AtomicU64);
+
+impl RoundTrip {
+    pub fn set(&self, rtt_ms: u32, variance_ms: u32) {
+        self.0.store(
+            u64::from(rtt_ms.max(1)) << 32 | u64::from(variance_ms),
+            Ordering::Relaxed,
+        );
+    }
+
+    pub fn get(&self) -> Option<(Duration, Duration)> {
+        let value = self.0.load(Ordering::Relaxed);
+        (value != 0).then(|| {
+            (
+                Duration::from_millis(value >> 32),
+                Duration::from_millis(value & 0xffff_ffff),
+            )
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -616,6 +734,10 @@ pub struct VideoCounters {
     pub late_frames: AtomicU64,
     pub late_buckets: [AtomicU64; LATE_BUCKETS_MS.len() + 1],
     pub late_max_us: AtomicU64,
+    /// See the [`AssemblerStats`] fields of the same names.
+    pub shown_through_loss: AtomicU64,
+    pub reorder_window_us: AtomicU64,
+    pub max_reorder_window_us: AtomicU64,
     pub recovery: VideoRecoveryCounters,
     /// Sum of host-reported processing latency, and how many frames had it.
     pub host_latency_us: AtomicU64,
@@ -640,6 +762,11 @@ pub struct VideoRecoveryCounters {
     pub max_request_to_keyframe_packet_us: AtomicU64,
     pub keyframe_packet_to_assembly_us: AtomicU64,
     pub max_keyframe_packet_to_assembly_us: AtomicU64,
+    /// How long an unanswered request waits before asking again, and the
+    /// least spacing between requests for separate losses, as last timed
+    /// from the round trip (see [`IdrRequests::adapt`]).
+    pub retry_after_us: AtomicU64,
+    pub min_gap_us: AtomicU64,
 }
 
 impl VideoRecoveryCounters {
@@ -909,16 +1036,27 @@ fn receive_loop(
 ) {
     let mut assembler = FrameAssembler::new(cfg.packet_size, cfg.format.codec);
     assembler.report_fec = cfg.report_fec;
+    assembler.show_through_loss = cfg.show_through_loss;
+    if cfg.show_through_loss {
+        info!("video: showing delta frames through losses (experimental)");
+    }
     let shard_len = assembler.shard_len();
     let mut buf = vec![0u8; shard_len + ENC_PREFIX_LEN + 64];
     let mut activity = VideoActivity::new(Instant::now());
     let mut first_frame = false;
     let mut idr = IdrRequests::default();
+    let frame_interval = Duration::from_micros(1_000_000 / u64::from(cfg.fps.max(1)));
+    idr.note_timing(&counters.recovery);
     let mut recovered_request = None;
     let mut recovered_loss = None;
 
     while !stop.load(Ordering::Relaxed) {
         let now = Instant::now();
+        if let Some((rtt, variance)) = cfg.round_trip.get()
+            && idr.adapt(rtt, variance, frame_interval)
+        {
+            idr.note_timing(&counters.recovery);
+        }
         if decoder_wants_idr.swap(false, Ordering::Relaxed) && cfg.format.codec != VideoCodec::PyroWave {
             assembler.wait_for_keyframe();
             if let Some(reason) = idr.want(now, IdrReason::Decoder) {
@@ -1065,6 +1203,15 @@ fn receive_loop(
         counters
             .late_max_us
             .store(assembler.stats.late_max_us, Ordering::Relaxed);
+        counters
+            .shown_through_loss
+            .store(assembler.stats.shown_through_loss, Ordering::Relaxed);
+        counters
+            .reorder_window_us
+            .store(assembler.stats.reorder_window_us, Ordering::Relaxed);
+        counters
+            .max_reorder_window_us
+            .store(assembler.stats.max_reorder_window_us, Ordering::Relaxed);
     }
     stop.store(true, Ordering::Relaxed);
     sink.cleanup();
@@ -1080,11 +1227,13 @@ enum IdrReason {
 
 /// Keyframe requests: one in flight at a time. Losses while waiting don't
 /// ask again (each IDR is large; asking per lost frame floods a lossy link
-/// with keyframes and makes the loss worse); if none arrives within
-/// [`IdrRequests::RETRY`], ask once more. When keyframes don't help (the
-/// decoder fails again right after each one), requests space out, up to
+/// with keyframes and makes the loss worse); if none arrives within the
+/// retry time, ask once more. A loss right after a usable keyframe waits for
+/// the minimum gap since the last request. Both follow the link's round
+/// trip once it is known ([`IdrRequests::adapt`]). When keyframes don't help
+/// (the decoder fails again right after each one), requests space out, up to
 /// [`IdrRequests::MAX_GAP`] apart, until the stream runs cleanly again.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct IdrRequests {
     /// First assembly loss in this episode, including deferred requests.
     loss_detected_at: Option<Instant>,
@@ -1097,14 +1246,62 @@ struct IdrRequests {
     grew: bool,
     /// A request held back by the gap, sent once it has passed.
     deferred: Option<IdrReason>,
+    /// How long a request may go unanswered before asking again.
+    retry: Duration,
+    /// Least spacing after the last request before a fresh loss asks again.
+    min_gap: Duration,
+}
+
+impl Default for IdrRequests {
+    fn default() -> Self {
+        Self {
+            loss_detected_at: None,
+            pending_since: None,
+            first_request: None,
+            last_sent: None,
+            gap: Duration::ZERO,
+            grew: false,
+            deferred: None,
+            retry: Self::RETRY,
+            min_gap: Self::MIN_GAP,
+        }
+    }
 }
 
 impl IdrRequests {
+    /// The retry time until the round trip is known, and its ceiling.
     const RETRY: Duration = Duration::from_millis(1000);
+    const RETRY_FLOOR: Duration = Duration::from_millis(200);
     /// Asking again this soon after a request means the keyframe didn't help.
     const STORM: Duration = Duration::from_millis(1500);
+    /// The minimum gap until the round trip is known, and its ceiling.
     const MIN_GAP: Duration = Duration::from_millis(250);
+    const MIN_GAP_FLOOR: Duration = Duration::from_millis(100);
     const MAX_GAP: Duration = Duration::from_secs(4);
+
+    /// Times requests from the control link's round trip. A keyframe
+    /// answers within about a round trip plus a frame or two (Hermes encodes
+    /// one 5-25 ms after the request): on a 50 ms link, waiting a full
+    /// second to ask again, or a quarter of one before reporting a fresh
+    /// loss, only makes each freeze longer. Slow links keep the old timing,
+    /// which the ceilings are. Returns whether anything changed.
+    fn adapt(&mut self, rtt: Duration, variance: Duration, frame: Duration) -> bool {
+        let retry = (rtt + variance * 4 + frame * 2).clamp(Self::RETRY_FLOOR, Self::RETRY);
+        let min_gap = (rtt + frame * 2).clamp(Self::MIN_GAP_FLOOR, Self::MIN_GAP);
+        let changed = (retry, min_gap) != (self.retry, self.min_gap);
+        self.retry = retry;
+        self.min_gap = min_gap;
+        changed
+    }
+
+    fn note_timing(&self, counters: &VideoRecoveryCounters) {
+        counters
+            .retry_after_us
+            .store(self.retry.as_micros() as u64, Ordering::Relaxed);
+        counters
+            .min_gap_us
+            .store(self.min_gap.as_micros() as u64, Ordering::Relaxed);
+    }
 
     /// A keyframe is needed: return the reason if a request should go out now.
     fn want(&mut self, now: Instant, reason: IdrReason) -> Option<IdrReason> {
@@ -1119,11 +1316,11 @@ impl IdrRequests {
                 // A fresh transport loss after a usable IDR is a new episode.
                 // Keep a spacing floor, preserving exponential backoff for decoder failures.
                 if reason == IdrReason::Loss {
-                    self.gap = Self::MIN_GAP;
+                    self.gap = self.min_gap;
                     self.deferred = Some(reason);
                     self.grew = true;
                 } else if !self.grew {
-                    self.gap = (self.gap * 2).clamp(Self::MIN_GAP, Self::MAX_GAP);
+                    self.gap = (self.gap * 2).clamp(self.min_gap, Self::MAX_GAP);
                     self.grew = true;
                 }
                 if since < self.gap {
@@ -1149,7 +1346,7 @@ impl IdrRequests {
     /// a held-back one's gap has passed.
     fn retry_due(&mut self, now: Instant) -> Option<IdrReason> {
         match (self.pending_since, self.last_sent) {
-            (Some(at), _) if now.duration_since(at) >= Self::RETRY => Some(self.send(now, IdrReason::Retry)),
+            (Some(at), _) if now.duration_since(at) >= self.retry => Some(self.send(now, IdrReason::Retry)),
             (None, Some(last)) if now.duration_since(last) >= self.gap => {
                 self.deferred.map(|reason| self.send(now, reason))
             }
@@ -1382,12 +1579,11 @@ mod tests {
 
     /// A replay of a jittery link with **no packet loss at all**: 120 frames
     /// at 60 fps, every packet delayed by a deterministic 0-30 ms, delivered
-    /// in arrival order. With the current 6 ms window, frames whose packets
-    /// are all still coming are declared lost, and every one of them later
-    /// shows up in the late-arrival counts.
-    #[test]
-    fn jittery_link_without_loss_replay_under_the_current_window() {
+    /// in arrival order, with the reorder window allowed to grow to
+    /// `max_window`.
+    fn jittery_link_replay(max_window: Duration) -> AssemblerStats {
         let mut asm = FrameAssembler::new(PACKET_SIZE as u32, VideoCodec::H264);
+        asm.max_reorder_window = max_window;
         let start = Instant::now();
         let mut rng = 0x2545_f491_u32;
         let mut jitter_us = || {
@@ -1414,14 +1610,136 @@ mod tests {
         }
         asm.expire(start + Duration::from_secs(5));
         let s = asm.stats;
+        assert_eq!(delivered as u64, s.frames);
+        assert_eq!(s.frames + s.dropped_waiting_idr + s.lost_frames, 120);
+        s
+    }
+
+    /// With a fixed 6 ms window, frames whose packets are all still coming
+    /// are declared lost, and every one of them later shows up in the
+    /// late-arrival counts.
+    #[test]
+    fn jittery_link_without_loss_replay_under_a_fixed_window() {
+        let s = jittery_link_replay(REORDER_WINDOW);
         assert!(s.lost_frames > 0, "the 6 ms window loses frames on this replay: {s:?}");
         assert_eq!(
             s.late_frames, s.lost_frames,
             "every lost frame's packets still arrived: {s:?}"
         );
         assert!(s.late_packets >= s.late_frames);
-        assert_eq!(delivered as u64, s.frames);
-        assert_eq!(s.frames + s.dropped_waiting_idr + s.lost_frames, 120);
+        assert_eq!(s.max_reorder_window_us, 6_000);
+    }
+
+    /// The same replay with the adaptive window: the late packets widen it,
+    /// and fewer frames are given up on.
+    #[test]
+    fn adaptive_reorder_window_keeps_more_frames_on_a_jittery_link() {
+        let fixed = jittery_link_replay(REORDER_WINDOW);
+        let adaptive = jittery_link_replay(MAX_REORDER_WINDOW);
+        assert!(
+            adaptive.lost_frames < fixed.lost_frames,
+            "adaptive {adaptive:?} vs fixed {fixed:?}"
+        );
+        assert!(adaptive.max_reorder_window_us > 6_000, "{adaptive:?}");
+        assert!(adaptive.max_reorder_window_us <= 25_000, "{adaptive:?}");
+    }
+
+    #[test]
+    fn reorder_window_widens_for_slightly_late_packets_then_narrows() {
+        let mut asm = FrameAssembler::new(PACKET_SIZE as u32, VideoCodec::H264);
+        let start = Instant::now();
+        let ms = |n: u64| start + Duration::from_millis(n);
+        let mut seq = 0u16;
+        let mut frame = |number: u32, idr: bool| {
+            let packets = packetize(number, &h264_frame(4000, idr), PACKET_SIZE, 20, seq, idr);
+            seq = seq.wrapping_add(packets.len() as u16);
+            packets
+        };
+        let (f1, f2, f3, f4) = (frame(1, true), frame(2, false), frame(3, false), frame(4, false));
+        for p in &f1 {
+            asm.add_at(p, ms(0));
+        }
+        asm.add_at(&f2[0], ms(16));
+        for p in &f3 {
+            asm.add_at(p, ms(32));
+        }
+        asm.expire(ms(38));
+        assert_eq!(asm.stats.lost_frames, 1);
+        // The rest of frame 2, 4 ms after it was given up on: 6 + 4 + 2 ms.
+        for p in &f2[1..] {
+            asm.add_at(p, ms(42));
+        }
+        assert_eq!(asm.reorder_window, Duration::from_millis(12));
+        assert_eq!(asm.stats.max_reorder_window_us, 12_000);
+
+        // Frame 5 is given up on under the 12 ms window, and the rest of it
+        // comes 40 ms later: more than the cap allows, so no change.
+        let (f5, f6) = (frame(5, false), frame(6, false));
+        for p in &f4 {
+            asm.add_at(p, ms(64));
+        }
+        asm.add_at(&f5[0], ms(80));
+        for p in &f6 {
+            asm.add_at(p, ms(96));
+        }
+        asm.expire(ms(110));
+        assert_eq!(asm.stats.lost_frames, 2);
+        for p in &f5[1..] {
+            asm.add_at(p, ms(150));
+        }
+        assert_eq!(asm.stats.late_frames, 2);
+        assert_eq!(asm.reorder_window, Duration::from_millis(12));
+
+        // Two quiet seconds halve the extra time, and it settles back.
+        asm.expire(ms(42) + REORDER_WINDOW_HOLD);
+        assert_eq!(asm.reorder_window, Duration::from_millis(9));
+        for n in 2..=4u32 {
+            asm.expire(ms(42) + REORDER_WINDOW_HOLD * n);
+        }
+        assert_eq!(asm.reorder_window, REORDER_WINDOW);
+        assert_eq!(asm.stats.reorder_window_us, 6_000);
+        assert_eq!(asm.stats.max_reorder_window_us, 12_000);
+    }
+
+    #[test]
+    fn shows_delta_frames_through_a_loss_until_the_keyframe() {
+        let mut asm = FrameAssembler::new(PACKET_SIZE as u32, VideoCodec::H264);
+        asm.show_through_loss = true;
+        let mut seq = 0u16;
+        let start = Instant::now();
+        let mut feed = |asm: &mut FrameAssembler, frame: u32, idr: bool, drop: usize| {
+            let packets = packetize(frame, &h264_frame(4000, idr), PACKET_SIZE, 20, seq, idr);
+            seq = seq.wrapping_add(packets.len() as u16);
+            let now = start + Duration::from_millis(u64::from(frame) * 16);
+            let mut out = Vec::new();
+            for p in packets.iter().skip(drop) {
+                out.extend(asm.add_at(p, now));
+            }
+            out
+        };
+        // Before the first keyframe nothing can be decoded.
+        assert!(feed(&mut asm, 1, false, 0).is_empty());
+        assert_eq!(asm.stats.dropped_waiting_idr, 1);
+        assert!(matches!(feed(&mut asm, 2, true, 0)[..], [AssemblerOutput::Frame(_)]));
+        // Frame 3 is lost: the keyframe is still asked for, but frame 4 goes on.
+        assert!(feed(&mut asm, 3, false, 3).is_empty());
+        assert!(feed(&mut asm, 4, false, 0).is_empty());
+        let out = asm.expire(start + Duration::from_millis(64) + REORDER_WINDOW);
+        assert!(
+            matches!(&out[..], [AssemblerOutput::NeedIdr, AssemblerOutput::Frame(f)] if f.frame == 4 && !f.keyframe),
+            "{out:?}"
+        );
+        assert!(matches!(&feed(&mut asm, 5, false, 0)[..], [AssemblerOutput::Frame(f)] if f.frame == 5));
+        assert_eq!(asm.stats.shown_through_loss, 2);
+        assert!(matches!(&feed(&mut asm, 6, true, 0)[..], [AssemblerOutput::Frame(f)] if f.keyframe));
+        assert!(matches!(&feed(&mut asm, 7, false, 0)[..], [AssemblerOutput::Frame(_)]));
+        assert_eq!(asm.stats.shown_through_loss, 2, "the keyframe ended the loss");
+        // A decoder that asked for a keyframe gets nothing else.
+        asm.wait_for_keyframe();
+        assert!(feed(&mut asm, 8, false, 0).is_empty());
+        assert!(matches!(&feed(&mut asm, 9, true, 0)[..], [AssemblerOutput::Frame(f)] if f.keyframe));
+        assert_eq!(asm.stats.dropped_waiting_idr, 2);
+        assert_eq!(asm.stats.lost_frames, 1);
     }
 
     #[test]
@@ -1504,6 +1822,48 @@ mod tests {
         assert_eq!(idr.keyframe_arrived(), (None, None));
         assert_eq!(idr.retry_due(ms(5000)), None);
         assert_eq!(idr.want(ms(5001), IdrReason::Loss), Some(IdrReason::Loss));
+    }
+
+    #[test]
+    fn keyframe_timing_follows_the_round_trip() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let d = Duration::from_millis;
+        let frame = Duration::from_micros(16_667);
+        let mut idr = IdrRequests::default();
+        assert_eq!((idr.retry, idr.min_gap), (IdrRequests::RETRY, IdrRequests::MIN_GAP));
+        // A 48 ms link with 35 ms of variance (home Wi-Fi): ask again after
+        // 48 + 4 x 35 + 2 frames = 221 ms; space fresh losses 100 ms apart (the floor).
+        assert!(idr.adapt(d(48), d(35), frame));
+        assert!(!idr.adapt(d(48), d(35), frame), "unchanged");
+        assert_eq!(idr.min_gap, IdrRequests::MIN_GAP_FLOOR);
+        assert_eq!(idr.want(t0, IdrReason::Loss), Some(IdrReason::Loss));
+        assert_eq!(idr.retry_due(ms(220)), None);
+        assert_eq!(idr.retry_due(ms(222)), Some(IdrReason::Retry));
+        idr.keyframe_arrived();
+        // A loss 60 ms after the last request waits for the 100 ms gap, not 250 ms.
+        assert_eq!(idr.want(ms(282), IdrReason::Loss), None);
+        assert_eq!(idr.retry_due(ms(321)), None);
+        assert_eq!(idr.retry_due(ms(322)), Some(IdrReason::Loss));
+        // A very slow link keeps the old timing: the ceilings.
+        assert!(idr.adapt(d(600), d(100), frame));
+        assert_eq!((idr.retry, idr.min_gap), (IdrRequests::RETRY, IdrRequests::MIN_GAP));
+        // A very fast one stops at the floors.
+        idr.adapt(d(2), d(1), frame);
+        assert_eq!(
+            (idr.retry, idr.min_gap),
+            (IdrRequests::RETRY_FLOOR, IdrRequests::MIN_GAP_FLOOR)
+        );
+    }
+
+    #[test]
+    fn round_trip_is_empty_until_set() {
+        let rt = RoundTrip::default();
+        assert_eq!(rt.get(), None);
+        rt.set(0, 0);
+        assert_eq!(rt.get(), Some((Duration::from_millis(1), Duration::ZERO)));
+        rt.set(48, 35);
+        assert_eq!(rt.get(), Some((Duration::from_millis(48), Duration::from_millis(35))));
     }
 
     #[test]

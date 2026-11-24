@@ -11,6 +11,11 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- Wi-Fi locks that keep the radio out of power save during a stream. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Whether Bluetooth is on, for the session report (Android 12+ needs
+         no permission for that; nothing asks for nearby devices). -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <!-- Controller rumble on the phone when the controller has no motor. -->
     <uses-permission android:name="android.permission.VIBRATE" />
 

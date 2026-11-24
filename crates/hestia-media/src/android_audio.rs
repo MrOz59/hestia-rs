@@ -1,5 +1,13 @@
 //! Opus decoding via Android MediaCodec.
+//!
+//! MediaCodec has no packet-loss concealment for Opus: a lost packet is a
+//! gap the playback buffer fades around. Its input buffers fill up when a
+//! burst of packets arrives after a stall, so finished output is collected
+//! before feeding, and a packet waits a little for room instead of being
+//! dropped at once.
 
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use hestia_stream::AudioFormat;
@@ -11,9 +19,13 @@ use ndk::media::media_format::MediaFormat;
 
 use crate::audio_fifo::SAMPLE_RATE;
 use crate::audio_playback::{AudioDecoder, DecodedAudio};
+use crate::audio_stats::AudioStats;
 
-/// How long a packet may wait for a free decoder input buffer.
+/// How long a packet waits for a free decoder input buffer, per try...
 const INPUT_WAIT: Duration = Duration::from_millis(5);
+/// ...and how many tries it gets, collecting finished output in between
+/// (which frees the decoder to take more), before it is played as a gap.
+const INPUT_TRIES: u32 = 4;
 
 /// `OpusHead` (RFC 7845 §5.1), which Android's decoder takes as `csd-0`.
 /// Family 0 for plain stereo, family 1 with the stream layout otherwise.
@@ -72,20 +84,32 @@ impl Decoder {
         })
     }
 
-    fn feed(&mut self, packet: &[u8], pts_us: u64) -> Result<(), String> {
-        let mut input = match self.codec.dequeue_input_buffer(INPUT_WAIT) {
-            Ok(DequeuedInputBufferResult::Buffer(b)) => b,
-            Ok(DequeuedInputBufferResult::TryAgainLater) => return Err("decoder busy; packet dropped".into()),
-            Err(e) => return Err(format!("input buffer: {e:?}")),
-        };
-        let buffer = input.buffer_mut();
-        let n = packet.len().min(buffer.len());
-        for (dst, &src) in buffer.iter_mut().zip(&packet[..n]) {
-            dst.write(src);
+    /// Queues `packet`; `Ok(false)` if the decoder had no room for it even
+    /// after waiting. Output finished meanwhile goes to `out`.
+    fn feed(&mut self, packet: &[u8], pts_us: u64, out: &mut Vec<f32>, stats: &AudioStats) -> Result<bool, String> {
+        for attempt in 0..INPUT_TRIES {
+            let mut input = match self.codec.dequeue_input_buffer(INPUT_WAIT) {
+                Ok(DequeuedInputBufferResult::Buffer(b)) => b,
+                Ok(DequeuedInputBufferResult::TryAgainLater) => {
+                    if attempt == 0 {
+                        stats.decoder_busy_waits.fetch_add(1, Ordering::Relaxed);
+                    }
+                    self.drain(out)?;
+                    continue;
+                }
+                Err(e) => return Err(format!("input buffer: {e:?}")),
+            };
+            let buffer = input.buffer_mut();
+            let n = packet.len().min(buffer.len());
+            for (dst, &src) in buffer.iter_mut().zip(&packet[..n]) {
+                dst.write(src);
+            }
+            self.codec
+                .queue_input_buffer(input, 0, n, pts_us, 0)
+                .map_err(|e| format!("queue input: {e:?}"))?;
+            return Ok(true);
         }
-        self.codec
-            .queue_input_buffer(input, 0, n, pts_us, 0)
-            .map_err(|e| format!("queue input: {e:?}"))
+        Ok(false)
     }
 
     /// Moves every finished block of PCM (16-bit) into `out` as floats.
@@ -137,6 +161,7 @@ pub struct MediaCodecOpusDecoder {
     pts_us: u64,
     frame_us: u64,
     errors: u32,
+    stats: Arc<AudioStats>,
 }
 
 impl Default for MediaCodecOpusDecoder {
@@ -148,6 +173,7 @@ impl Default for MediaCodecOpusDecoder {
             pts_us: 0,
             frame_us: 5_000,
             errors: 0,
+            stats: Arc::default(),
         }
     }
 }
@@ -169,19 +195,27 @@ impl AudioDecoder for MediaCodecOpusDecoder {
         let decoder = self.decoder.as_mut().ok_or("Opus decoder is not configured")?;
         self.pts_us += self.frame_us;
         self.pcm.clear();
-        if packet.is_empty() {
-            // Lost packet: a packet's worth of silence keeps the timing.
-            self.pcm.resize(self.frame_samples * decoder.channels, 0.0);
-            return Ok(DecodedAudio {
-                samples: &self.pcm,
-                channels: decoder.channels,
-            });
-        }
-        let result = decoder
-            .feed(packet, self.pts_us)
-            .and_then(|()| decoder.drain(&mut self.pcm));
+        // Lost packet, or one the decoder had no room for: a packet's worth
+        // of gap keeps the timing.
+        let mut gap_frames = 0;
+        let result = if packet.is_empty() {
+            gap_frames = self.frame_samples;
+            decoder.drain(&mut self.pcm)
+        } else {
+            decoder.drain(&mut self.pcm).and_then(|()| {
+                if !decoder.feed(packet, self.pts_us, &mut self.pcm, &self.stats)? {
+                    let drops = self.stats.decoder_busy_drops.fetch_add(1, Ordering::Relaxed) + 1;
+                    if drops <= 5 || drops.is_multiple_of(500) {
+                        warn!("audio decoder busy for 20 ms ({drops} packets played as gaps)");
+                    }
+                    gap_frames = self.frame_samples;
+                }
+                decoder.drain(&mut self.pcm)
+            })
+        };
         if let Err(e) = result {
             self.errors += 1;
+            self.stats.decode_errors.fetch_add(1, Ordering::Relaxed);
             if self.errors <= 5 || self.errors % 500 == 0 {
                 warn!("audio decode ({} errors): {e}", self.errors);
             }
@@ -189,6 +223,7 @@ impl AudioDecoder for MediaCodecOpusDecoder {
         Ok(DecodedAudio {
             samples: &self.pcm,
             channels: decoder.channels,
+            gap_frames,
         })
     }
 
@@ -196,6 +231,10 @@ impl AudioDecoder for MediaCodecOpusDecoder {
         self.decoder = None;
         self.pts_us = 0;
         self.errors = 0;
+    }
+
+    fn attach_stats(&mut self, stats: Arc<AudioStats>) {
+        self.stats = stats;
     }
 }
 
