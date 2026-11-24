@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use log::{info, warn};
 
-use crate::audio::{AudioConfig, AudioReceiver};
+use crate::audio::{AudioConfig, AudioCounters, AudioReceiver};
 use crate::control::{ControlEvent, ControlStream, TERMINATION_GRACEFUL};
 use crate::input::{self, InputEvent};
 use crate::rtsp::{self, HandshakeConfig, Negotiated};
@@ -290,6 +290,10 @@ impl StreamSession {
 
     pub fn video_counters(&self) -> Option<Arc<VideoCounters>> {
         self.video.as_ref().map(|video| video.counters.clone())
+    }
+
+    pub fn audio_counters(&self) -> Option<Arc<AudioCounters>> {
+        self.audio.as_ref().map(|audio| audio.counters.clone())
     }
 
     pub fn send_input(&self, event: &InputEvent) {

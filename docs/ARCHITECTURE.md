@@ -112,7 +112,9 @@ Pure-Rust data plane, following moonlight-common-c's Sunshine path:
   nanors (solving only for the missing shards), frame reassembly, waiting for
   an IDR after unrecoverable loss, and a watchdog that probes the host when
   video stops arriving.
-- `audio`: RTP Opus receiver, optional AES-CBC, loss signalled to the sink.
+- `audio`: RTP Opus receiver, optional AES-CBC, a short reorder window (four
+  packets, 25 ms at most) so packets swapped by Wi-Fi retries are played
+  rather than dropped, and loss signalled to the sink.
 - `input`: event model → input packets on per-class channels.
 - `session`: `StreamSession` brings it all up in order and reports
   `StreamEvent`s (stages, first frame, stats, termination).
@@ -153,7 +155,17 @@ GameStream speaker order. On Linux, ALSA playback maps PCM to the speaker
 positions on the default device, with cpal as the stereo fallback. AAudio
 opens a positional 5.1 or 7.1 stream when the Android API and route allow it.
 The FIFO preserves the decoded channels and measures latency in frames.
+Its target starts at 30 ms and grows 15 ms at each underrun, up to 120 ms
+(shrinking back after 10 s without one), so a link that goes quiet now and
+then (Bluetooth sharing 2.4 GHz with Wi-Fi) costs one gap instead of a
+stutter every few seconds. Packets lost on the way become faded gaps of
+silence of their length (MediaCodec has no packet-loss concealment), and
+the skips that bring latency back after a burst are crossfaded.
 `PcmReader` mixes channels when the output accepts fewer than the host sends.
+`AudioStats` counts each stage (decoded, concealed, decoder busy, underruns,
+skips, buffer target, output burst and device underruns) for the session
+report, which also says whether Bluetooth was on, which Bluetooth audio
+outputs were connected, the Wi-Fi band and signal, and where the audio played.
 
 ### hestia-frontend
 The graphical client without a UI toolkit, so the toolkit can be swapped
