@@ -70,7 +70,9 @@ not a goal: no item here exists for them.
 - [x] Session reports with every log line (share sheet / file / host clipboard)
 - [ ] Control-stream loss statistics to the host (adaptive bitrate)
 - [x] Hermes clipboard sync during the stream (and one-off send / fetch)
-- [x] Named stream profiles, chosen per host
+- [x] Named stream profiles, owned by each host (legacy migration included)
+- [x] Contextual host settings and host name/address editing
+- [x] Configurable local keyboard shortcuts; hide editor without a physical keyboard on Android
 
 ## Milestone 3 — polish
 

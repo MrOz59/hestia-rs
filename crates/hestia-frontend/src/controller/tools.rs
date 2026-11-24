@@ -287,7 +287,7 @@ impl Controller {
                 Ok(Err(e)) => return c.toast(api_error("Diagnostic report", &e)),
                 Err(e) => return c.toast(format!("Diagnostic report: {e}")),
             };
-            let host = core.host(&id).map(|h| h.name).unwrap_or_default();
+            let host = core.host(&id).map(|h| h.display_name().to_owned()).unwrap_or_default();
             let now = std::time::SystemTime::now();
             let dir = platform::reports_dir(core.data_dir());
             let path = match hestia_core::report::save_named(&dir, "hermes", now, &text) {

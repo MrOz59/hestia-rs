@@ -69,6 +69,15 @@ pub fn preset_hint(native: Option<(u32, u32, u32)>) -> String {
 }
 pub const AUDIO_LAYOUTS: [AudioLayout; 3] = [AudioLayout::Stereo, AudioLayout::Surround51, AudioLayout::Surround71];
 
+/// The host page's line under the name: the address in use and, once the
+/// host has answered, its version.
+pub fn host_detail(snapshot: &HostSnapshot) -> String {
+    match &snapshot.info {
+        Some(info) => format!("{} · {}", snapshot.record.address, info.app_version),
+        None => snapshot.record.address.clone(),
+    }
+}
+
 pub fn host_card(record: &HostRecord, snapshot: Option<&HostSnapshot>, checking: bool) -> HostCard {
     let online = snapshot.is_some_and(|s| s.online);
     let paired = snapshot.map_or(
@@ -102,11 +111,7 @@ pub fn host_card(record: &HostRecord, snapshot: Option<&HostSnapshot>, checking:
     };
     HostCard {
         id: record.id.clone(),
-        name: if record.name.is_empty() {
-            record.address.clone()
-        } else {
-            record.name.clone()
-        },
+        name: record.display_name().to_owned(),
         address: record.active_address().to_string(),
         online,
         checking: checking && snapshot.is_none(),

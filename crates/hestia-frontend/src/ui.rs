@@ -222,6 +222,10 @@ pub trait View {
 
     // Apps ---------------------------------------------------------------
     fn set_host_name(&self, text: String);
+    fn set_host_edit_visible(&self, on: bool);
+    fn set_host_edit_name(&self, text: String);
+    fn set_host_edit_address(&self, text: String);
+    fn set_host_edit_error(&self, text: String);
     fn set_host_detail(&self, text: String);
     fn set_host_chips(&self, chips: Vec<String>);
     fn set_host_hermes(&self, on: bool);
@@ -312,6 +316,9 @@ pub trait View {
     fn set_pointer_capture(&self, on: bool);
 
     // Settings -----------------------------------------------------------
+    fn set_settings_host_name(&self, name: String);
+    fn set_physical_keyboard(&self, on: bool);
+    fn set_shortcut_labels(&self, labels: [String; 3]);
     fn show_settings(&self, form: SettingsForm);
     fn settings_form(&self) -> SettingsForm;
     /// `VideoScale` index, without reloading the rest of the form.

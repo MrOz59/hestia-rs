@@ -70,6 +70,12 @@ export component AppWindow inherits Window {
 
     // Apps
     in property <string> host-name;
+    in-out property <bool> host-edit-visible;
+    in-out property <string> host-edit-name;
+    in-out property <string> host-edit-address;
+    in property <string> host-edit-error;
+    callback open-host-editor();
+    callback save-host-edit(string, string);
     in property <string> host-detail;
     in property <[string]> host-chips;
     in property <[AppCard]> apps;
@@ -221,6 +227,12 @@ export component AppWindow inherits Window {
     in-out property <int> cfg-orientation: 0;
     callback settings-custom-resolution(string);
     in property <string> client-id;
+    in property <string> cfg-host-name;
+    in property <bool> cfg-physical-keyboard;
+    in-out property <string> cfg-shortcut-disconnect: "Ctrl+Alt+Shift+Q";
+    in-out property <string> cfg-shortcut-stats: "Ctrl+Alt+Shift+S";
+    in-out property <string> cfg-shortcut-capture: "Ctrl+Alt+Shift+Z";
+    callback settings-update-shortcut(int, string);
     in property <string> data-dir;
     in property <string> version-text;
     property <int> settings-return: 0;
@@ -232,6 +244,10 @@ export component AppWindow inherits Window {
     function go-back() -> bool {
         if (root.pair-visible) {
             root.pair-cancel();
+            return true;
+        }
+        if (root.host-edit-visible) {
+            root.host-edit-visible = false;
             return true;
         }
         if (root.add-visible) {
@@ -296,6 +312,14 @@ export component AppWindow inherits Window {
     }
     changed add-visible => {
         if (root.add-visible) {
+            root.dlg = !root.is-android || Nav.keyboard ? 0 : -1;
+        } else {
+            root.dlg = -1;
+            root.take-focus();
+        }
+    }
+    changed host-edit-visible => {
+        if (root.host-edit-visible) {
             root.dlg = !root.is-android || Nav.keyboard ? 0 : -1;
         } else {
             root.dlg = -1;
@@ -415,6 +439,14 @@ export component AppWindow inherits Window {
             profile-index <=> root.apps-profile-index;
             profile-chosen(index) => {
                 root.apps-profile-chosen(index);
+            }
+            settings => {
+                root.settings-return = 1;
+                root.screen = 3;
+                root.open-settings();
+            }
+            edit-host => {
+                root.open-host-editor();
             }
             tools => {
                 root.open-tools();
@@ -654,6 +686,12 @@ export component AppWindow inherits Window {
             gpu-video <=> root.cfg-gpu-video;
             direct-video <=> root.cfg-direct-video;
             android: root.is-android;
+            physical-keyboard: root.cfg-physical-keyboard;
+            host-name: root.cfg-host-name;
+            shortcut-disconnect <=> root.cfg-shortcut-disconnect;
+            shortcut-stats <=> root.cfg-shortcut-stats;
+            shortcut-capture <=> root.cfg-shortcut-capture;
+            update-shortcut(which, value) => { root.settings-update-shortcut(which, value); }
             touch-controls: root.has-touch-input;
             orientation <=> root.cfg-orientation;
             profile-names: root.cfg-profile-names;
@@ -686,6 +724,71 @@ export component AppWindow inherits Window {
         }
 
         // ---------------------------------------------------------------
+        // Edit the paired host's local alias and its preferred connection.
+        // This never edits the hostname on Hermes or invalidates pairing.
+        if root.host-edit-visible: Modal {
+            width: 100%;
+            height: 100%;
+            hold-focus: root.dlg < 0;
+            arrow => { root.dlg = 0; }
+            dismissed => { root.host-edit-visible = false; }
+
+            DialogTitle { text: "Edit host"; }
+            DialogText { text: "Choose a local name and change the preferred IP or DNS address. The paired host identity is preserved."; }
+            TextField {
+                placeholder: "Host name";
+                text <=> root.host-edit-name;
+                auto-edit: !root.is-android;
+                want-focus: root.dlg == 0;
+                nav(k) => {
+                    if (k == Key.DownArrow) { root.dlg = 1; return true; }
+                    return false;
+                }
+                entered => { root.dlg = 0; }
+            }
+            TextField {
+                placeholder: "192.168.0.10:47989";
+                text <=> root.host-edit-address;
+                auto-edit: !root.is-android;
+                want-focus: root.dlg == 1;
+                nav(k) => {
+                    if (k == Key.UpArrow) { root.dlg = 0; return true; }
+                    if (k == Key.DownArrow) { root.dlg = 3; return true; }
+                    return false;
+                }
+                entered => { root.dlg = 1; }
+            }
+            if root.host-edit-error != "": DialogText { text: root.host-edit-error; }
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: end;
+                ActionButton {
+                    text: "Cancel";
+                    want-focus: root.dlg == 2;
+                    nav(k) => {
+                        if (k == Key.RightArrow) { root.dlg = 3; return true; }
+                        if (k == Key.UpArrow) { root.dlg = 1; return true; }
+                        return false;
+                    }
+                    entered => { root.dlg = 2; }
+                    clicked => { root.host-edit-visible = false; }
+                }
+                ActionButton {
+                    text: "Save host";
+                    kind: 1;
+                    enabled: root.host-edit-address != "";
+                    want-focus: root.dlg == 3;
+                    nav(k) => {
+                        if (k == Key.LeftArrow) { root.dlg = 2; return true; }
+                        if (k == Key.UpArrow) { root.dlg = 1; return true; }
+                        return false;
+                    }
+                    entered => { root.dlg = 3; }
+                    clicked => { root.save-host-edit(root.host-edit-name, root.host-edit-address); }
+                }
+            }
+        }
+
         // Add host dialog: address (0), Cancel (1), Add (2)
         // ---------------------------------------------------------------
         if root.add-visible: Modal {

@@ -91,8 +91,14 @@ impl Store {
         Ok(self.read("profiles.json")?.unwrap_or_default())
     }
 
-    pub fn save_profiles(&self, profiles: &[crate::profiles::StreamProfile]) -> io::Result<()> {
-        self.write("profiles.json", &profiles)
+    /// The device-wide profiles from before each host had its own, once
+    /// they're copied to the hosts: renamed to `profiles.legacy.json` (kept,
+    /// and never copied again). No file: nothing to do.
+    pub fn archive_legacy_profiles(&self) -> io::Result<()> {
+        match fs::rename(self.dir.join("profiles.json"), self.dir.join("profiles.legacy.json")) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            done => done,
+        }
     }
 }
 

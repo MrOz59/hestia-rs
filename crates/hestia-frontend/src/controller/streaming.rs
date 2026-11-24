@@ -1,6 +1,7 @@
 //! The stream screen: runs a [`ManagedStream`] after a launch, shows decoded
 //! frames and forwards keyboard, mouse and touch input to the host.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -8,6 +9,7 @@ use std::time::{Duration, Instant};
 use hestia_core::TouchMode;
 use hestia_core::diagnosis::{self, Bottleneck, SpikeHistory};
 use hestia_core::report::StatsSample;
+use hestia_core::shortcuts::{ShortcutAction, Shortcuts};
 use hestia_core::stream::input::Modifiers;
 use hestia_core::stream::{InputEvent, SessionListener, StreamEvent, StreamStats};
 use hestia_core::{LaunchedSession, ManagedStream, StreamHost};
@@ -40,6 +42,23 @@ pub(super) struct ActiveStream {
 struct Output {
     session: ManagedStream,
     held: Mutex<Held>,
+    /// Local commands, as the device settings had them when the stream
+    /// started (read once, not on every key).
+    shortcuts: Shortcuts,
+    /// Keys whose press ran a shortcut: their release must not reach the
+    /// host either, or it would get a key-up without the key-down.
+    swallowed_keys: Mutex<HashSet<u16>>,
+}
+
+/// Where a key goes once the stream's own shortcuts are taken out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyRoute {
+    /// To the host.
+    Host,
+    /// Nowhere: the release of a key whose press ran a shortcut.
+    Swallow,
+    /// A Hestia command; the key stays here.
+    Run(ShortcutAction),
 }
 
 impl Output {
@@ -80,6 +99,16 @@ impl Output {
         self.held().modifiers()
     }
 
+    /// Routes a key past the local shortcuts. A shortcut's press and its
+    /// release both stay here; everything else goes to the host.
+    fn route_key(&self, key: u16, pressed: bool, modifiers: Modifiers) -> KeyRoute {
+        route_key(&self.shortcuts, &mut self.swallowed(), key, pressed, modifiers)
+    }
+
+    fn swallowed(&self) -> MutexGuard<'_, HashSet<u16>> {
+        self.swallowed_keys.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     /// Lets go of every key and button the host holds.
     fn release_all(&self) {
         let released = self.held().release_all();
@@ -89,25 +118,32 @@ impl Output {
     }
 }
 
-/// Stream shortcuts, with Ctrl+Alt+Shift held.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Hotkey {
-    Disconnect,
-    Stats,
-    MouseCapture,
-}
-
-impl Hotkey {
-    /// By virtual key (letters are their upper-case ASCII code).
-    fn for_key(key: u16) -> Option<Self> {
-        const Q: u16 = b'Q' as u16;
-        const S: u16 = b'S' as u16;
-        const Z: u16 = b'Z' as u16;
-        match key {
-            Q => Some(Self::Disconnect),
-            S => Some(Self::Stats),
-            Z => Some(Self::MouseCapture),
-            _ => None,
+/// [`Output::route_key`], on its parts (for the tests).
+fn route_key(
+    shortcuts: &Shortcuts,
+    swallowed: &mut HashSet<u16>,
+    key: u16,
+    pressed: bool,
+    modifiers: Modifiers,
+) -> KeyRoute {
+    if !pressed {
+        return if swallowed.remove(&key) {
+            KeyRoute::Swallow
+        } else {
+            KeyRoute::Host
+        };
+    }
+    match shortcuts.action(key, modifiers) {
+        Some(action) => {
+            swallowed.insert(key);
+            KeyRoute::Run(action)
+        }
+        None => {
+            // A press that isn't a shortcut (other modifiers now): if this
+            // key's earlier release went elsewhere (focus lost), it must not
+            // eat the release of this press and leave the key stuck down.
+            swallowed.remove(&key);
+            KeyRoute::Host
         }
     }
 }
@@ -506,6 +542,8 @@ impl Controller {
             out: Output {
                 session,
                 held: Mutex::new(Held::default()),
+                shortcuts: launched.settings.shortcuts,
+                swallowed_keys: Mutex::new(HashSet::new()),
             },
             host_id,
             hermes: listener.hermes,
@@ -728,10 +766,16 @@ impl Controller {
         if repeat {
             return;
         }
-        if pressed && modifiers.ctrl && modifiers.alt && modifiers.shift {
-            let key = text.chars().next().map(|c| c.to_ascii_uppercase() as u16);
-            if let Some(hotkey) = key.filter(|_| text.chars().count() == 1).and_then(Hotkey::for_key) {
-                return self.hotkey(hotkey);
+        if let Some(keymap::Mapped::Key(key)) = keymap::map(text) {
+            let route = self
+                .active_stream()
+                .as_ref()
+                .filter(|active| active.input.focused)
+                .map_or(KeyRoute::Host, |active| active.out.route_key(key, pressed, modifiers));
+            match route {
+                KeyRoute::Host => {}
+                KeyRoute::Swallow => return,
+                KeyRoute::Run(action) => return self.run_shortcut(action),
             }
         }
         if let Some(event) = stream_input::key(text, pressed, modifiers) {
@@ -749,7 +793,7 @@ impl Controller {
         let Some(key) = keymap::physical(code) else {
             return false;
         };
-        let hotkey = {
+        let route = {
             let guard = self.active_stream();
             let Some(active) = guard.as_ref().filter(|a| a.input.focused) else {
                 return false;
@@ -758,17 +802,14 @@ impl Controller {
             if repeat {
                 return true;
             }
-            let held = active.out.modifiers();
-            match Hotkey::for_key(key).filter(|_| pressed && held.ctrl && held.alt && held.shift) {
-                Some(hotkey) => Some(hotkey),
-                None => {
-                    active.out.send_key(key, pressed);
-                    None
-                }
+            let route = active.out.route_key(key, pressed, active.out.modifiers());
+            if route == KeyRoute::Host {
+                active.out.send_key(key, pressed);
             }
+            route
         };
-        if let Some(hotkey) = hotkey {
-            self.hotkey(hotkey);
+        if let KeyRoute::Run(action) = route {
+            self.run_shortcut(action);
         }
         true
     }
@@ -781,11 +822,11 @@ impl Controller {
         self.active_stream().as_ref().is_some_and(|a| a.input.focused)
     }
 
-    fn hotkey(self: &Shared, hotkey: Hotkey) {
-        match hotkey {
-            Hotkey::Disconnect => self.end_stream(None, None, false),
-            Hotkey::Stats => self.ui(|ui| ui.set_stream_show_stats(!ui.stream_show_stats())),
-            Hotkey::MouseCapture => self.toggle_mouse_capture(),
+    fn run_shortcut(self: &Shared, action: ShortcutAction) {
+        match action {
+            ShortcutAction::Disconnect => self.end_stream(None, None, false),
+            ShortcutAction::Stats => self.ui(|ui| ui.set_stream_show_stats(!ui.stream_show_stats())),
+            ShortcutAction::MouseCapture => self.toggle_mouse_capture(),
         }
     }
 
@@ -1251,5 +1292,52 @@ impl Controller {
                 ui.set_stream_banner(String::new());
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL: Modifiers = Modifiers {
+        shift: true,
+        ctrl: true,
+        alt: true,
+        meta: false,
+    };
+    const NONE: Modifiers = Modifiers {
+        shift: false,
+        ctrl: false,
+        alt: false,
+        meta: false,
+    };
+
+    #[test]
+    fn a_shortcut_keeps_its_press_and_release() {
+        let keys = Shortcuts::default();
+        let mut swallowed = HashSet::new();
+        let q = b'Q' as u16;
+        assert_eq!(
+            route_key(&keys, &mut swallowed, q, true, ALL),
+            KeyRoute::Run(ShortcutAction::Disconnect)
+        );
+        // Released after the modifiers: still not for the host.
+        assert_eq!(route_key(&keys, &mut swallowed, q, false, NONE), KeyRoute::Swallow);
+        assert_eq!(route_key(&keys, &mut swallowed, q, true, NONE), KeyRoute::Host);
+        assert_eq!(route_key(&keys, &mut swallowed, q, false, NONE), KeyRoute::Host);
+    }
+
+    #[test]
+    fn a_lost_release_does_not_eat_a_later_one() {
+        let keys = Shortcuts::default();
+        let mut swallowed = HashSet::new();
+        let s = b'S' as u16;
+        assert_eq!(
+            route_key(&keys, &mut swallowed, s, true, ALL),
+            KeyRoute::Run(ShortcutAction::Stats)
+        );
+        // Its release went to another window; then S is typed on its own.
+        assert_eq!(route_key(&keys, &mut swallowed, s, true, NONE), KeyRoute::Host);
+        assert_eq!(route_key(&keys, &mut swallowed, s, false, NONE), KeyRoute::Host);
     }
 }

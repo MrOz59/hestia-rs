@@ -21,6 +21,23 @@ pub fn has_soft_keyboard() -> bool {
     cfg!(target_os = "android")
 }
 
+/// Whether the user has a real, non-IME keyboard attached. Android tracks
+/// USB/Bluetooth keyboards via its current native configuration. Recheck
+/// whenever the settings page opens so hot-plugging does not need a restart.
+pub fn has_physical_keyboard() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        use android_activity::ndk::configuration::Keyboard;
+        super::android::android_app().is_some_and(|app| app.config().keyboard() != Keyboard::NoKeys)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        // On desktop the keyboard comes from the compositor seat; keyboard
+        // configuration is expected to be available independently of touch.
+        true
+    }
+}
+
 /// Shows or hides the on-screen keyboard that types into the host.
 pub fn set_keyboard_visible(visible: bool) {
     #[cfg(target_os = "android")]

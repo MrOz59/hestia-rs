@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use hestia_core::nvhttp::{AppInfo, PairingOutcome, PairingPin};
+use hestia_core::shortcuts::{ShortcutAction, ShortcutBinding, Shortcuts};
 use hestia_core::{DeviceInfo, HestiaClient, HostSnapshot, Preset, presets};
 use log::{info, warn};
 
@@ -77,6 +78,11 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
     if let Err(e) = std::thread::Builder::new().name(name.into()).spawn(f) {
         warn!("failed to spawn {name}: {e}");
     }
+}
+
+/// The shortcut editor's labels, in [`ShortcutAction::ALL`] order.
+fn shortcut_labels(shortcuts: Shortcuts) -> [String; 3] {
+    ShortcutAction::ALL.map(|action| shortcuts.get(action).label())
 }
 
 impl Controller {
@@ -157,11 +163,29 @@ impl Controller {
         self.refresh_current_running();
     }
 
-    /// The settings page opened: load the saved settings into its form.
+    /// Load the settings for the selected host, or device defaults on the
+    /// hosts screen. Hardware-specific controls depend on current capabilities.
     pub fn open_settings(self: &Shared) {
         if let Some(core) = self.core() {
-            let settings = core.settings();
-            self.ui(move |ui| view::load_settings_into(ui, &settings, platform::native_display()));
+            let selected = self.state().current_host.clone();
+            let (settings, host_name) = match selected {
+                Some(ref id) => {
+                    let (settings, _) = core.settings_for_host(id);
+                    let name = core
+                        .host(id)
+                        .map(|host| host.display_name().to_owned())
+                        .unwrap_or_default();
+                    (settings, name)
+                }
+                None => (core.settings(), String::new()),
+            };
+            let shortcuts = core.settings().shortcuts;
+            self.ui(move |ui| {
+                ui.set_settings_host_name(host_name);
+                ui.set_physical_keyboard(platform::has_physical_keyboard());
+                ui.set_shortcut_labels(shortcut_labels(shortcuts));
+                view::load_settings_into(ui, &settings, platform::native_display());
+            });
             self.push_profiles();
         }
     }
@@ -363,7 +387,7 @@ impl Controller {
             let Some(core) = c.core() else { return };
             match core.add_manual(&address) {
                 Ok(snapshot) => {
-                    let name = snapshot.record.name.clone();
+                    let name = snapshot.record.display_name().to_owned();
                     c.state().snapshots.insert(snapshot.record.id.clone(), snapshot);
                     c.ui(|ui| {
                         ui.set_add_busy(false);
@@ -389,18 +413,18 @@ impl Controller {
         let Some(core) = self.core() else { return };
         let Ok(record) = core.host(&id) else { return };
         let snapshot = self.state().snapshots.get(&id).cloned();
+        let name = record.display_name().to_owned();
         match snapshot {
             Some(s) if s.online && s.paired => self.show_apps(s),
-            Some(s) if s.online => self.start_pairing(id, record.name),
-            Some(_) if record.mac.is_some() => self.wake_host(id, record.name),
+            Some(s) if s.online => self.start_pairing(id, name),
+            Some(_) if record.mac.is_some() => self.wake_host(id, name),
             Some(_) => {
                 self.toast(format!(
-                    "{} is offline (Wake-on-LAN needs its MAC address, learned once it's been online)",
-                    record.name
+                    "{name} is offline (Wake-on-LAN needs its MAC address, learned once it's been online)"
                 ));
                 self.refresh_host(id);
             }
-            None => self.toast(format!("Still contacting {}…", record.name)),
+            None => self.toast(format!("Still contacting {name}…")),
         }
     }
 
@@ -429,13 +453,67 @@ impl Controller {
         });
     }
 
+    /// Host page → Edit: the dialog for the open host's name on this
+    /// device and the address it is reached at.
+    pub fn edit_current_host(self: &Shared) {
+        let Some(core) = self.core() else { return };
+        let Some(id) = self.state().current_host.clone() else {
+            return;
+        };
+        let Ok(host) = core.host(&id) else { return };
+        let name = host.display_name().to_owned();
+        let address = host.active_address().to_string();
+        self.ui(move |ui| {
+            ui.set_host_edit_name(name);
+            ui.set_host_edit_address(address);
+            ui.set_host_edit_error(String::new());
+            ui.set_host_edit_visible(true);
+        });
+    }
+
+    /// The edit dialog's Save. The pairing stays: it belongs to the host,
+    /// not to an address.
+    pub fn save_current_host(self: &Shared, name: String, address: String) {
+        let Some(core) = self.core() else { return };
+        let Some(id) = self.state().current_host.clone() else {
+            return;
+        };
+        if let Err(e) = core.edit_host_details(&id, &name, &address) {
+            let message = e.to_string();
+            self.ui(move |ui| ui.set_host_edit_error(message));
+            return;
+        }
+        let header = core.host(&id).ok().map(|record| {
+            let mut st = self.state();
+            match st.snapshots.get_mut(&id) {
+                Some(snapshot) => {
+                    snapshot.record = record;
+                    (snapshot.record.display_name().to_owned(), view::host_detail(snapshot))
+                }
+                None => (record.display_name().to_owned(), record.address.clone()),
+            }
+        });
+        self.ui(move |ui| {
+            if let Some((name, detail)) = header {
+                ui.set_host_name(name);
+                ui.set_host_detail(detail);
+            }
+            ui.set_host_edit_visible(false);
+            ui.set_host_edit_error(String::new());
+        });
+        self.push_hosts();
+        // Whether it answers at the new address.
+        self.refresh_host(id);
+        self.toast("Host updated");
+    }
+
     /// Forgets the open host (its pairing too).
     pub fn forget_current(self: &Shared) {
         let Some(core) = self.core() else { return };
         let Some(id) = self.state().current_host.take() else {
             return;
         };
-        let name = core.host(&id).map(|h| h.name).unwrap_or_default();
+        let name = core.host(&id).map(|h| h.display_name().to_owned()).unwrap_or_default();
         if let Err(e) = core.forget(&id) {
             self.toast(format!("Could not forget host: {e}"));
             return;
@@ -531,7 +609,7 @@ impl Controller {
         let Some(id) = self.state().pairing_host.clone() else {
             return;
         };
-        let name = core.host(&id).map(|h| h.name).unwrap_or_default();
+        let name = core.host(&id).map(|h| h.display_name().to_owned()).unwrap_or_default();
         self.start_pairing(id, name);
     }
 
@@ -607,18 +685,15 @@ impl Controller {
     fn show_apps(self: &Shared, snapshot: HostSnapshot) {
         let id = snapshot.record.id.clone();
         self.state().current_host = Some(id.clone());
-        let name = snapshot.record.name.clone();
-        let detail = match &snapshot.info {
-            Some(info) => format!("{} · {}", snapshot.record.address, info.app_version),
-            None => snapshot.record.address.clone(),
-        };
+        let name = snapshot.record.display_name().to_owned();
+        let detail = view::host_detail(&snapshot);
         let chips = view::host_chips(&snapshot);
         let running = snapshot.info.as_ref().is_some_and(|i| i.is_busy());
         let hermes = snapshot.capabilities.is_some();
         self.ui(move |ui| {
             ui.set_host_hermes(hermes);
             ui.set_host_name(name);
-            ui.set_host_detail(detail.into());
+            ui.set_host_detail(detail);
             ui.set_host_chips(chips);
             ui.set_apps(Vec::new());
             ui.set_apps_loading(true);
@@ -699,7 +774,7 @@ impl Controller {
                 .unwrap_or_default();
             let snapshot = st.snapshots.get(&id);
             let current = snapshot.and_then(|s| s.info.as_ref()).map_or(0, |i| i.current_game);
-            let host_name = snapshot.map(|s| s.record.name.clone()).unwrap_or_default();
+            let host_name = snapshot.map(|s| s.record.display_name().to_owned()).unwrap_or_default();
             let address = snapshot.map(|s| s.record.address.clone()).unwrap_or_default();
             (title, host_name, address, current != 0 && current != app_id)
         };
@@ -918,17 +993,55 @@ impl Controller {
     // Settings
     // ------------------------------------------------------------------
 
-    /// Saves the settings form.
+    /// Saves the settings form: the device's settings, or, opened from a
+    /// host's page, that host's quality settings and the device's others.
     pub fn save_settings(self: &Shared) {
         let Some(core) = self.core() else { return };
+        let selected = self.state().current_host.clone();
         let c = self.clone();
         self.ui(move |ui| {
-            let settings = view::read_settings_from(ui, &core.settings());
-            match core.set_settings(settings) {
+            let global = core.settings();
+            let base = selected
+                .as_deref()
+                .map(|id| core.settings_for_host(id).0)
+                .unwrap_or_else(|| global.clone());
+            let edited = view::read_settings_from(ui, &base);
+            let result = match selected {
+                // From a host's page: the quality side is that host's (its
+                // profile, or its own defaults); the rest is the device's.
+                Some(id) => {
+                    let device = hestia_core::profiles::StreamProfile::from_settings("", &global).apply(&edited);
+                    core.set_host_settings(&id, &edited)
+                        .and_then(|()| core.set_settings(device))
+                }
+                None => core.set_settings(edited),
+            };
+            match result {
                 Ok(()) => c.toast("Settings saved"),
                 Err(e) => c.toast(format!("Could not save settings: {e}")),
             }
         });
+    }
+
+    /// Settings → a shortcut's Apply (`which`: its place in
+    /// [`ShortcutAction::ALL`]). Saved at once, with the device's settings;
+    /// the row goes back to the saved shortcut when `text` isn't one.
+    pub fn update_shortcut(self: &Shared, which: i32, text: String) {
+        let Some(core) = self.core() else { return };
+        let Some(action) = ShortcutAction::from_index(which) else {
+            return;
+        };
+        let mut settings = core.settings();
+        let outcome = ShortcutBinding::parse(&text).and_then(|binding| settings.shortcuts.assign(action, binding));
+        match outcome {
+            Ok(()) => match core.set_settings(settings) {
+                Ok(()) => self.toast("Keyboard shortcut updated"),
+                Err(e) => self.toast(format!("Could not save shortcut: {e}")),
+            },
+            Err(why) => self.toast(format!("Invalid shortcut: {why}")),
+        }
+        let keys = core.settings().shortcuts;
+        self.ui(move |ui| ui.set_shortcut_labels(shortcut_labels(keys)));
     }
 
     /// A preset picked in Settings: fill in resolution, frame rate and

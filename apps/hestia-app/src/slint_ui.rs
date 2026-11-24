@@ -197,6 +197,18 @@ impl View for SlintView<'_> {
     fn set_host_name(&self, text: String) {
         self.0.set_host_name(text.into());
     }
+    fn set_host_edit_visible(&self, on: bool) {
+        self.0.set_host_edit_visible(on);
+    }
+    fn set_host_edit_name(&self, text: String) {
+        self.0.set_host_edit_name(text.into());
+    }
+    fn set_host_edit_address(&self, text: String) {
+        self.0.set_host_edit_address(text.into());
+    }
+    fn set_host_edit_error(&self, text: String) {
+        self.0.set_host_edit_error(text.into());
+    }
     fn set_host_detail(&self, text: String) {
         self.0.set_host_detail(text.into());
     }
@@ -433,6 +445,18 @@ impl View for SlintView<'_> {
         let _ = on;
     }
 
+    fn set_settings_host_name(&self, name: String) {
+        self.0.set_cfg_host_name(name.into());
+    }
+    fn set_physical_keyboard(&self, on: bool) {
+        self.0.set_cfg_physical_keyboard(on);
+    }
+    fn set_shortcut_labels(&self, labels: [String; 3]) {
+        let [disconnect, stats, capture] = labels;
+        self.0.set_cfg_shortcut_disconnect(disconnect.into());
+        self.0.set_cfg_shortcut_stats(stats.into());
+        self.0.set_cfg_shortcut_capture(capture.into());
+    }
     fn show_settings(&self, form: SettingsForm) {
         let w = self.0;
         w.set_cfg_resolution_options(strings(form.resolution_options));
@@ -512,6 +536,10 @@ pub(crate) fn wire(ui: &AppWindow, controller: &Arc<Controller>) {
     ui.on_open_host(move |id| c.open_host(id.to_string()));
     let c = controller.clone();
     ui.on_add_host(move |address| c.add_host(address.to_string()));
+    let c = controller.clone();
+    ui.on_open_host_editor(move || c.edit_current_host());
+    let c = controller.clone();
+    ui.on_save_host_edit(move |name, address| c.save_current_host(name.to_string(), address.to_string()));
 
     let c = controller.clone();
     ui.on_pair_retry(move || c.restart_pairing());
@@ -627,6 +655,8 @@ pub(crate) fn wire(ui: &AppWindow, controller: &Arc<Controller>) {
     ui.on_save_settings(move || c.save_settings());
     let c = controller.clone();
     ui.on_settings_preset_changed(move |index| c.apply_preset(index));
+    let c = controller.clone();
+    ui.on_settings_update_shortcut(move |which, text| c.update_shortcut(which, text.to_string()));
     let c = controller.clone();
     ui.on_stream_cycle_scale(move || c.cycle_video_scale());
 }
