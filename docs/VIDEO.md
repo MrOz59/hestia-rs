@@ -210,9 +210,22 @@ The report's video sections, from the network to the screen:
     hands the DMA-BUF over);
   * *RGBA ready to Slint handoff* / *GPU picture ready to draw submission*:
     waiting for the UI thread or the next frame drawn;
+  * *GPU draw submission to on screen* (Linux on Wayland, when the
+    compositor has `wp_presentation`): from the draw to the refresh the
+    compositor says showed the frame, compositing and the wait for that
+    refresh included; *first packet to on screen* is the whole way;
   * *IDR request to first …*: how long a recovery took.
 * **Video delivery** / **GPU video**: how many pictures went each way and how
-  many were replaced before being shown.
+  many were replaced before being shown; on Wayland, how many frames with a
+  new picture the compositor showed, discarded (a newer one replaced them)
+  or showed without a copy.
+* **Direct video** (Android): releases to the surface and the system's
+  render callbacks (Android 13+). *Visible buffer release to render (system
+  clock)* is the time from a picture's release to the refresh that showed
+  it, as the system reports it; *… to callback arrival* adds the callback's
+  own delivery. Pictures are released for the current system time, which
+  lets the window replace one still waiting for the screen with a newer one
+  instead of queuing both.
 * **Settings**: whether hardware decoding and the GPU path were on.
 
 The live diagnosis (stats overlay, and per second in the report) blames
@@ -235,9 +248,14 @@ picture's way into parts that can be compared:
   add these up, from the frame's first packet to the moment it is handed to
   the toolkit.
 
+After the draw, *GPU draw submission to on screen* (Wayland) and *visible
+buffer release to render* (Android direct video) carry the way to the
+refresh that showed the picture.
+
 What the report doesn't see: one-way network delay (only the round trip),
-input's way back to the host, and the display's own delay after the toolkit
-draws (compositor, vsync, the screen).
+input's way back to the host, the display's delay where the window can't
+report it (X11, Slint on Android, compositors without `wp_presentation`),
+and the screen's own delay after the refresh.
 
 ## 7. Next
 

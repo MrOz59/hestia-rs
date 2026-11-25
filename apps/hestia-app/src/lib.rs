@@ -16,6 +16,8 @@ mod gl_video;
 #[cfg(target_os = "android")]
 mod gpu_render;
 mod slint_ui;
+#[cfg(target_os = "linux")]
+mod wl_presentation;
 
 use std::path::PathBuf;
 use std::sync::Arc;
