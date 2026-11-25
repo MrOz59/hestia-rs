@@ -507,6 +507,7 @@ fn decode_loop(
     requester: Option<KeyframeRequester>,
     failure_handler: Option<Box<dyn Fn(String) + Send>>,
 ) {
+    hestia_stream::thread_priority::raise_current("hestia-decode", hestia_stream::thread_priority::Role::Video);
     let mut picture = DecodedFrame::default();
     let mut logged_size = (0, 0);
     let mut decoder_generation = 0;

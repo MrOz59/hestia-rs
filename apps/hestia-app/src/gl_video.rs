@@ -256,6 +256,11 @@ impl Renderer {
 
 /// Hooks the GPU colour conversion into the window's rendering (desktop).
 pub(crate) fn install(ui: &AppWindow, gpu: Arc<GpuWindow>) {
+    // This thread draws the video: ahead of ordinary work.
+    hestia_core::stream::thread_priority::raise_current(
+        "hestia-ui",
+        hestia_core::stream::thread_priority::Role::Interactive,
+    );
     let mut renderer = Renderer {
         weak: ui.as_weak(),
         gpu,

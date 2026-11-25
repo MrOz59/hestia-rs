@@ -220,6 +220,10 @@ impl ControlStream {
                 std::thread::Builder::new()
                     .name("hestia-control-rx".into())
                     .spawn(move || {
+                        crate::thread_priority::raise_current(
+                            "hestia-control-rx",
+                            crate::thread_priority::Role::Interactive,
+                        );
                         while !stop.load(Ordering::Relaxed) {
                             let (polled, deadline) = {
                                 let mut guard = inner.lock().unwrap_or_else(|p| p.into_inner());

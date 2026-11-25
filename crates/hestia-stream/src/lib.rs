@@ -30,6 +30,7 @@ pub mod rtsp;
 pub mod sdp;
 pub mod session;
 pub mod sink;
+pub mod thread_priority;
 pub mod video;
 
 use std::fmt;
