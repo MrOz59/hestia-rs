@@ -12,7 +12,7 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 use hestia_crypto::stream::{gcm_decrypt, gcm_encrypt};
-use log::{debug, info};
+use log::{debug, info, warn};
 
 use crate::sdp::{self, AnnounceParams, HostSdp};
 use crate::sink::{AudioFormat, VideoFormat};
@@ -308,6 +308,15 @@ pub struct Negotiated {
     pub supports_fec_status: bool,
 }
 
+impl Negotiated {
+    /// Preserve the interface scope of the resolved RTSP peer for UDP streams.
+    pub(crate) fn endpoint(&self, port: u16) -> SocketAddr {
+        let mut endpoint = self.remote;
+        endpoint.set_port(port);
+        endpoint
+    }
+}
+
 struct RtspClient {
     remote: SocketAddr,
     host_header: String,
@@ -395,20 +404,24 @@ impl RtspClient {
                 code: response.status,
             });
         }
+        if method == "PLAY"
+            && let Ok(local) = stream.local_addr()
+        {
+            info!("RTSP PLAY completed from {local} to {}", self.remote);
+        }
         Ok(response)
     }
 }
 
 fn server_port(msg: &Message) -> Option<u16> {
-    let transport = msg.get("Transport")?;
-    let at = transport.find("server_port=")? + "server_port=".len();
-    transport[at..]
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>()
-        .parse()
-        .ok()
-        .filter(|p| *p != 0)
+    msg.get("Transport")?.split([';', ',']).find_map(|parameter| {
+        let (name, value) = parameter.split_once('=')?;
+        if !name.trim().eq_ignore_ascii_case("server_port") {
+            return None;
+        }
+        let first = value.split('-').next()?.trim();
+        first.parse::<u16>().ok().filter(|port| *port != 0)
+    })
 }
 
 fn ping_payload(msg: &Message) -> Option<[u8; 16]> {
@@ -508,7 +521,10 @@ pub fn handshake(cfg: &HandshakeConfig) -> Result<Negotiated, RtspError> {
         remote,
         audio_port: server_port(&audio).unwrap_or(48000),
         video_port: server_port(&video).unwrap_or(47998),
-        control_port: server_port(&control).unwrap_or(47999),
+        control_port: server_port(&control).unwrap_or_else(|| {
+            warn!("RTSP SETUP returned no usable control server_port; using UDP 47999");
+            47999
+        }),
         audio_ping_payload: ping_payload(&audio),
         video_ping_payload: ping_payload(&video),
         control_connect_data: control
@@ -602,6 +618,16 @@ mod tests {
         assert_eq!(server_port(&resp), Some(47998));
         assert_eq!(ping_payload(&resp), Some(*b"0123456789abcdef"));
         assert!(resp.request_line.is_none());
+    }
+
+    #[test]
+    fn server_port_accepts_ranges_and_ignores_unrelated_parameters() {
+        let transport = |value| Message::default().header("Transport", value);
+        assert_eq!(
+            server_port(&transport("RTP/AVP/UDP;unicast; Server_Port = 54007-54008;mode=play")),
+            Some(54007)
+        );
+        assert_eq!(server_port(&transport("x-server_port=54007;server_port=0")), None);
     }
 
     #[test]

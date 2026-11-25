@@ -1,11 +1,13 @@
 #[path = "../../crates/hestia-stream/src/enet.rs"]
 mod enet;
 use enet::{Delivery, EnetClient, Event};
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 fn main() {
     let port: u16 = std::env::args().nth(1).unwrap().parse().unwrap();
-    let mut c = EnetClient::connect(format!("127.0.0.1:{port}").parse().unwrap(), 0x30, 0xDEADBEEF, Duration::from_secs(5)).expect("connect");
+    let ip: IpAddr = std::env::args().nth(2).unwrap_or_else(|| "127.0.0.1".into()).parse().unwrap();
+    let mut c = EnetClient::connect(SocketAddr::new(ip, port), 0x30, 0xDEADBEEF, Duration::from_secs(5)).expect("connect");
     println!("rust: connected");
     c.send(2, b"hello", Delivery::Reliable).unwrap();
     c.send(3, b"uns", Delivery::Unsequenced).unwrap();
