@@ -26,6 +26,7 @@ pub mod fec;
 pub mod input;
 #[cfg(test)]
 mod mock_host;
+pub mod qos;
 pub mod rtsp;
 pub mod sdp;
 pub mod session;
