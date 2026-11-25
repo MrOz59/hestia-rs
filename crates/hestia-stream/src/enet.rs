@@ -194,12 +194,6 @@ impl EnetClient {
         };
         let socket = UdpSocket::bind(bind)?;
         socket.set_nonblocking(true)?;
-        // Input travels on this socket: ahead of bulk traffic on the LAN.
-        match crate::qos::mark_interactive(&socket, &remote) {
-            Ok(true) => log::info!("control: packets marked for interactive traffic (DSCP EF)"),
-            Ok(false) => {}
-            Err(e) => log::info!("control: packets not marked for interactive traffic: {e}"),
-        }
         let channel_count = channel_count.clamp(1, 255);
         let mut connect_id = [0u8; 4];
         fill_random(&mut connect_id);
