@@ -1,16 +1,25 @@
 #include <enet/enet.h>
 #include <stdio.h>
+#include <arpa/inet.h>
 #include <string.h>
 #include <stdlib.h>
 int main(int argc, char** argv) {
     int port = atoi(argv[1]);
     if (enet_initialize() != 0) return 1;
     ENetAddress address; memset(&address, 0, sizeof(address));
-    struct sockaddr_in sin; memset(&sin, 0, sizeof(sin));
-    sin.sin_family = AF_INET; sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    enet_address_set_address(&address, (struct sockaddr*)&sin, sizeof(sin));
+    const char* loopback = argc > 2 ? argv[2] : "127.0.0.1";
+    int family = strchr(loopback, ':') ? AF_INET6 : AF_INET;
+    if (family == AF_INET6) {
+        struct sockaddr_in6 sin6 = { .sin6_family = AF_INET6 };
+        if (inet_pton(family, loopback, &sin6.sin6_addr) != 1) return 1;
+        enet_address_set_address(&address, (struct sockaddr*)&sin6, sizeof(sin6));
+    } else {
+        struct sockaddr_in sin = { .sin_family = AF_INET };
+        if (inet_pton(family, loopback, &sin.sin_addr) != 1) return 1;
+        enet_address_set_address(&address, (struct sockaddr*)&sin, sizeof(sin));
+    }
     enet_address_set_port(&address, port);
-    ENetHost* server = enet_host_create(AF_INET, &address, 4, 0x30, 0, 0);
+    ENetHost* server = enet_host_create(family, &address, 4, 0x30, 0, 0);
     if (!server) { printf("host create failed\n"); return 1; }
     printf("READY\n"); fflush(stdout);
     ENetEvent event; int done = 0;

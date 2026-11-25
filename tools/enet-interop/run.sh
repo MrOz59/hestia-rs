@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Interop test: the pure-Rust ENet client (crates/hestia-stream/src/enet.rs)
 # against the ENet fork Sunshine/Hermes/moonlight-common-c use (cgutman/enet).
-# Runs once over a clean link and once through a UDP proxy that drops 1/3 of
+# Tests clean IPv4 and IPv6 links, then an IPv4 UDP proxy that drops 1/3 of
 # the datagrams in each direction, with fragmented reliable messages.
 #
 # Usage: tools/enet-interop/run.sh [path-to-cgutman-enet-checkout]
@@ -28,11 +28,11 @@ rustc --edition 2024 -O "$here/client.rs" -o "$work/enet_client"
 rustc --edition 2024 -O "$here/lossy.rs" -o "$work/enet_lossy"
 
 run_case() {
-    local port="$1" client="$2" limit="$3"
-    "$work/enet_server" "$port" >"$work/server-$port.log" &
+    local port="$1" client="$2" limit="$3" loopback="${4:-127.0.0.1}"
+    "$work/enet_server" "$port" "$loopback" >"$work/server-$port.log" &
     server_pid=$!
     sleep 0.3
-    timeout "$limit" "$client" "$port"
+    timeout "$limit" "$client" "$port" "$loopback"
     sleep 1
     kill "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
@@ -45,5 +45,6 @@ run_case() {
 }
 
 run_case 40999 "$work/enet_client" 30
+run_case 40998 "$work/enet_client" 30 ::1
 run_case 40997 "$work/enet_lossy" 60
 echo "ENet interop OK"

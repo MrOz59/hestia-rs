@@ -1,7 +1,6 @@
 //! Brings the pieces up in moonlight-common-c's order — RTSP handshake,
 //! control stream connect + START, video, audio, input — and supervises them.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
@@ -67,11 +66,10 @@ impl StreamSession {
         })
         .map_err(|e| StreamError::Rtsp(fail(StreamStage::Rtsp, e.to_string())))?;
 
-        let ip = negotiated.remote.ip();
         stage(StreamStage::Control);
         let encrypted_control = negotiated.encryption_enabled & sdp::SS_ENC_CONTROL_V2 != 0;
         let mut control = ControlStream::connect(
-            SocketAddr::new(ip, negotiated.control_port),
+            negotiated.endpoint(negotiated.control_port),
             negotiated.control_connect_data,
             config.remote_input_key,
             encrypted_control,
@@ -102,7 +100,7 @@ impl StreamSession {
         let video = VideoReceiver::start_with_events(
             VideoConfig {
                 report_fec: negotiated.supports_fec_status,
-                remote: SocketAddr::new(ip, negotiated.video_port),
+                remote: negotiated.endpoint(negotiated.video_port),
                 ping_payload: negotiated.video_ping_payload,
                 packet_size: announced_packet_size,
                 format: negotiated.video_format,
@@ -132,7 +130,7 @@ impl StreamSession {
         stage(StreamStage::Audio);
         let audio = match AudioReceiver::start(
             AudioConfig {
-                remote: SocketAddr::new(ip, negotiated.audio_port),
+                remote: negotiated.endpoint(negotiated.audio_port),
                 ping_payload: negotiated.audio_ping_payload,
                 format: negotiated.audio_format,
                 decrypt: negotiated

@@ -107,7 +107,19 @@ struct Channel {
     assembling: Option<(u16, Vec<u8>, u32)>,
 }
 
+/// Bounded observations from the initial UDP exchange. Only count datagrams
+/// until VERIFY_CONNECT succeeds, without retaining their contents.
+#[derive(Default)]
+struct HandshakeStats {
+    connects_sent: u32,
+    from_peer: u32,
+    other_source: u32,
+    first_other: Option<SocketAddr>,
+    verify_error: Option<&'static str>,
+}
+
 pub struct EnetClient {
+    handshake: HandshakeStats,
     socket: UdpSocket,
     remote: SocketAddr,
     state: State,
@@ -187,6 +199,7 @@ impl EnetClient {
         fill_random(&mut connect_id);
 
         let mut client = Self {
+            handshake: HandshakeStats::default(),
             socket,
             remote,
             state: State::Connecting,
@@ -230,28 +243,56 @@ impl EnetClient {
         }
         cmd.extend_from_slice(&client.connect_id.to_ne_bytes());
         cmd.extend_from_slice(&data.to_be_bytes());
-        client.send_command(SYSTEM_CHANNEL, cmd, true)?;
+        client
+            .send_command(SYSTEM_CHANNEL, cmd, true)
+            .map_err(|e| client.handshake_error(e.kind(), &format!("sending ENet CONNECT: {e}")))?;
 
         let deadline = Instant::now() + timeout;
         loop {
-            for event in client.poll()? {
+            let events = client
+                .poll()
+                .map_err(|e| client.handshake_error(e.kind(), &format!("ENet handshake I/O: {e}")))?;
+            for event in events {
                 match event {
                     Event::Connected => return Ok(client),
-                    Event::Disconnected { .. } | Event::TimedOut => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::ConnectionRefused,
-                            "ENet connect rejected",
-                        ));
+                    Event::Disconnected { .. } => {
+                        let reason = client.handshake.verify_error.unwrap_or("peer sent DISCONNECT");
+                        return Err(client.handshake_error(io::ErrorKind::ConnectionRefused, reason));
+                    }
+                    Event::TimedOut => {
+                        return Err(client.handshake_error(io::ErrorKind::TimedOut, "ENet connect timed out"));
                     }
                     other => client.events.push_back(other),
                 }
             }
             let now = Instant::now();
             if now >= deadline {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "ENet connect timed out"));
+                return Err(client.handshake_error(io::ErrorKind::TimedOut, "ENet connect timed out"));
             }
             client.wait((deadline - now).min(Duration::from_millis(20)));
         }
+    }
+
+    fn handshake_error(&self, kind: io::ErrorKind, reason: &str) -> io::Error {
+        use std::fmt::Write;
+        let stats = &self.handshake;
+        let mut message = format!(
+            "{reason} (UDP peer {}, elapsed {} ms, CONNECT sent {}, datagrams from peer {}, from other endpoints {}",
+            self.remote,
+            self.epoch.elapsed().as_millis(),
+            stats.connects_sent,
+            stats.from_peer,
+            stats.other_source,
+        );
+        if let Ok(local) = self.socket.local_addr() {
+            // A wildcard bind only tells us the local port, not the chosen interface.
+            let _ = write!(message, ", local port {}", local.port());
+        }
+        if let Some(source) = stats.first_other {
+            let _ = write!(message, ", first unexpected source {source}");
+        }
+        message.push(')');
+        io::Error::new(kind, message)
     }
 
     pub fn is_connected(&self) -> bool {
@@ -376,6 +417,10 @@ impl EnetClient {
             packet.extend_from_slice(c);
         }
         self.socket.send_to(&packet, self.remote)?;
+        // CONNECT is the only command we transmit while connecting, including retries.
+        if self.state == State::Connecting {
+            self.handshake.connects_sent += 1;
+        }
         self.last_send = now;
         // Anything that didn't fit goes in its own datagrams.
         while !self.acks.is_empty() && self.outgoing_peer_id < MAX_PEER_ID {
@@ -406,7 +451,14 @@ impl EnetClient {
             match self.socket.recv_from(&mut self.recv_buf) {
                 Ok((len, from)) => {
                     if from != self.remote && !(from.ip() == self.remote.ip() && from.port() == self.remote.port()) {
+                        if self.state == State::Connecting {
+                            self.handshake.other_source = self.handshake.other_source.saturating_add(1);
+                            self.handshake.first_other.get_or_insert(from);
+                        }
                         continue;
+                    }
+                    if self.state == State::Connecting {
+                        self.handshake.from_peer = self.handshake.from_peer.saturating_add(1);
                     }
                     let datagram = self.recv_buf[..len].to_vec();
                     self.handle_datagram(&datagram);
@@ -559,11 +611,18 @@ impl EnetClient {
                 let accel = be32(body, 32);
                 let decel = be32(body, 36);
                 let connect_id = u32::from_ne_bytes([body[40], body[41], body[42], body[43]]);
-                if interval != THROTTLE_INTERVAL
+                let error = if connect_id != self.connect_id {
+                    Some("ENet VERIFY_CONNECT has a different connection ID")
+                } else if interval != THROTTLE_INTERVAL
                     || accel != THROTTLE_ACCELERATION
                     || decel != THROTTLE_DECELERATION
-                    || connect_id != self.connect_id
                 {
+                    Some("ENet VERIFY_CONNECT has different throttle parameters")
+                } else {
+                    None
+                };
+                if error.is_some() {
+                    self.handshake.verify_error = error;
                     self.state = State::Disconnected;
                     self.events.push_back(Event::Disconnected { data: 0 });
                     return false;
@@ -844,6 +903,62 @@ mod tests {
         let mut buf = [0; 16];
         let (len, _) = socket.recv_from(&mut buf).unwrap();
         assert_eq!(&buf[..len], b"ready");
+    }
+
+    #[test]
+    fn handshake_timeout_counts_successful_connect_sends_including_retries() {
+        let host = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let peer = host.local_addr().unwrap();
+        let error = EnetClient::connect(peer, 1, 0, Duration::from_millis(850)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        host.set_nonblocking(true).unwrap();
+        let mut sent = 0;
+        let mut packet = [0; 128];
+        while let Ok((_, _)) = host.recv_from(&mut packet) {
+            assert_eq!(packet[4] & CMD_MASK, CMD_CONNECT);
+            sent += 1;
+        }
+        assert!(sent >= 2);
+        let message = error.to_string();
+        assert!(message.contains(&format!("UDP peer {peer},")), "{message}");
+        assert!(message.contains(&format!("CONNECT sent {sent},")), "{message}");
+        assert!(
+            message.contains("datagrams from peer 0, from other endpoints 0"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn handshake_distinguishes_unexpected_source_from_invalid_verify() {
+        let host = UdpSocket::bind("127.0.0.1:0").unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let peer = host.local_addr().unwrap();
+        let other = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let unexpected = other.local_addr().unwrap();
+        let responder = std::thread::spawn(move || {
+            let mut request = [0; 128];
+            let (_, client) = host.recv_from(&mut request).unwrap();
+            // Source filtering must happen before parsing, even with a matching ID.
+            let mut verify = request[..48].to_vec();
+            verify[..4].copy_from_slice(&[0x80, 0, 0, 1]);
+            verify[4] = CMD_VERIFY_CONNECT | FLAG_ACKNOWLEDGE;
+            other.send_to(&verify, client).unwrap();
+            verify[44] ^= 1;
+            host.send_to(&verify, client).unwrap();
+        });
+        let error = EnetClient::connect(peer, 1, 0, Duration::from_secs(2)).unwrap_err();
+        responder.join().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+        let message = error.to_string();
+        assert!(message.contains("different connection ID"), "{message}");
+        assert!(
+            message.contains("datagrams from peer 1, from other endpoints 1"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("first unexpected source {unexpected}")),
+            "{message}"
+        );
     }
 
     #[test]
