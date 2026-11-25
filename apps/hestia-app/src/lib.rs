@@ -17,7 +17,7 @@ mod gl_video;
 mod gpu_render;
 mod slint_ui;
 #[cfg(target_os = "linux")]
-mod wl_presentation;
+mod wl_surface;
 
 use std::path::PathBuf;
 use std::sync::Arc;

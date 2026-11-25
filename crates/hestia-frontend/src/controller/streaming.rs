@@ -573,7 +573,11 @@ impl Controller {
         let config = platform::configure_stream_network(config);
         hestia_core::add_stream_config_to_report(&config, decoder.name(), &mut report::lock(&session_report));
         let generation = self.stream_generation.fetch_add(1, Ordering::Relaxed) + 1;
-        let present = Arc::new(Presentation::new(generation, video.gpu));
+        let present = Arc::new(Presentation::new(
+            generation,
+            video.gpu,
+            launched.settings.allow_tearing,
+        ));
         self.gpu_window.set_active(&present);
         let sink = DecodingSink::new(
             decoder,
@@ -954,6 +958,11 @@ impl Controller {
                         "GPU video",
                         "frames on screen without a copy",
                         glass.zero_copy.load(Ordering::Relaxed),
+                    );
+                    r.field(
+                        "GPU video",
+                        "frames on screen without waiting for a refresh",
+                        glass.without_vsync.load(Ordering::Relaxed),
                     );
                 }
                 for (stage, histogram) in [

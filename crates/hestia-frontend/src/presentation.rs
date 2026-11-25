@@ -48,16 +48,28 @@ pub struct GlassStats {
     pub discarded: AtomicU64,
     /// Frames the compositor put on screen without copying them.
     pub zero_copy: AtomicU64,
+    /// Frames the compositor showed without waiting for a refresh (tearing).
+    pub without_vsync: AtomicU64,
     pub draw_to_glass: LatencyHistogram,
     pub receive_to_glass: LatencyHistogram,
 }
 
 impl GlassStats {
     /// A frame with a new picture reached the screen at `on_glass`.
-    pub fn record_presented(&self, received_at: Instant, drawn_at: Instant, on_glass: Instant, zero_copy: bool) {
+    pub fn record_presented(
+        &self,
+        received_at: Instant,
+        drawn_at: Instant,
+        on_glass: Instant,
+        zero_copy: bool,
+        without_vsync: bool,
+    ) {
         self.presented.fetch_add(1, Ordering::Relaxed);
         if zero_copy {
             self.zero_copy.fetch_add(1, Ordering::Relaxed);
+        }
+        if without_vsync {
+            self.without_vsync.fetch_add(1, Ordering::Relaxed);
         }
         self.draw_to_glass.record(on_glass.saturating_duration_since(drawn_at));
         self.receive_to_glass
@@ -146,13 +158,17 @@ pub struct Presentation {
     output: Option<Arc<GpuOutput>>,
     /// The stream this belongs to (see [`GpuWindow::is_active`]).
     pub generation: u64,
+    /// The user lets the window show pictures without waiting for a
+    /// refresh (`StreamSettings::allow_tearing`).
+    pub allow_tearing: bool,
 }
 
 impl Presentation {
-    pub(crate) fn new(generation: u64, output: Option<Arc<GpuOutput>>) -> Self {
+    pub(crate) fn new(generation: u64, output: Option<Arc<GpuOutput>>, allow_tearing: bool) -> Self {
         Self {
             generation,
             output,
+            allow_tearing,
             ..Self::default()
         }
     }

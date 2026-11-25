@@ -1379,6 +1379,7 @@ export component SettingsPage inherits Page {
     in-out property <bool> hardware-decoding;
     in-out property <bool> gpu-video;
     in-out property <bool> direct-video;
+    in-out property <bool> allow-tearing;
     in-out property <bool> show-video-through-loss;
     in property <bool> android;
     in property <bool> physical-keyboard;
@@ -1425,9 +1426,10 @@ export component SettingsPage inherits Page {
     property <string> profile-text;
 
     // Focus: the header's Back (-2) and Save (-3), then the rows in page
-    // order: 0…4, Metered bitrate (24), 5…7, Direct video (19), 8, Video
-    // through losses (28), 9…18, saved profiles (100…), keyboard shortcuts
-    // (25…27), 20…23, then Debug (29…33) once unlocked.
+    // order: 0…4, Metered bitrate (24), 5…7, Direct video (19), 8, Allow
+    // tearing (34, desktop), Video through losses (28), 9…18, saved profiles
+    // (100…), keyboard shortcuts (25…27), 20…23, then Debug (29…33) once
+    // unlocked.
     property <int> nav: -1;
     focus-first => {
         if (root.nav == -1) {
@@ -1451,7 +1453,7 @@ export component SettingsPage inherits Page {
     property <int> shortcut-count: root.physical-keyboard ? 3 : 0;
     property <int> debug-count: root.debug-options ? 5 : 0;
     changed debug-options => {
-        if (!root.debug-options && root.nav >= 29 && root.nav < 100) {
+        if (!root.debug-options && root.nav >= 29 && root.nav <= 33) {
             root.nav = 23;
         }
     }
@@ -1473,8 +1475,8 @@ export component SettingsPage inherits Page {
     pure function at(i: int) -> bool {
         return root.sheet < 0 && root.nav == i;
     }
-    // Rows 24 (metered bitrate), 19 (direct video) and 28 (video through
-    // losses) sit out of order; `step` places them.
+    // Rows 24 (metered bitrate), 19 (direct video), 34 (allow tearing) and
+    // 28 (video through losses) sit out of order; `step` places them.
     pure function pos(i: int) -> int {
         return i < 19 ? i
             : i >= 100 ? 19 + (i - 100)
@@ -1497,9 +1499,11 @@ export component SettingsPage inherits Page {
         if (from == 24) { return dir > 0 ? 5 : 4; }
         if (root.android && ((from == 4 && dir > 0) || (from == 5 && dir < 0))) { return 24; }
         if (from == 19) { return dir > 0 ? 8 : 7; }
-        // 28 closes the Decoding group, after 8 when that row is shown.
-        if (from == 28) { return dir > 0 ? 9 : root.valid(8) ? 8 : 7; }
-        if (dir > 0 && (from == 8 || (from == 7 && !root.valid(8)))) { return 28; }
+        // 28 closes the Decoding group, after 8 when that row is shown and
+        // after 34 on the desktop.
+        if (from == 34) { return dir > 0 ? 28 : root.valid(8) ? 8 : 7; }
+        if (from == 28) { return dir > 0 ? 9 : !root.android ? 34 : root.valid(8) ? 8 : 7; }
+        if (dir > 0 && (from == 8 || (from == 7 && !root.valid(8)))) { return !root.android ? 34 : 28; }
         if (from == 9 && dir < 0) { return 28; }
         if (root.mediacodec && ((from == 7 && dir > 0) || (from == 8 && dir < 0))) { return 19; }
         let p = root.pos(from) + dir;
@@ -1804,6 +1808,14 @@ export component SettingsPage inherits Page {
                             entered => {
                                 root.nav = 8;
                             }
+                        }
+                        if !root.android: SwitchRow {
+                            label: "Allow tearing";
+                            hint: "In full screen, each picture shows as soon as it is drawn instead of at the next refresh: up to a refresh sooner, with tearing. Where the compositor allows it (KDE Plasma: Display settings)";
+                            checked <=> root.allow-tearing;
+                            want-focus: root.at(34);
+                            nav(k) => { return root.move(34, k); }
+                            entered => { root.nav = 34; }
                         }
                         SwitchRow {
                             label: "Keep video moving after a loss";

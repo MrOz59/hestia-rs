@@ -36,7 +36,7 @@ use slint::{ComponentHandle, GraphicsAPI, RenderingState};
 
 use crate::AppWindow;
 #[cfg(target_os = "linux")]
-use crate::wl_presentation::GlassClock;
+use crate::wl_surface::WindowSurface;
 
 /// A picture drawn into the pass's target: its size, the texture and
 /// whether it was reallocated. The error says whether only DMA-BUF import
@@ -55,9 +55,9 @@ struct Renderer {
     held: Option<DecodedFrame>,
     /// The stream view shows our texture (for this stream, at this size).
     image_set: Option<(u64, (u32, u32))>,
-    /// The compositor's presentation times, on Wayland when it has them.
+    /// The window's Wayland surface: presentation times and the tearing hint.
     #[cfg(target_os = "linux")]
-    glass: Option<GlassClock>,
+    glass: Option<WindowSurface>,
     /// The picture drawn for the frame being rendered: its stream, when its
     /// first packet arrived and when it was drawn.
     #[cfg(target_os = "linux")]
@@ -79,7 +79,7 @@ impl Renderer {
                 self.setup_dmabuf(&pass);
                 #[cfg(target_os = "linux")]
                 {
-                    self.glass = self.weak.upgrade().and_then(|ui| GlassClock::new(ui.window()));
+                    self.glass = self.weak.upgrade().and_then(|ui| WindowSurface::new(ui.window()));
                 }
                 self.pass = Some(pass);
                 self.gpu.status.ready();
@@ -152,6 +152,7 @@ impl Renderer {
         #[cfg(target_os = "linux")]
         if let Some(glass) = &mut self.glass {
             glass.dispatch();
+            glass.set_tearing(self.gpu.active().is_some_and(|stream| stream.allow_tearing));
         }
         if self.pass.is_none() {
             return;

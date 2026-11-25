@@ -1,5 +1,7 @@
-//! When a frame with a new video picture reaches the screen, by the
-//! compositor's own clock (Wayland's `wp_presentation`).
+//! The window's Wayland surface, for what Slint doesn't do with it: when a
+//! frame with a new video picture reaches the screen, by the compositor's
+//! own clock (`wp_presentation`), and whether a stream's frames may reach it
+//! without waiting for a refresh (`wp_tearing_control_v1`).
 //!
 //! The stream report times a picture up to its draw submission; after that
 //! the toolkit hands the frame to the compositor, which composites it (or
@@ -12,6 +14,12 @@
 //! drawn (`AfterRendering`) rides that commit. winit owns the Wayland
 //! connection and reads its socket; this attaches to the same display with
 //! a queue of its own, which the renderer dispatches every frame.
+//!
+//! Tearing: a compositor normally shows a commit at the next refresh. With
+//! the asynchronous presentation hint, one that allows it (KWin, for a
+//! full-screen window, when "Allow tearing in full screen" is on) flips to
+//! it at once, mid-refresh: the picture can tear, and it shows up to a
+//! refresh sooner. The hint is set only while a stream that allows it runs.
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -30,15 +38,25 @@ use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
 use wayland_protocols::wp::presentation_time::client::wp_presentation::{self, WpPresentation};
 use wayland_protocols::wp::presentation_time::client::wp_presentation_feedback::{self, Kind, WpPresentationFeedback};
+use wayland_protocols::wp::tearing_control::v1::client::wp_tearing_control_manager_v1::{
+    self, WpTearingControlManagerV1,
+};
+use wayland_protocols::wp::tearing_control::v1::client::wp_tearing_control_v1::{
+    self, PresentationHint, WpTearingControlV1,
+};
 
-/// The compositor's presentation times for one window's frames.
-pub(crate) struct GlassClock {
+/// A window's surface, with the compositor's presentation times and the
+/// tearing hint where the compositor has them.
+pub(crate) struct WindowSurface {
     // Kept for the queue: a connection outliving nothing it serves.
     _connection: Connection,
     queue: EventQueue<State>,
     handle: QueueHandle<State>,
     surface: WlSurface,
     state: State,
+    /// The surface's tearing hint object, once one was asked for.
+    tearing: Option<WpTearingControlV1>,
+    tearing_allowed: bool,
 }
 
 #[derive(Default)]
@@ -46,6 +64,7 @@ struct State {
     presentation: Option<WpPresentation>,
     /// The clock the compositor's times are on (`clock_gettime` id).
     clock: Option<libc::clockid_t>,
+    tearing_manager: Option<WpTearingControlManagerV1>,
 }
 
 /// One frame that carried a new picture, awaiting the compositor's answer.
@@ -55,9 +74,10 @@ struct Watched {
     drawn_at: Instant,
 }
 
-impl GlassClock {
+impl WindowSurface {
     /// For the window's surface, when it is a Wayland one and the compositor
-    /// reports presentation times. Call on the UI thread.
+    /// reports presentation times or takes a tearing hint. Call on the UI
+    /// thread.
     pub(crate) fn new(window: &slint::Window) -> Option<Self> {
         let (display, surface) = window.with_winit_window(|window| {
             let display = match window.display_handle().ok()?.as_raw() {
@@ -98,21 +118,56 @@ impl GlassClock {
         connection.display().get_registry(&handle, ());
         // The globals, then the clock the presentation global announces.
         queue.roundtrip(&mut state).ok()?;
-        state.presentation.as_ref()?;
-        queue.roundtrip(&mut state).ok()?;
-        let clock = state.clock?;
-        info!("compositor presentation times available (clock {clock})");
+        if state.presentation.is_some() {
+            queue.roundtrip(&mut state).ok()?;
+        }
+        if state.clock.is_none() {
+            state.presentation = None;
+        }
+        match state.clock {
+            Some(clock) => info!("compositor presentation times available (clock {clock})"),
+            None => info!("compositor presentation times unavailable"),
+        }
+        if state.tearing_manager.is_some() {
+            info!("compositor takes a tearing hint");
+        }
+        if state.presentation.is_none() && state.tearing_manager.is_none() {
+            return None;
+        }
         Some(Self {
             _connection: connection,
             queue,
             handle,
             surface,
             state,
+            tearing: None,
+            tearing_allowed: false,
         })
     }
 
+    /// Let the window's frames reach the screen without waiting for a
+    /// refresh, or make them wait again. Sends nothing when unchanged.
+    pub(crate) fn set_tearing(&mut self, allowed: bool) {
+        if allowed == self.tearing_allowed {
+            return;
+        }
+        let Some(manager) = &self.state.tearing_manager else {
+            return;
+        };
+        let control = self
+            .tearing
+            .get_or_insert_with(|| manager.get_tearing_control(&self.surface, &self.handle, ()));
+        control.set_presentation_hint(if allowed {
+            PresentationHint::Async
+        } else {
+            PresentationHint::Vsync
+        });
+        self.tearing_allowed = allowed;
+        info!("tearing {}", if allowed { "allowed" } else { "off" });
+    }
+
     /// Ask when the window's next commit, which carries the picture drawn at
-    /// `drawn_at`, reaches the screen.
+    /// `drawn_at`, reaches the screen (nothing without presentation times).
     pub(crate) fn watch_next_commit(&mut self, stream: Arc<Presentation>, received_at: Instant, drawn_at: Instant) {
         if let Some(presentation) = &self.state.presentation {
             presentation.feedback(
@@ -162,16 +217,43 @@ impl Dispatch<WlRegistry, ()> for State {
         _: &Connection,
         handle: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global {
+        let wl_registry::Event::Global {
             name,
             interface,
             version,
         } = event
-            && interface == WpPresentation::interface().name
-            && state.presentation.is_none()
-        {
+        else {
+            return;
+        };
+        if interface == WpPresentation::interface().name && state.presentation.is_none() {
             state.presentation = Some(registry.bind(name, version.min(1), handle, ()));
+        } else if interface == WpTearingControlManagerV1::interface().name && state.tearing_manager.is_none() {
+            state.tearing_manager = Some(registry.bind(name, version.min(1), handle, ()));
         }
+    }
+}
+
+impl Dispatch<WpTearingControlManagerV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WpTearingControlManagerV1,
+        _: wp_tearing_control_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpTearingControlV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WpTearingControlV1,
+        _: wp_tearing_control_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
     }
 }
 
@@ -215,8 +297,17 @@ impl Dispatch<WpPresentationFeedback, Watched> for State {
                 else {
                     return;
                 };
-                let zero_copy = matches!(flags, WEnum::Value(kind) if kind.contains(Kind::ZeroCopy));
-                glass.record_presented(watched.received_at, watched.drawn_at, on_glass, zero_copy);
+                let kind = match flags {
+                    WEnum::Value(kind) => kind,
+                    WEnum::Unknown(bits) => Kind::from_bits_truncate(bits),
+                };
+                glass.record_presented(
+                    watched.received_at,
+                    watched.drawn_at,
+                    on_glass,
+                    kind.contains(Kind::ZeroCopy),
+                    !kind.contains(Kind::Vsync),
+                );
             }
             wp_presentation_feedback::Event::Discarded => glass.record_discarded(),
             _ => {}
@@ -250,7 +341,7 @@ mod tests {
     ///
     /// ```sh
     /// weston --backend=headless --socket=hestia-glass &
-    /// WAYLAND_DISPLAY=hestia-glass cargo test -p hestia-app --lib wl_presentation -- --ignored
+    /// WAYLAND_DISPLAY=hestia-glass cargo test -p hestia-app --lib wl_surface -- --ignored
     /// ```
     #[test]
     #[ignore = "needs a Wayland compositor"]
@@ -389,7 +480,11 @@ mod tests {
         let display = NonNull::new(connection.backend().display_ptr().cast::<c_void>()).unwrap();
         let surface_ptr = NonNull::new(surface.id().as_ptr().cast::<c_void>()).unwrap();
         // SAFETY: this test's display and surface, both alive to its end.
-        let mut glass = unsafe { GlassClock::from_raw(display, surface_ptr) }.expect("wp_presentation");
+        let mut glass = unsafe { WindowSurface::from_raw(display, surface_ptr) }.expect("a Wayland surface");
+        assert!(glass.state.presentation.is_some(), "wp_presentation");
+        // The hint is accepted (or there is none to send) without a protocol error.
+        glass.set_tearing(true);
+        glass.set_tearing(false);
         let stream = Arc::new(Presentation::default());
         let glass_stats = &stream.gpu.glass;
         let count = |counter: &std::sync::atomic::AtomicU64| counter.load(std::sync::atomic::Ordering::Relaxed);

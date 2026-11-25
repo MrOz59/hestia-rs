@@ -200,6 +200,11 @@ pub struct StreamSettings {
     /// the picture going through the UI's frame. Off, or when that surface
     /// can't be set up: the zero-copy or CPU path above.
     pub direct_video: bool,
+    /// Desktop on Wayland: a full-screen stream reaches the screen as soon
+    /// as each picture is drawn instead of at the display's next refresh,
+    /// where the compositor allows it (KWin's "Allow tearing in full
+    /// screen"). Pictures can tear; each one shows up to a refresh sooner.
+    pub allow_tearing: bool,
     /// Experimental: when a frame is lost, keep decoding the frames after
     /// it while the keyframe that repairs the picture is on its way. The
     /// picture smears where the lost frame changed it, but it keeps moving
@@ -241,6 +246,7 @@ impl Default for StreamSettings {
             hardware_decoding: true,
             gpu_video: true,
             direct_video: true,
+            allow_tearing: false,
             show_video_through_loss: false,
             touch_mode: None,
             onscreen_controller: false,
@@ -311,6 +317,11 @@ impl StreamSettings {
             r.field("Settings", "direct video", if self.direct_video { "on" } else { "off" });
         } else {
             r.field("Settings", "GPU colour conversion", on);
+            r.field(
+                "Settings",
+                "tearing",
+                if self.allow_tearing { "allowed" } else { "off" },
+            );
         }
     }
 

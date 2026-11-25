@@ -177,6 +177,15 @@ Settings → Decoding → **Zero-copy video** (Android) / **GPU colour
 conversion** (desktop) is the same setting (`gpu_video`); off forces the CPU
 path, for comparison or to work around a driver.
 
+Settings → Decoding → **Allow tearing** (desktop, off by default): while a
+stream runs, the window asks the compositor (`wp_tearing_control_v1`) to
+show each frame as soon as it is committed instead of at the next refresh.
+A compositor that allows it flips mid-refresh: the picture can tear, and
+each one reaches the screen up to a refresh sooner. KWin does this for a
+full-screen window when Display settings → "Allow tearing in full screen"
+is on; elsewhere the hint changes nothing. The report counts the frames the
+compositor showed that way.
+
 ## 5. Cost per 1080p frame (desktop)
 
 Measured on a 2-core 2.1 GHz x86-64 CPU (AVX2) with an 18 Mbit/s 1080p60
@@ -217,8 +226,8 @@ The report's video sections, from the network to the screen:
   * *IDR request to first …*: how long a recovery took.
 * **Video delivery** / **GPU video**: how many pictures went each way and how
   many were replaced before being shown; on Wayland, how many frames with a
-  new picture the compositor showed, discarded (a newer one replaced them)
-  or showed without a copy.
+  new picture the compositor showed, discarded (a newer one replaced them),
+  showed without a copy, or showed without waiting for a refresh (tearing).
 * **Direct video** (Android): releases to the surface and the system's
   render callbacks (Android 13+). *Visible buffer release to render (system
   clock)* is the time from a picture's release to the refresh that showed
