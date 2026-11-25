@@ -21,7 +21,7 @@
 //   new textures. Motion here is made of them.
 // * Over the stream, everything redraws with every picture: overlays there
 //   only move, without shadows or fades.
-// * Nothing animates continuously; `Loader` steps on a slow timer.
+// * Loader steps on a slow timer. Only the launch artwork animates continuously.
 // * Android's "Remove animations" turns every `animate` off (Slint reads
 //   it); timers then only flip states.
 
@@ -61,6 +61,19 @@ export global Theme {
     out property <color> info: #9ec5ea;
     out property <color> scrim: #0a0807c8;
     out property <string> font: "Outfit";
+
+    // Session launch (session-launch.slint). Each role follows the palette
+    // above until a theme sets it at run time (`Theme` is exported to Rust),
+    // so a new palette alone already recolours the launch. Without
+    // `launch-motion` the scene holds still.
+    in-out property <color> launch-backdrop: root.bg.darker(0.25);
+    in-out property <color> launch-accent: root.accent;
+    // The flame's gold: the accent warmed toward a pale flare.
+    in-out property <color> launch-highlight: root.accent.mix(#ffd9a0, 40%);
+    in-out property <color> launch-core: root.text.mix(root.launch-highlight, 75%);
+    in-out property <color> launch-text: root.text;
+    in-out property <color> launch-muted: root.muted;
+    in-out property <bool> launch-motion: true;
 
     // The window's size (set by the window). Phones in portrait are
     // compact; desktops are wide; landscape phones and TVs (960 × 540 dp)

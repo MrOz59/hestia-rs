@@ -42,7 +42,7 @@ pub enum Screen {
     #[default]
     Hosts,
     Apps,
-    /// Launching an app, and launch errors.
+    /// Launch details and errors.
     Session,
     Settings,
     Stream,
@@ -50,10 +50,12 @@ pub enum Screen {
     Tools,
     /// The last stream report.
     Report,
+    /// Launch animation, through the first displayable video frame.
+    Launching,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 7] = [
+    pub const ALL: [Screen; 8] = [
         Screen::Hosts,
         Screen::Apps,
         Screen::Session,
@@ -61,6 +63,7 @@ impl Screen {
         Screen::Stream,
         Screen::Tools,
         Screen::Report,
+        Screen::Launching,
     ];
 
     /// The page's number, in [`Screen::ALL`] order.
@@ -201,6 +204,12 @@ pub trait View {
     fn set_version_text(&self, text: String);
     fn set_client_id(&self, id: String);
     fn set_data_dir(&self, path: String);
+
+    // Settings → Debug (About, tapped seven times) ----------------------
+    fn set_debug_options(&self, on: bool);
+    fn set_debug_verbose_log(&self, on: bool);
+    /// This device, display and decoders, a line each.
+    fn set_debug_info(&self, text: String);
 
     // Hosts --------------------------------------------------------------
     fn set_hosts(&self, hosts: Vec<HostCard>);

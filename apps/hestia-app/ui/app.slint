@@ -1,9 +1,12 @@
 import { Theme, Nav, Icon, ActionButton, Loader, TextField, Modal, DialogTitle, DialogText } from "theme.slint";
 import { HostCard, AppCard, CommandRow, PreflightRow, HostsPage, AppsPage, SessionPage, SettingsPage, ToolsPage, ReportPage } from "pages.slint";
+import { SessionLaunch } from "session-launch.slint";
 import { StreamView, PadControl } from "stream.slint";
 
 export { HostCard, AppCard, CommandRow, PreflightRow } from "pages.slint";
 export { PadControl } from "stream.slint";
+// Themes set the palette's run-time roles (the launch's, for now) from Rust.
+export { Theme } from "theme.slint";
 
 export component AppWindow inherits Window {
     title: "Hestia";
@@ -31,7 +34,7 @@ export component AppWindow inherits Window {
     }
 
     // 0 = hosts, 1 = apps, 2 = session (launching / errors), 3 = settings, 4 = stream, 5 = host tools,
-    // 6 = stream report
+    // 6 = stream report, 7 = animated session launch
     in-out property <int> screen: 0;
 
     // Startup (identity generation on first run)
@@ -142,7 +145,21 @@ export component AppWindow inherits Window {
     property <float> stream-picture-aspect: root.stream-frame.height > 0
         ? 1.0 * root.stream-frame.width / root.stream-frame.height : 0;
     callback stream-pip-config(bool, float);
+    // Keep the outgoing artwork just long enough to dissolve over live video.
+    private property <bool> retain-launch;
+    private property <duration> reveal-duration: 180ms;
+    Timer {
+        running: root.retain-launch && root.screen == 4;
+        interval: root.reveal-duration;
+        triggered => { root.retain-launch = false; }
+    }
     changed screen => {
+        if root.screen != 4 {
+            root.retain-launch = root.screen == 7;
+        }
+        if root.screen != 3 {
+            root.launch-preview = false;
+        }
         if root.is-android {
             root.stream-pip-config(root.screen == 4, root.stream-picture-aspect);
         }
@@ -244,6 +261,23 @@ export component AppWindow inherits Window {
     property <int> settings-return: 0;
     callback open-settings();
     callback save-settings();
+    // Settings → Debug, shown once About has been tapped seven times.
+    in property <bool> debug-options;
+    in property <bool> debug-verbose-log;
+    in property <string> debug-info;
+    callback debug-tap();
+    callback debug-hide();
+    callback debug-verbose-log-toggled(bool);
+    callback debug-copy-info();
+    // Settings → Debug → Launch screen preview: the launch page with no
+    // stream behind it, stepping through the launch stages, until Back.
+    property <bool> launch-preview;
+    property <int> launch-preview-stage;
+    Timer {
+        running: root.launch-preview;
+        interval: 2400ms;
+        triggered => { root.launch-preview-stage = Math.mod(root.launch-preview-stage + 1, 3); }
+    }
 
     // Escape (and the Android back key) closes dialogs and walks back
     // through the screens.
@@ -251,6 +285,10 @@ export component AppWindow inherits Window {
         if (root.band-warning-visible) {
             root.band-warning-visible = false;
             root.band-warning-cancel();
+            return true;
+        }
+        if (root.launch-preview) {
+            root.launch-preview = false;
             return true;
         }
         if (root.pair-visible) {
@@ -280,7 +318,7 @@ export component AppWindow inherits Window {
             root.screen = 1;
             return true;
         }
-        if (root.screen == 2) {
+        if (root.screen == 2 || root.screen == 7) {
             root.back-to-apps();
             return true;
         }
@@ -593,6 +631,19 @@ export component AppWindow inherits Window {
             }
         }
 
+        if root.screen == 7 || (root.screen == 4 && root.retain-launch && Theme.launch-motion && !root.stream-picture-in-picture): SessionLaunch {
+            width: 100%;
+            height: 100%;
+            leaving: root.screen == 4;
+            opacity: self.leaving ? 0 : 1;
+            animate opacity { duration: root.reveal-duration; easing: ease-out-quad; }
+            app: root.session-title;
+            host: root.session-subtitle;
+            stage: root.session-lines.length > 0 ? root.session-lines[0] : "";
+            cancel => { root.back-to-apps(); }
+            init => { root.page-depth = 2; }
+        }
+
         if root.screen == 6: ReportPage {
             width: 100%;
             height: 100%;
@@ -734,6 +785,26 @@ export component AppWindow inherits Window {
             open-app-log => {
                 root.open-app-log();
             }
+            debug-options: root.debug-options;
+            debug-verbose-log: root.debug-verbose-log;
+            debug-info: root.debug-info;
+            previewing: root.launch-preview;
+            about-tapped => {
+                root.debug-tap();
+            }
+            preview-launch => {
+                root.launch-preview-stage = 0;
+                root.launch-preview = true;
+            }
+            debug-verbose-log-toggled(on) => {
+                root.debug-verbose-log-toggled(on);
+            }
+            debug-copy-info => {
+                root.debug-copy-info();
+            }
+            debug-hide => {
+                root.debug-hide();
+            }
             back => {
                 root.screen = root.settings-return;
             }
@@ -741,6 +812,16 @@ export component AppWindow inherits Window {
                 root.save-settings();
                 root.screen = root.settings-return;
             }
+        }
+
+        if root.screen == 3 && root.launch-preview: SessionLaunch {
+            width: 100%;
+            height: 100%;
+            app: "Launch preview";
+            host: root.version-text;
+            stage: root.launch-preview-stage == 0 ? "Starting on the host…"
+                : root.launch-preview-stage == 1 ? "Connecting to the stream…" : "Waiting for the first video frame…";
+            cancel => { root.launch-preview = false; }
         }
 
         // ---------------------------------------------------------------
