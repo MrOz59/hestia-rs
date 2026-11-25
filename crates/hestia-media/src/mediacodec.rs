@@ -49,6 +49,14 @@ const BUFFER_FLAG_CODEC_CONFIG: u32 = 2;
 /// How long the decoder waits for the direct video surface at start.
 const DIRECT_SURFACE_WAIT: Duration = Duration::from_millis(1500);
 
+/// The system clock MediaCodec renders on (`System.nanoTime`), in ns.
+fn monotonic_ns() -> i64 {
+    // SAFETY: an all-zero timespec is valid, and the call only writes it.
+    let mut now: libc::timespec = unsafe { std::mem::zeroed() };
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    now.tv_sec as i64 * 1_000_000_000 + now.tv_nsec as i64
+}
+
 // MediaCodecInfo.CodecCapabilities colour formats.
 const COLOR_YUV420_PLANAR: i32 = 19;
 const COLOR_YUV420_PACKED_PLANAR: i32 = 20;
@@ -686,10 +694,22 @@ impl Running {
             return Ok(None);
         };
         let pts = buffer.info().presentation_time_us();
+        // Released for now on the system clock (System.nanoTime), not with a
+        // plain release: that hands the window the media timestamp, which
+        // counts from 0 here. The window's buffer queue replaces a picture
+        // still waiting for the screen with a newer one only when the newer
+        // one's time is near the present, so with the media timestamp a burst
+        // of pictures queues up and reaches the screen one refresh each, and
+        // the delay stays until the stream pauses.
+        let target_ns = if visible { monotonic_ns() } else { 0 };
         if visible && let Some(measurement) = &self.direct_measurement {
-            measurement.expect_callback(pts);
+            measurement.expect_callback(pts, target_ns);
         }
-        let release = self.codec.release_output_buffer(buffer, visible);
+        let release = if visible {
+            self.codec.release_output_buffer_at_time(buffer, target_ns)
+        } else {
+            self.codec.release_output_buffer(buffer, false)
+        };
         if let Some(measurement) = &self.direct_measurement {
             measurement.release_result(pts, visible, release.is_ok());
         }
