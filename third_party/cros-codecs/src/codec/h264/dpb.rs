@@ -280,6 +280,14 @@ impl<T: Clone> Dpb<T> {
         let max_pics = if self.interlaced { self.max_num_pics * 2 } else { self.max_num_pics };
 
         if self.entries.len() >= max_pics {
+            log::warn!(
+                "H.264 DPB full inserting frame {}: {} entries, limit {}, {} reference frames, {} awaiting output",
+                picture.borrow().frame_num,
+                self.entries.len(),
+                max_pics,
+                self.num_ref_frames(),
+                self.entries.iter().filter(|entry| entry.needed_for_output).count(),
+            );
             return Err(StorePictureError::DpbIsFull);
         }
 
@@ -485,7 +493,6 @@ impl<T: Clone> Dpb<T> {
         }
     }
 
-    /// Bumps the DPB if needed. DPB bumping is described on C.4.5.3.
     /// Hestia RS: outputs every picture still needed for output, lowest POC first, keeping
     /// the reference pictures in the DPB (low-delay mode).
     pub fn output_all(&mut self) -> Vec<Option<T>> {
@@ -497,7 +504,11 @@ impl<T: Clone> Dpb<T> {
         pics
     }
 
+    /// Bumps the DPB if needed, as described in C.4.5.3.
     pub fn bump_as_needed(&mut self, current_pic: &PictureData) -> Vec<Option<T>> {
+        // Hestia RS: adaptive reference marking may have retired a picture
+        // already output in low-delay mode. It can be removed without bumping.
+        self.remove_unused();
         let mut pics = vec![];
         while self.needs_bumping(current_pic) && self.len() >= self.max_num_reorder_frames {
             match self.bump() {
