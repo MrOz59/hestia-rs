@@ -912,3 +912,22 @@ impl FrameDecoder for VaapiDecoder {
         Ok(Some(timing))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Run explicitly on a Linux machine with a VA-API-capable render node.
+    #[test]
+    #[ignore = "requires a VA-API render node"]
+    fn opens_supported_codecs_without_a_dummy_context() {
+        let (node, caps) = render_nodes(None)
+            .into_iter()
+            .find_map(|node| Capabilities::query(&node).ok().map(|caps| (node, caps)))
+            .expect("no usable VA-API render node");
+        for codec in caps.codecs {
+            let session = Session::open(&node, codec).expect("opening decoder before first sequence");
+            assert!(with_decoder!(&session.codec, d => d.stream_info().is_none()));
+        }
+    }
+}
