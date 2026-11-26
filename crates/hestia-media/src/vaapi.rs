@@ -370,7 +370,8 @@ impl Capabilities {
                     .query_config_entrypoints(profile)
                     .is_ok_and(|e| e.contains(&libva::VAEntrypoint::VAEntrypointVLD))
         };
-        // cros-codecs starts every decoder with an H.264 Main configuration.
+        // H.264 Main is our baseline negotiated hardware format; the actual
+        // VA context is created only after parsing the codec's sequence.
         if !decodes(libva::VAProfile::VAProfileH264Main) {
             return Err(format!("{vendor}: no H.264 decoding"));
         }
