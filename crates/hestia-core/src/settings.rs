@@ -94,6 +94,27 @@ impl VideoScale {
     }
 }
 
+/// When Android Direct video releases a decoded picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FramePacing {
+    #[default]
+    #[serde(alias = "max_smoothness")]
+    MinLatency,
+    Balanced,
+}
+
+impl FramePacing {
+    pub const ALL: [Self; 2] = [Self::MinLatency, Self::Balanced];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::MinLatency => "Prefer lowest latency",
+            Self::Balanced => "Balanced",
+        }
+    }
+}
+
 /// What a finger on the stream does (Artemis' mouse modes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -205,6 +226,7 @@ pub struct StreamSettings {
     /// where the compositor allows it (KWin's "Allow tearing in full
     /// screen"). Pictures can tear; each one shows up to a refresh sooner.
     pub allow_tearing: bool,
+    pub frame_pacing: FramePacing,
     /// Experimental: when a frame is lost, keep decoding the frames after
     /// it while the keyframe that repairs the picture is on its way. The
     /// picture smears where the lost frame changed it, but it keeps moving
@@ -247,6 +269,7 @@ impl Default for StreamSettings {
             gpu_video: true,
             direct_video: true,
             allow_tearing: false,
+            frame_pacing: FramePacing::default(),
             show_video_through_loss: false,
             touch_mode: None,
             onscreen_controller: false,
@@ -315,6 +338,9 @@ impl StreamSettings {
         if cfg!(target_os = "android") {
             r.field("Settings", "zero-copy video", on);
             r.field("Settings", "direct video", if self.direct_video { "on" } else { "off" });
+            if self.direct_video && self.hardware_decoding && self.codec != CodecPreference::PyroWave {
+                r.field("Settings", "frame pacing", self.frame_pacing.label());
+            }
         } else {
             r.field("Settings", "GPU colour conversion", on);
             r.field(
@@ -350,6 +376,7 @@ mod tests {
         assert_eq!(partial.fps, 120);
         assert_eq!(partial.codec, CodecPreference::Av1);
         assert_eq!(partial.width, 1920);
+        assert_eq!(partial.frame_pacing, FramePacing::MinLatency);
         assert_eq!(partial.bitrate_for_network(true), partial.bitrate_kbps);
     }
 

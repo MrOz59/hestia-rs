@@ -497,6 +497,7 @@ impl View for SlintView<'_> {
         w.set_cfg_gpu_video(form.gpu_video);
         w.set_cfg_direct_video(form.direct_video);
         w.set_cfg_allow_tearing(form.allow_tearing);
+        w.set_cfg_frame_pacing(form.frame_pacing);
         w.set_cfg_show_video_through_loss(form.show_video_through_loss);
         w.set_cfg_orientation(form.orientation);
     }
@@ -528,6 +529,7 @@ impl View for SlintView<'_> {
             gpu_video: w.get_cfg_gpu_video(),
             direct_video: w.get_cfg_direct_video(),
             allow_tearing: w.get_cfg_allow_tearing(),
+            frame_pacing: w.get_cfg_frame_pacing(),
             show_video_through_loss: w.get_cfg_show_video_through_loss(),
             orientation: w.get_cfg_orientation(),
         }

@@ -26,6 +26,7 @@ use crate::color::{Colorimetry, Yuv420, yuv420_to_rgba};
 use crate::decode::{DecodeStats, DecodedFrame, FrameBuffer, FrameDecoder, FrameTiming};
 use crate::gpu_video::{GpuOutput, GpuPicture, SharedReader};
 use crate::native_picture::NativePicture;
+use crate::pacing::{ReleaseSchedule, VsyncClock};
 use crate::{EncodedFrame, VideoFormat};
 
 /// Bound time spent feeding one frame when the codec is under pressure.
@@ -118,6 +119,7 @@ struct Running {
     /// its generation, to follow it when the helper replaces it.
     direct: Option<(u64, Option<NativeWindow>)>,
     direct_measurement: Option<crate::direct_video::Measurement>,
+    pacing: Option<(VsyncClock, ReleaseSchedule)>,
 }
 
 // SAFETY: see the type's documentation.
@@ -152,6 +154,7 @@ pub struct MediaCodecDecoder {
     fatal: Option<String>,
     stats: Option<Arc<DecodeStats>>,
     gpu_output: Option<Arc<GpuOutput>>,
+    balanced_pacing: bool,
     /// Software decoder used when the hardware one can't be set up or its
     /// pictures can't be read (H.264).
     #[cfg(feature = "openh264")]
@@ -198,9 +201,15 @@ impl MediaCodecDecoder {
             fatal: None,
             stats: None,
             gpu_output,
+            balanced_pacing: false,
             #[cfg(feature = "openh264")]
             fallback: None,
         })
+    }
+
+    pub(crate) fn with_balanced_pacing(mut self, enabled: bool) -> Self {
+        self.balanced_pacing = enabled;
+        self
     }
 
     pub fn formats(&self) -> Vec<VideoFormat> {
@@ -219,13 +228,13 @@ impl MediaCodecDecoder {
     }
 
     fn start(
+        &self,
         format: VideoFormat,
         width: u32,
         height: u32,
         fps: u32,
         output: Output,
         component: Option<&str>,
-        stats: Option<&Arc<DecodeStats>>,
     ) -> Result<Running, String> {
         let mime = mime(format.codec).ok_or("not a MediaCodec format")?;
         let create_codec = || {
@@ -296,12 +305,17 @@ impl MediaCodecDecoder {
                 }
             }
         }
-        let direct_measurement = stats
+        let direct_measurement = self
+            .stats
+            .as_ref()
             .filter(|_| direct.is_some())
             .map(|stats| crate::direct_video::measure(&codec, stats.clone(), fps));
         codec.start().map_err(|e| format!("start {mime}: {e:?}"))?;
+        let pacing =
+            (direct.is_some() && self.balanced_pacing).then(|| (VsyncClock::start(), ReleaseSchedule::default()));
+        let pacing_label = if pacing.is_some() { ", Balanced pacing" } else { "" };
         info!(
-            "MediaCodec {} {w}x{h}@{fps} started ({output:?} output)",
+            "MediaCodec {} {w}x{h}@{fps} started ({output:?} output{pacing_label})",
             component.unwrap_or(mime)
         );
         Ok(Running {
@@ -317,6 +331,7 @@ impl MediaCodecDecoder {
             rendered: VecDeque::with_capacity(MAX_PENDING_FRAMES),
             direct: direct.map(|(generation, window)| (generation, Some(window))),
             direct_measurement,
+            pacing,
         })
     }
 
@@ -352,15 +367,7 @@ impl MediaCodecDecoder {
         let mut error = reason.to_owned();
         if let Some((_, component)) = self.components.iter().find(|(codec, _)| *codec == format.codec) {
             for &output in outputs {
-                match Self::start(
-                    format,
-                    width,
-                    height,
-                    fps,
-                    output,
-                    component.as_deref(),
-                    self.stats.as_ref(),
-                ) {
+                match self.start(format, width, height, fps, output, component.as_deref()) {
                     Ok(running) => {
                         self.running = Some(running);
                         return Ok(());
@@ -427,6 +434,9 @@ impl Running {
         // to the reader cannot be mistaken for an output from the new IDR.
         self.pending.clear();
         self.rendered.clear();
+        if let Some((_, schedule)) = &mut self.pacing {
+            *schedule = ReleaseSchedule::default();
+        }
         Ok(())
     }
 
@@ -628,9 +638,8 @@ impl Running {
         Ok(())
     }
 
-    /// Direct output: the newest decoded picture goes to the surface now and
-    /// the system shows it at the next refresh; older ones finished in the
-    /// same pass are skipped (never shown out of order).
+    /// Direct output: release the newest decoded picture. Balanced waits to
+    /// dequeue when the next display refresh already has a frame.
     fn drain_direct(
         &mut self,
         out: &mut DecodedFrame,
@@ -640,6 +649,16 @@ impl Running {
             .direct
             .as_ref()
             .is_some_and(|(generation, window)| window.is_some() && crate::direct_video::is_current(*generation));
+        let mut slot = None;
+        if visible
+            && let Some((clock, schedule)) = &self.pacing
+            && let Some((now, vsync, period)) = clock.latest()
+        {
+            let Some(next) = schedule.next(now, vsync, period) else {
+                return Ok(None);
+            };
+            slot = Some(next);
+        }
         let mut newest = None;
         loop {
             match self.codec.dequeue_output_buffer(Duration::ZERO) {
@@ -694,18 +713,14 @@ impl Running {
             return Ok(None);
         };
         let pts = buffer.info().presentation_time_us();
-        // Released for now on the system clock (System.nanoTime), not with a
-        // plain release: that hands the window the media timestamp, which
-        // counts from 0 here. The window's buffer queue replaces a picture
-        // still waiting for the screen with a newer one only when the newer
-        // one's time is near the present, so with the media timestamp a burst
-        // of pictures queues up and reaches the screen one refresh each, and
-        // the delay stays until the stream pauses.
-        let target_ns = if visible { monotonic_ns() } else { 0 };
-        if visible && let Some(measurement) = &self.direct_measurement {
-            measurement.expect_callback(pts, target_ns);
-        }
+        // Visible buffers need a timestamp on the display clock. Use the
+        // scheduled slot for Balanced, or the current time for immediate
+        // presentation so that a burst does not queue stale pictures.
         let release = if visible {
+            let target_ns = slot.map_or_else(monotonic_ns, |slot| slot.timestamp_ns);
+            if let Some(measurement) = &self.direct_measurement {
+                measurement.expect_callback(pts, target_ns);
+            }
             self.codec.release_output_buffer_at_time(buffer, target_ns)
         } else {
             self.codec.release_output_buffer(buffer, false)
@@ -714,6 +729,9 @@ impl Running {
             measurement.release_result(pts, visible, release.is_ok());
         }
         release.map_err(|e| format!("release output: {e:?}"))?;
+        if let (Some(slot), Some((_, schedule))) = (slot, &mut self.pacing) {
+            schedule.released(slot);
+        }
         out.width = self.width as u32;
         out.height = self.height as u32;
         out.buffer = FrameBuffer::Direct;
