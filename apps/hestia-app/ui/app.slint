@@ -235,6 +235,7 @@ export component AppWindow inherits Window {
     in-out property <bool> cfg-hardware-decoding: true;
     in-out property <bool> cfg-gpu-video: true;
     in-out property <bool> cfg-direct-video: true;
+    in-out property <bool> cfg-allow-tearing: false;
     in-out property <int> cfg-frame-pacing;
     in-out property <bool> cfg-show-video-through-loss: false;
     in property <[string]> cfg-profile-names;
@@ -756,6 +757,7 @@ export component AppWindow inherits Window {
             hardware-decoding <=> root.cfg-hardware-decoding;
             gpu-video <=> root.cfg-gpu-video;
             direct-video <=> root.cfg-direct-video;
+            allow-tearing <=> root.cfg-allow-tearing;
             frame-pacing <=> root.cfg-frame-pacing;
             show-video-through-loss <=> root.cfg-show-video-through-loss;
             android: root.is-android;

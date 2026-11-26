@@ -25,6 +25,7 @@ fn settings_follow_the_decoder_and_platform() {
     row(&ui, "Direct video", false);
     row(&ui, "Zero-copy video", false);
     row(&ui, "GPU colour conversion", true);
+    row(&ui, "Allow tearing", true);
     row(&ui, "Gamescope session", true);
 
     ui.set_is_android(true);
@@ -32,6 +33,7 @@ fn settings_follow_the_decoder_and_platform() {
     row(&ui, "Direct video", true);
     row(&ui, "Zero-copy video", true);
     row(&ui, "GPU colour conversion", false);
+    row(&ui, "Allow tearing", false);
     row(&ui, "Gamescope session", true);
 
     ui.set_cfg_codec(4); // PyroWave uses a Vulkan decoder with planar output.

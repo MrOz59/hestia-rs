@@ -148,6 +148,17 @@ impl ControlStream {
     pub fn connect(remote: SocketAddr, connect_data: u32, key: [u8; 16], encrypted: bool) -> io::Result<Self> {
         let enet = EnetClient::connect(remote, CHANNEL_COUNT, connect_data, CONNECT_TIMEOUT)?;
         info!("control stream connected to {remote}");
+        // Input travels on this socket: ahead of bulk traffic on the LAN.
+        // Marked here, not in enet.rs, which stays free of this crate for
+        // tools/enet-interop.
+        match enet
+            .socket_handle()
+            .and_then(|socket| crate::qos::mark_interactive(&socket, &remote))
+        {
+            Ok(true) => info!("control: packets marked for interactive traffic (DSCP EF)"),
+            Ok(false) => {}
+            Err(e) => info!("control: packets not marked for interactive traffic: {e}"),
+        }
         Ok(Self {
             inner: Arc::new(Mutex::new(Inner {
                 enet,
@@ -220,6 +231,10 @@ impl ControlStream {
                 std::thread::Builder::new()
                     .name("hestia-control-rx".into())
                     .spawn(move || {
+                        crate::thread_priority::raise_current(
+                            "hestia-control-rx",
+                            crate::thread_priority::Role::Interactive,
+                        );
                         while !stop.load(Ordering::Relaxed) {
                             let (polled, deadline) = {
                                 let mut guard = inner.lock().unwrap_or_else(|p| p.into_inner());

@@ -361,6 +361,10 @@ fn scan(pads: &mut Vec<Pad>, next_id: &mut i32) {
 }
 
 fn run() {
+    hestia_core::stream::thread_priority::raise_current(
+        "hestia-gamepads",
+        hestia_core::stream::thread_priority::Role::Interactive,
+    );
     let mut pads: Vec<Pad> = Vec::new();
     let mut next_id = 1;
     let mut scanned: Option<Instant> = None;

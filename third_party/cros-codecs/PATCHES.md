@@ -21,7 +21,9 @@ methods on `StatelessDecoder<H264, _>` and `StatelessDecoder<H265, _>`:
 
 1. `set_low_delay(true)`: every finished picture goes to the ready queue at
    once (and stays in the DPB as a reference). H.264: `finish_picture` calls
-   the new `Dpb::output_all` (`codec/h264/dpb.rs`); H.265: `finish_picture`
+   the new `Dpb::output_all` (`codec/h264/dpb.rs`). Before checking for space,
+   `bump_as_needed` reclaims pictures that have been output and subsequently
+   retired by adaptive reference marking. H.265: `finish_picture`
    bumps every picture still needed for output.
 2. `end_access_unit()`: finishes the current picture now. The caller feeds a
    whole access unit, NAL by NAL, then calls it.

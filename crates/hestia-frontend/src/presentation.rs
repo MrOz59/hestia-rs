@@ -30,8 +30,55 @@ pub struct GpuVideoStats {
     pub receive_to_draw: LatencyHistogram,
     pub recovery: RecoveryLatency,
     pub loss_to_draw: RecoveryLatency,
+    /// When drawn pictures reached the screen, when the window can tell.
+    pub glass: GlassStats,
     #[cfg(target_os = "android")]
     pub(crate) pip: PipDraw,
+}
+
+/// When drawn pictures reached the screen, by the compositor's own clock
+/// (Wayland's `wp_presentation`): the part of a picture's way after the draw
+/// submission, compositing and the refresh it waits for included, which the
+/// draw submission itself can't see. Only frames that carried a new picture
+/// are counted.
+#[derive(Default)]
+pub struct GlassStats {
+    pub presented: AtomicU64,
+    /// Frames the compositor never showed (a newer one replaced them).
+    pub discarded: AtomicU64,
+    /// Frames the compositor put on screen without copying them.
+    pub zero_copy: AtomicU64,
+    /// Frames the compositor showed without waiting for a refresh (tearing).
+    pub without_vsync: AtomicU64,
+    pub draw_to_glass: LatencyHistogram,
+    pub receive_to_glass: LatencyHistogram,
+}
+
+impl GlassStats {
+    /// A frame with a new picture reached the screen at `on_glass`.
+    pub fn record_presented(
+        &self,
+        received_at: Instant,
+        drawn_at: Instant,
+        on_glass: Instant,
+        zero_copy: bool,
+        without_vsync: bool,
+    ) {
+        self.presented.fetch_add(1, Ordering::Relaxed);
+        if zero_copy {
+            self.zero_copy.fetch_add(1, Ordering::Relaxed);
+        }
+        if without_vsync {
+            self.without_vsync.fetch_add(1, Ordering::Relaxed);
+        }
+        self.draw_to_glass.record(on_glass.saturating_duration_since(drawn_at));
+        self.receive_to_glass
+            .record(on_glass.saturating_duration_since(received_at));
+    }
+
+    pub fn record_discarded(&self) {
+        self.discarded.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Only the first GPU submission after a PiP transition takes the report lock.
@@ -111,13 +158,17 @@ pub struct Presentation {
     output: Option<Arc<GpuOutput>>,
     /// The stream this belongs to (see [`GpuWindow::is_active`]).
     pub generation: u64,
+    /// The user lets the window show pictures without waiting for a
+    /// refresh (`StreamSettings::allow_tearing`).
+    pub allow_tearing: bool,
 }
 
 impl Presentation {
-    pub(crate) fn new(generation: u64, output: Option<Arc<GpuOutput>>) -> Self {
+    pub(crate) fn new(generation: u64, output: Option<Arc<GpuOutput>>, allow_tearing: bool) -> Self {
         Self {
             generation,
             output,
+            allow_tearing,
             ..Self::default()
         }
     }

@@ -573,7 +573,11 @@ impl Controller {
         let config = platform::configure_stream_network(config);
         hestia_core::add_stream_config_to_report(&config, decoder.name(), &mut report::lock(&session_report));
         let generation = self.stream_generation.fetch_add(1, Ordering::Relaxed) + 1;
-        let present = Arc::new(Presentation::new(generation, video.gpu));
+        let present = Arc::new(Presentation::new(
+            generation,
+            video.gpu,
+            launched.settings.allow_tearing,
+        ));
         self.gpu_window.set_active(&present);
         let sink = DecodingSink::new(
             decoder,
@@ -942,9 +946,30 @@ impl Controller {
                     "replaced before draw",
                     gpu.superseded.load(Ordering::Relaxed),
                 );
+                // The compositor's word on when those frames reached the
+                // screen, where the window has it (Wayland).
+                let glass = &gpu.glass;
+                let presented = glass.presented.load(Ordering::Relaxed);
+                let discarded = glass.discarded.load(Ordering::Relaxed);
+                if presented + discarded > 0 {
+                    r.field("GPU video", "frames on screen (compositor)", presented);
+                    r.field("GPU video", "frames the compositor discarded", discarded);
+                    r.field(
+                        "GPU video",
+                        "frames on screen without a copy",
+                        glass.zero_copy.load(Ordering::Relaxed),
+                    );
+                    r.field(
+                        "GPU video",
+                        "frames on screen without waiting for a refresh",
+                        glass.without_vsync.load(Ordering::Relaxed),
+                    );
+                }
                 for (stage, histogram) in [
                     ("GPU picture ready to draw submission", &gpu.ready_to_draw),
                     ("first packet to GPU draw submission", &gpu.receive_to_draw),
+                    ("GPU draw submission to on screen", &glass.draw_to_glass),
+                    ("first packet to on screen", &glass.receive_to_glass),
                     ("IDR request to first GPU draw submission", &gpu.recovery.latency),
                     (
                         "assembly loss to first recovered GPU draw submission",

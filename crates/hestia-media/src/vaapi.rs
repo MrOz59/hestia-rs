@@ -370,7 +370,8 @@ impl Capabilities {
                     .query_config_entrypoints(profile)
                     .is_ok_and(|e| e.contains(&libva::VAEntrypoint::VAEntrypointVLD))
         };
-        // cros-codecs starts every decoder with an H.264 Main configuration.
+        // H.264 Main is our baseline negotiated hardware format; the actual
+        // VA context is created only after parsing the codec's sequence.
         if !decodes(libva::VAProfile::VAProfileH264Main) {
             return Err(format!("{vendor}: no H.264 decoding"));
         }
@@ -909,5 +910,24 @@ impl FrameDecoder for VaapiDecoder {
             }
         }
         Ok(Some(timing))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Run explicitly on a Linux machine with a VA-API-capable render node.
+    #[test]
+    #[ignore = "requires a VA-API render node"]
+    fn opens_supported_codecs_without_a_dummy_context() {
+        let (node, caps) = render_nodes(None)
+            .into_iter()
+            .find_map(|node| Capabilities::query(&node).ok().map(|caps| (node, caps)))
+            .expect("no usable VA-API render node");
+        for codec in caps.codecs {
+            let session = Session::open(&node, codec).expect("opening decoder before first sequence");
+            assert!(with_decoder!(&session.codec, d => d.stream_info().is_none()));
+        }
     }
 }

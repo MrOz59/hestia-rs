@@ -127,8 +127,11 @@ impl Measurement {
         self.stats.direct_video.output(self.id, now);
     }
 
-    pub(crate) fn expect_callback(&self, pts: i64) {
-        self.stats.direct_video.expect_callback(self.id, pts, Instant::now());
+    /// `target_ns` is the system time the picture is released for, 0 for none.
+    pub(crate) fn expect_callback(&self, pts: i64, target_ns: i64) {
+        self.stats
+            .direct_video
+            .expect_callback(self.id, pts, Instant::now(), target_ns);
     }
 
     pub(crate) fn release_result(&self, pts: i64, visible: bool, ok: bool) {

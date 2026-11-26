@@ -112,7 +112,10 @@ impl AudioReceiver {
             threads.push(
                 std::thread::Builder::new()
                     .name("hestia-audio-rx".into())
-                    .spawn(move || receive_loop(socket, cfg, sink, stop, counters))?,
+                    .spawn(move || {
+                        crate::thread_priority::raise_current("hestia-audio-rx", crate::thread_priority::Role::Audio);
+                        receive_loop(socket, cfg, sink, stop, counters)
+                    })?,
             );
         }
         Ok(Self {

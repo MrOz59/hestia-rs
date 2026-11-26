@@ -192,7 +192,7 @@ impl<V: VideoFrame> VaapiDecodedHandle<V> {
 
 pub struct VaapiBackend<V: VideoFrame> {
     pub display: Rc<Display>,
-    pub context: Rc<Context>,
+    context: Option<Rc<Context>>,
     stream_info: StreamInfo,
     // TODO: We should try to support context reuse
     _supports_context_reuse: bool,
@@ -203,36 +203,24 @@ impl<V: VideoFrame> VaapiBackend<V> {
     pub(crate) fn new(display: Rc<libva::Display>, supports_context_reuse: bool) -> Self {
         let init_stream_info = StreamInfo {
             format: DecodedFormat::NV12,
-            coded_resolution: Resolution::from((16, 16)),
-            display_resolution: Resolution::from((16, 16)),
-            min_num_frames: 1,
+            coded_resolution: Resolution::default(),
+            display_resolution: Resolution::default(),
+            min_num_frames: 0,
         };
-        let config = display
-            .create_config(
-                vec![libva::VAConfigAttrib {
-                    type_: libva::VAConfigAttribType::VAConfigAttribRTFormat,
-                    value: libva::VA_RT_FORMAT_YUV420,
-                }],
-                libva::VAProfile::VAProfileH264Main,
-                libva::VAEntrypoint::VAEntrypointVLD,
-            )
-            .expect("Could not create initial VAConfig!");
-        let context = display
-            .create_context::<<V as VideoFrame>::MemDescriptor>(
-                &config,
-                init_stream_info.coded_resolution.width,
-                init_stream_info.coded_resolution.height,
-                None,
-                true,
-            )
-            .expect("Could not create initial VAContext!");
         Self {
             display: display,
-            context: context,
+            context: None,
             _supports_context_reuse: supports_context_reuse,
             stream_info: init_stream_info,
             _phantom_data: Default::default(),
         }
+    }
+
+    /// No VA context exists until the codec has parsed a real sequence.
+    pub(crate) fn context(&self) -> anyhow::Result<&Rc<Context>> {
+        self.context
+            .as_ref()
+            .ok_or_else(|| anyhow!("VA context not initialized; no stream sequence"))
     }
 
     pub(crate) fn new_sequence<StreamData>(
@@ -242,12 +230,13 @@ impl<V: VideoFrame> VaapiBackend<V> {
     where
         for<'a> &'a StreamData: VaStreamInfo,
     {
-        self.stream_info.display_resolution = Resolution::from(stream_params.visible_rect());
-        self.stream_info.coded_resolution = stream_params.coded_size().clone();
-        self.stream_info.min_num_frames = stream_params.min_num_surfaces();
-
-        // TODO: Handle context re-use
-        // TODO: We should obtain RT_FORMAT from stream_info
+        let coded = stream_params.coded_size();
+        let visible = Resolution::from(stream_params.visible_rect());
+        let profile = stream_params.va_profile()?;
+        // Create the first context from the actual stream parameters. A dummy
+        // 16x16 H.264 context is rejected by some VA drivers and is unrelated
+        // to the negotiated codec (e.g. HEVC or AV1).
+        // TODO: Handle context re-use and RT formats beyond NV12.
         let config = self
             .display
             .create_config(
@@ -255,21 +244,31 @@ impl<V: VideoFrame> VaapiBackend<V> {
                     type_: libva::VAConfigAttribType::VAConfigAttribRTFormat,
                     value: libva::VA_RT_FORMAT_YUV420,
                 }],
-                stream_params.va_profile().map_err(|_| anyhow!("Could not get VAProfile!"))?,
+                profile,
                 libva::VAEntrypoint::VAEntrypointVLD,
             )
-            .map_err(|_| anyhow!("Could not create VAConfig!"))?;
+            .map_err(|e| anyhow!("creating VA config for profile {profile}: {e}"))?;
         let context = self
             .display
             .create_context::<<V as VideoFrame>::MemDescriptor>(
                 &config,
-                self.stream_info.coded_resolution.width,
-                self.stream_info.coded_resolution.height,
+                coded.width,
+                coded.height,
                 None,
                 true,
             )
-            .map_err(|_| anyhow!("Could not create VAContext!"))?;
-        self.context = context;
+            .map_err(|e| {
+                anyhow!(
+                    "creating VA context for profile {profile}, {}x{}: {e}",
+                    coded.width,
+                    coded.height
+                )
+            })?;
+        // Keep the old context and stream info intact if reconfiguration fails.
+        self.stream_info.display_resolution = visible;
+        self.stream_info.coded_resolution = coded;
+        self.stream_info.min_num_frames = stream_params.min_num_surfaces();
+        self.context = Some(context);
 
         Ok(())
     }
@@ -321,7 +320,7 @@ impl<V: VideoFrame> StatelessDecoderBackend for VaapiBackend<V> {
     type Handle = DecodedHandle<V>;
 
     fn stream_info(&self) -> Option<&StreamInfo> {
-        Some(&self.stream_info)
+        self.context.as_ref().map(|_| &self.stream_info)
     }
 
     fn reset_backend(&mut self) -> anyhow::Result<()> {

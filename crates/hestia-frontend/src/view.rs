@@ -230,6 +230,7 @@ pub fn settings_form(s: &StreamSettings, native: Option<(u32, u32, u32)>) -> Set
         hardware_decoding: s.hardware_decoding,
         gpu_video: s.gpu_video,
         direct_video: s.direct_video,
+        allow_tearing: s.allow_tearing,
         frame_pacing: i32::from(s.frame_pacing == hestia_core::FramePacing::Balanced),
         show_video_through_loss: s.show_video_through_loss,
         orientation: index(
@@ -286,6 +287,7 @@ pub fn settings_from_form(form: &SettingsForm, base: &StreamSettings) -> StreamS
         hardware_decoding: form.hardware_decoding,
         gpu_video: form.gpu_video,
         direct_video: form.direct_video,
+        allow_tearing: form.allow_tearing,
         frame_pacing: hestia_core::FramePacing::ALL
             .get(form.frame_pacing as usize)
             .copied()
@@ -366,6 +368,7 @@ mod mode_tests {
         s.hdr = true;
         s.gpu_video = false;
         s.direct_video = false;
+        s.allow_tearing = true;
         s.frame_pacing = hestia_core::FramePacing::Balanced;
         s.show_video_through_loss = true;
         s.orientation = hestia_core::StreamOrientation::Portrait;

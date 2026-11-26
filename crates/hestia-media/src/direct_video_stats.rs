@@ -12,6 +12,19 @@ use crate::decode::LatencyHistogram;
 
 const MAX_PENDING: usize = 1024;
 const CALLBACK_GRACE: Duration = Duration::from_secs(5);
+/// A render time further than this from its release time is on another
+/// clock (some devices' codecs report one), not a measurement.
+const PLAUSIBLE_RENDER_DELAY: Duration = Duration::from_secs(1);
+
+/// A visible release awaiting its render callback.
+#[derive(Clone, Copy, Debug)]
+struct Pending {
+    pts: i64,
+    released_at: Instant,
+    /// The system time (CLOCK_MONOTONIC, ns) the picture was released for,
+    /// 0 when the release named none.
+    target_ns: i64,
+}
 
 #[derive(Debug, Default)]
 pub struct DirectVideoStats(Mutex<State>);
@@ -30,7 +43,7 @@ struct State {
     ever_active: bool,
     ever_measured: bool,
     period_ns: u64,
-    pending: VecDeque<(i64, Instant)>,
+    pending: VecDeque<Pending>,
     outputs: u64,
     released: u64,
     tracked: u64,
@@ -51,6 +64,8 @@ struct State {
     uneven: u64,
     worst: Duration,
     callback_delay: LatencyHistogram,
+    release_to_render: LatencyHistogram,
+    implausible_render_times: u64,
     last_output: Option<Instant>,
     worst_output_gap: Duration,
 }
@@ -80,7 +95,7 @@ impl State {
         while self
             .pending
             .front()
-            .is_some_and(|&(_, queued)| now.saturating_duration_since(queued) > CALLBACK_GRACE)
+            .is_some_and(|pending| now.saturating_duration_since(pending.released_at) > CALLBACK_GRACE)
         {
             self.pending.pop_front();
             self.aged_out += 1;
@@ -149,7 +164,8 @@ impl DirectVideoStats {
     }
 
     /// Called before release: a callback can race the successful return.
-    pub(crate) fn expect_callback(&self, id: usize, pts: i64, now: Instant) {
+    /// `target_ns` is the system time the picture is released for, 0 for none.
+    pub(crate) fn expect_callback(&self, id: usize, pts: i64, now: Instant, target_ns: i64) {
         let mut s = self.lock();
         if s.codec != Some(id) || !s.callbacks {
             return;
@@ -159,7 +175,11 @@ impl DirectVideoStats {
             s.pending.pop_front();
             s.aged_out += 1;
         }
-        s.pending.push_back((pts, now));
+        s.pending.push_back(Pending {
+            pts,
+            released_at: now,
+            target_ns,
+        });
     }
 
     pub(crate) fn release_result(&self, id: usize, pts: i64, visible: bool, ok: bool, now: Instant) {
@@ -187,7 +207,7 @@ impl DirectVideoStats {
             (_, false) => {
                 s.failed += 1;
                 if visible {
-                    s.pending.retain(|&(pending_pts, _)| pending_pts != pts);
+                    s.pending.retain(|pending| pending.pts != pts);
                 }
             }
         }
@@ -209,18 +229,28 @@ impl DirectVideoStats {
         if s.codec != Some(id) || !s.callbacks {
             return;
         }
-        let Some(index) = s.pending.iter().position(|&(pending_pts, _)| pending_pts == pts) else {
+        let Some(index) = s.pending.iter().position(|pending| pending.pts == pts) else {
             s.unmatched += 1;
             return;
         };
-        let (_, release) = s.pending.remove(index).expect("matched pending release");
+        let pending = s.pending.remove(index).expect("matched pending release");
         s.matched += 1;
         // The codec timestamp can have a different origin on some devices.
         // Use the app clock for release-to-callback and the codec clock only
-        // for differences between consecutive render timestamps.
-        s.callback_delay.record(arrival.saturating_duration_since(release));
+        // for differences between consecutive render timestamps, and for the
+        // release-to-render time when it is plausibly on the release's clock.
+        s.callback_delay
+            .record(arrival.saturating_duration_since(pending.released_at));
         if render_ns <= 0 {
             return;
+        }
+        if pending.target_ns > 0 {
+            let delay = render_ns - pending.target_ns;
+            if (0..=PLAUSIBLE_RENDER_DELAY.as_nanos() as i64).contains(&delay) {
+                s.release_to_render.record(Duration::from_nanos(delay as u64));
+            } else {
+                s.implausible_render_times += 1;
+            }
         }
         if let Some(previous) = s.last_render_ns {
             // An older timestamp can be delivered after a newer one. Keep
@@ -303,6 +333,15 @@ impl DirectVideoStats {
             if let Some(delay) = s.callback_delay.summary() {
                 rows.push(("visible buffer release to callback arrival", delay));
             }
+            if let Some(delay) = s.release_to_render.summary() {
+                rows.push(("visible buffer release to render (system clock)", delay));
+            }
+            if s.implausible_render_times > 0 {
+                rows.push((
+                    "render times on another clock than the release",
+                    s.implausible_render_times.to_string(),
+                ));
+            }
         } else {
             rows.push(("render callbacks", "unavailable".to_owned()));
         }
@@ -322,7 +361,7 @@ mod tests {
         stats.enable_callbacks(1);
         for (pts, elapsed_ms) in [(1, 0), (2, 17), (3, 1017)] {
             let now = start + Duration::from_millis(elapsed_ms);
-            stats.expect_callback(1, pts, now);
+            stats.expect_callback(1, pts, now, 0);
             stats.release_result(1, pts, true, true, now);
             stats.callback(1, pts, pts * 16_666_667, now);
         }
@@ -360,10 +399,10 @@ mod tests {
         stats.begin_codec(1, 60, now);
         stats.enable_callbacks(1);
         for pts in 0..3 {
-            stats.expect_callback(1, pts, now);
+            stats.expect_callback(1, pts, now, 0);
             stats.release_result(1, pts, true, true, now);
         }
-        stats.expect_callback(1, 4, now);
+        stats.expect_callback(1, 4, now, 0);
         stats.release_result(1, 4, true, false, now);
         stats.release_result(1, 5, false, true, now);
         assert_eq!(stats.counts().discarded, 0);
@@ -418,13 +457,13 @@ mod tests {
         let now = Instant::now();
         stats.begin_codec(1, 60, now);
         stats.enable_callbacks(1);
-        stats.expect_callback(1, 7, now);
+        stats.expect_callback(1, 7, now, 0);
         stats.output(1, now);
         stats.surface_changed(1, now + Duration::from_secs(1));
         stats.callback(1, 7, 100, now);
         stats.begin_codec(2, 60, now);
         stats.enable_callbacks(2);
-        stats.expect_callback(2, 7, now);
+        stats.expect_callback(2, 7, now, 0);
         stats.callback(1, 7, 200, now);
         stats.callback(2, 7, 300, now);
         let s = stats.lock();
@@ -439,13 +478,13 @@ mod tests {
         stats.begin_codec(1, 120, now);
         stats.enable_callbacks(1);
         for pts in 0..=65_536 {
-            stats.expect_callback(1, pts, now);
+            stats.expect_callback(1, pts, now, 0);
             stats.callback(1, pts, 1_000_000_000 + pts * 8_333_333, now);
         }
-        stats.expect_callback(1, 65_537, now);
+        stats.expect_callback(1, 65_537, now, 0);
         stats.callback(1, 65_537, 3_000_000_000 + 65_536 * 8_333_333, now);
         for pts in 100_000..100_000 + MAX_PENDING as i64 + 1 {
-            stats.expect_callback(1, pts, now);
+            stats.expect_callback(1, pts, now, 0);
         }
         assert!(
             stats
@@ -456,5 +495,31 @@ mod tests {
         assert_eq!(s.interval_count, 65_537);
         assert_eq!(s.worst, Duration::from_secs(2));
         assert!(s.pending.is_empty());
+    }
+
+    #[test]
+    fn release_to_render_is_measured_on_the_release_clock_only() {
+        let stats = DirectVideoStats::default();
+        let now = Instant::now();
+        stats.begin_codec(1, 60, now);
+        stats.enable_callbacks(1);
+        // Released for 5 s on the system clock, rendered 21 ms later.
+        stats.expect_callback(1, 1, now, 5_000_000_000);
+        stats.callback(1, 1, 5_021_000_000, now + Duration::from_millis(25));
+        // A codec whose render times are on another clock is not a sample.
+        stats.expect_callback(1, 2, now, 5_016_000_000);
+        stats.callback(1, 2, 90_000_000_000, now + Duration::from_millis(25));
+        // Nor is a render before the time it was released for.
+        stats.expect_callback(1, 3, now, 5_032_000_000);
+        stats.callback(1, 3, 5_000_000_000, now + Duration::from_millis(25));
+        // A release that named no time gives no sample.
+        stats.expect_callback(1, 4, now, 0);
+        stats.callback(1, 4, 5_050_000_000, now + Duration::from_millis(25));
+        let s = stats.lock();
+        assert_eq!(
+            s.release_to_render.summary().as_deref(),
+            Some("p50 21.00 / p95 21.00 / p99 21.00 ms (1 samples)")
+        );
+        assert_eq!((s.implausible_render_times, s.matched), (2, 4));
     }
 }

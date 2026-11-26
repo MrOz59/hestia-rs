@@ -177,6 +177,15 @@ Settings → Decoding → **Zero-copy video** (Android) / **GPU colour
 conversion** (desktop) is the same setting (`gpu_video`); off forces the CPU
 path, for comparison or to work around a driver.
 
+Settings → Decoding → **Allow tearing** (desktop, off by default): while a
+stream runs, the window asks the compositor (`wp_tearing_control_v1`) to
+show each frame as soon as it is committed instead of at the next refresh.
+A compositor that allows it flips mid-refresh: the picture can tear, and
+each one reaches the screen up to a refresh sooner. KWin does this for a
+full-screen window when Display settings → "Allow tearing in full screen"
+is on; elsewhere the hint changes nothing. The report counts the frames the
+compositor showed that way.
+
 ## 5. Cost per 1080p frame (desktop)
 
 Measured on a 2-core 2.1 GHz x86-64 CPU (AVX2) with an 18 Mbit/s 1080p60
@@ -210,9 +219,22 @@ The report's video sections, from the network to the screen:
     hands the DMA-BUF over);
   * *RGBA ready to Slint handoff* / *GPU picture ready to draw submission*:
     waiting for the UI thread or the next frame drawn;
+  * *GPU draw submission to on screen* (Linux on Wayland, when the
+    compositor has `wp_presentation`): from the draw to the refresh the
+    compositor says showed the frame, compositing and the wait for that
+    refresh included; *first packet to on screen* is the whole way;
   * *IDR request to first …*: how long a recovery took.
 * **Video delivery** / **GPU video**: how many pictures went each way and how
-  many were replaced before being shown.
+  many were replaced before being shown; on Wayland, how many frames with a
+  new picture the compositor showed, discarded (a newer one replaced them),
+  showed without a copy, or showed without waiting for a refresh (tearing).
+* **Direct video** (Android): releases to the surface and the system's
+  render callbacks (Android 13+). *Visible buffer release to render (system
+  clock)* is the time from a picture's release to the refresh that showed
+  it, as the system reports it; *… to callback arrival* adds the callback's
+  own delivery. Pictures are released for the current system time, which
+  lets the window replace one still waiting for the screen with a newer one
+  instead of queuing both.
 * **Settings**: whether hardware decoding and the GPU path were on.
 
 The live diagnosis (stats overlay, and per second in the report) blames
@@ -235,9 +257,14 @@ picture's way into parts that can be compared:
   add these up, from the frame's first packet to the moment it is handed to
   the toolkit.
 
+After the draw, *GPU draw submission to on screen* (Wayland) and *visible
+buffer release to render* (Android direct video) carry the way to the
+refresh that showed the picture.
+
 What the report doesn't see: one-way network delay (only the round trip),
-input's way back to the host, and the display's own delay after the toolkit
-draws (compositor, vsync, the screen).
+input's way back to the host, the display's delay where the window can't
+report it (X11, Slint on Android, compositors without `wp_presentation`),
+and the screen's own delay after the refresh.
 
 ## 7. Next
 

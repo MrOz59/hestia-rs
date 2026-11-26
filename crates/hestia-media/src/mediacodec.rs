@@ -50,6 +50,14 @@ const BUFFER_FLAG_CODEC_CONFIG: u32 = 2;
 /// How long the decoder waits for the direct video surface at start.
 const DIRECT_SURFACE_WAIT: Duration = Duration::from_millis(1500);
 
+/// The system clock MediaCodec renders on (`System.nanoTime`), in ns.
+fn monotonic_ns() -> i64 {
+    // SAFETY: an all-zero timespec is valid, and the call only writes it.
+    let mut now: libc::timespec = unsafe { std::mem::zeroed() };
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    now.tv_sec as i64 * 1_000_000_000 + now.tv_nsec as i64
+}
+
 // MediaCodecInfo.CodecCapabilities colour formats.
 const COLOR_YUV420_PLANAR: i32 = 19;
 const COLOR_YUV420_PACKED_PLANAR: i32 = 20;
@@ -705,13 +713,17 @@ impl Running {
             return Ok(None);
         };
         let pts = buffer.info().presentation_time_us();
-        if visible && let Some(measurement) = &self.direct_measurement {
-            measurement.expect_callback(pts);
-        }
-        let release = if let Some(slot) = slot {
-            self.codec.release_output_buffer_at_time(buffer, slot.timestamp_ns)
+        // Visible buffers need a timestamp on the display clock. Use the
+        // scheduled slot for Balanced, or the current time for immediate
+        // presentation so that a burst does not queue stale pictures.
+        let release = if visible {
+            let target_ns = slot.map_or_else(monotonic_ns, |slot| slot.timestamp_ns);
+            if let Some(measurement) = &self.direct_measurement {
+                measurement.expect_callback(pts, target_ns);
+            }
+            self.codec.release_output_buffer_at_time(buffer, target_ns)
         } else {
-            self.codec.release_output_buffer(buffer, visible)
+            self.codec.release_output_buffer(buffer, false)
         };
         if let Some(measurement) = &self.direct_measurement {
             measurement.release_result(pts, visible, release.is_ok());

@@ -47,6 +47,39 @@ impl Drop for CpalOutput {
     }
 }
 
+/// The device buffer asked for stereo output: 20 ms, the ALSA surround
+/// output's four 5 ms periods. Left to its default, ALSA on PipeWire hands
+/// out 2048-frame periods (43 ms each) and drives the whole audio graph at
+/// a 1024-frame quantum, so every sound left the device 60 ms or more after
+/// it was decoded, and the playback buffer, read 43 ms at a time, grew its
+/// target to match.
+const DEVICE_BUFFER_FRAMES: u32 = SAMPLE_RATE / 1000 * 20;
+
+/// [`DEVICE_BUFFER_FRAMES`], within what the device takes.
+fn device_buffer(supported: &cpal::SupportedBufferSize) -> cpal::BufferSize {
+    match *supported {
+        cpal::SupportedBufferSize::Range { min, max } if min <= max => {
+            cpal::BufferSize::Fixed(DEVICE_BUFFER_FRAMES.clamp(min, max))
+        }
+        _ => cpal::BufferSize::Fixed(DEVICE_BUFFER_FRAMES),
+    }
+}
+
+/// The playback callback runs on the audio backend's own thread, which an
+/// audio server may not have raised: raise it from its first call, on a
+/// helper thread so the callback itself never waits.
+fn raise_callback_once() {
+    thread_local! {
+        static RAISED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if !RAISED.replace(true) {
+        hestia_stream::thread_priority::raise_in_background(
+            "audio playback callback",
+            hestia_stream::thread_priority::Role::Audio,
+        );
+    }
+}
+
 fn run_output(reader: PcmReader, stop: Arc<AtomicBool>, ready: mpsc::Sender<Result<(), String>>) {
     #[cfg(target_os = "linux")]
     if reader.channels() > 2 {
@@ -89,34 +122,43 @@ fn run_output(reader: PcmReader, stop: Arc<AtomicBool>, ready: mpsc::Sender<Resu
         return;
     };
     let format = config.sample_format();
-    let stream_config: cpal::StreamConfig = config.into();
+    let buffer = device_buffer(config.buffer_size());
+    let mut stream_config: cpal::StreamConfig = config.into();
+    stream_config.buffer_size = buffer;
     let channels = stream_config.channels as usize;
-    let on_error = |e: cpal::StreamError| warn!("audio output error: {e}");
-    let stream = match format {
-        cpal::SampleFormat::I16 => {
-            let reader = reader.clone();
-            device.build_output_stream(
-                &stream_config,
+    let build = |stream_config: &cpal::StreamConfig| {
+        let on_error = |e: cpal::StreamError| warn!("audio output error: {e}");
+        let reader = reader.clone();
+        match format {
+            cpal::SampleFormat::I16 => device.build_output_stream(
+                stream_config,
                 move |out: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                    raise_callback_once();
                     reader.stats().note_callback((out.len() / channels.max(1)) as u64);
                     reader.read_stereo(out, channels, |s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16, 0)
                 },
                 on_error,
                 None,
-            )
-        }
-        _ => {
-            let reader = reader.clone();
-            device.build_output_stream(
-                &stream_config,
+            ),
+            _ => device.build_output_stream(
+                stream_config,
                 move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    raise_callback_once();
                     reader.stats().note_callback((out.len() / channels.max(1)) as u64);
                     reader.read_stereo(out, channels, |s| s, 0.0)
                 },
                 on_error,
                 None,
-            )
+            ),
         }
+    };
+    let stream = match build(&stream_config) {
+        Err(e) if stream_config.buffer_size != cpal::BufferSize::Default => {
+            info!("audio output: the device refused a {buffer:?} buffer ({e}); using its default");
+            stream_config.buffer_size = cpal::BufferSize::Default;
+            build(&stream_config)
+        }
+        built => built,
     };
     let stream = match stream
         .map_err(|e| e.to_string())
@@ -129,9 +171,10 @@ fn run_output(reader: PcmReader, stop: Arc<AtomicBool>, ready: mpsc::Sender<Resu
         }
     };
     info!(
-        "audio output: cpal {} (host {} ch, device {channels} ch, {format:?})",
+        "audio output: cpal {} (host {} ch, device {channels} ch, {format:?}, buffer {:?})",
         device.name().unwrap_or_else(|_| "default".into()),
-        reader.channels()
+        reader.channels(),
+        stream_config.buffer_size
     );
     let _ = ready.send(Ok(()));
     // cpal streams are not Send on every platform: keep it on this thread.
@@ -139,4 +182,21 @@ fn run_output(reader: PcmReader, stop: Arc<AtomicBool>, ready: mpsc::Sender<Resu
         std::thread::park_timeout(std::time::Duration::from_millis(100));
     }
     drop(stream);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_device_buffer_is_twenty_milliseconds_within_its_range() {
+        let range = |min, max| cpal::SupportedBufferSize::Range { min, max };
+        assert_eq!(device_buffer(&range(64, 8192)), cpal::BufferSize::Fixed(960));
+        assert_eq!(device_buffer(&range(2048, 8192)), cpal::BufferSize::Fixed(2048));
+        assert_eq!(device_buffer(&range(64, 512)), cpal::BufferSize::Fixed(512));
+        assert_eq!(
+            device_buffer(&cpal::SupportedBufferSize::Unknown),
+            cpal::BufferSize::Fixed(960)
+        );
+    }
 }

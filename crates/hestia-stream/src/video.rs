@@ -955,7 +955,10 @@ impl VideoReceiver {
             receiver.threads.push(
                 std::thread::Builder::new()
                     .name("hestia-video-rx".into())
-                    .spawn(move || receive_loop(socket, cfg, sink, emit.as_ref(), stop, counters, decoder_wants_idr))?,
+                    .spawn(move || {
+                        crate::thread_priority::raise_current("hestia-video-rx", crate::thread_priority::Role::Video);
+                        receive_loop(socket, cfg, sink, emit.as_ref(), stop, counters, decoder_wants_idr)
+                    })?,
             );
         }
         Ok(receiver)

@@ -27,12 +27,16 @@ use hestia_frontend::gl_dmabuf::DmabufImporter;
 use hestia_frontend::gl_yuv::Nv12Images;
 use hestia_frontend::gl_yuv::YuvPass;
 use hestia_frontend::presentation::GpuWindow;
+#[cfg(target_os = "linux")]
+use hestia_frontend::presentation::Presentation;
 use hestia_media::native_picture::NativePicture;
 use hestia_media::{DecodedFrame, FrameBuffer};
 use log::{info, warn};
 use slint::{ComponentHandle, GraphicsAPI, RenderingState};
 
 use crate::AppWindow;
+#[cfg(target_os = "linux")]
+use crate::wl_surface::WindowSurface;
 
 /// A picture drawn into the pass's target: its size, the texture and
 /// whether it was reallocated. The error says whether only DMA-BUF import
@@ -51,6 +55,13 @@ struct Renderer {
     held: Option<DecodedFrame>,
     /// The stream view shows our texture (for this stream, at this size).
     image_set: Option<(u64, (u32, u32))>,
+    /// The window's Wayland surface: presentation times and the tearing hint.
+    #[cfg(target_os = "linux")]
+    glass: Option<WindowSurface>,
+    /// The picture drawn for the frame being rendered: its stream, when its
+    /// first packet arrived and when it was drawn.
+    #[cfg(target_os = "linux")]
+    drawn: Option<(Arc<Presentation>, Instant, Instant)>,
 }
 
 impl Renderer {
@@ -66,6 +77,10 @@ impl Renderer {
                 info!("GPU video colour conversion ready ({})", pass.version);
                 #[cfg(target_os = "linux")]
                 self.setup_dmabuf(&pass);
+                #[cfg(target_os = "linux")]
+                {
+                    self.glass = self.weak.upgrade().and_then(|ui| WindowSurface::new(ui.window()));
+                }
                 self.pass = Some(pass);
                 self.gpu.status.ready();
             }
@@ -134,6 +149,11 @@ impl Renderer {
     }
 
     fn before_rendering(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(glass) = &mut self.glass {
+            glass.dispatch();
+            glass.set_tearing(self.gpu.active().is_some_and(|stream| stream.allow_tearing));
+        }
         if self.pass.is_none() {
             return;
         }
@@ -147,6 +167,10 @@ impl Renderer {
                 stats.ready_to_draw.record(now.duration_since(frame.decoded_at));
                 stats.receive_to_draw.record(now.duration_since(frame.received_at));
                 stats.record_draw(frame.idr_requested_at, frame.loss_detected_at, now);
+                #[cfg(target_os = "linux")]
+                {
+                    self.drawn = Some((presentation.clone(), frame.received_at, now));
+                }
                 if matches!(frame.buffer, FrameBuffer::Native(NativePicture::Planar(_))) {
                     // The upload copied the planes: give them back to the decoder.
                     drop(frame);
@@ -193,6 +217,17 @@ impl Renderer {
         }
     }
 
+    /// The scene is drawn and about to be swapped: ask when the frame that
+    /// carries the new picture reaches the screen.
+    #[cfg(target_os = "linux")]
+    fn after_rendering(&mut self) {
+        let drawn = self.drawn.take();
+        if let (Some(glass), Some((stream, received_at, drawn_at))) = (&mut self.glass, drawn) {
+            glass.watch_next_commit(stream, received_at, drawn_at);
+            glass.dispatch();
+        }
+    }
+
     fn clear_image(&mut self) {
         if self.image_set.take().is_some()
             && let Some(ui) = self.weak.upgrade()
@@ -210,6 +245,8 @@ impl Renderer {
         #[cfg(target_os = "linux")]
         {
             self.dmabuf = None;
+            self.glass = None;
+            self.drawn = None;
         }
         self.clear_image();
         if let Some(mut pass) = self.pass.take() {
@@ -220,6 +257,11 @@ impl Renderer {
 
 /// Hooks the GPU colour conversion into the window's rendering (desktop).
 pub(crate) fn install(ui: &AppWindow, gpu: Arc<GpuWindow>) {
+    // This thread draws the video: ahead of ordinary work.
+    hestia_core::stream::thread_priority::raise_current(
+        "hestia-ui",
+        hestia_core::stream::thread_priority::Role::Interactive,
+    );
     let mut renderer = Renderer {
         weak: ui.as_weak(),
         gpu,
@@ -228,10 +270,16 @@ pub(crate) fn install(ui: &AppWindow, gpu: Arc<GpuWindow>) {
         dmabuf: None,
         held: None,
         image_set: None,
+        #[cfg(target_os = "linux")]
+        glass: None,
+        #[cfg(target_os = "linux")]
+        drawn: None,
     };
     let result = ui.window().set_rendering_notifier(move |state, api| match state {
         RenderingState::RenderingSetup => renderer.setup(api),
         RenderingState::BeforeRendering => renderer.before_rendering(),
+        #[cfg(target_os = "linux")]
+        RenderingState::AfterRendering => renderer.after_rendering(),
         RenderingState::RenderingTeardown => renderer.teardown(),
         _ => {}
     });
