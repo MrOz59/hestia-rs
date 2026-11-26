@@ -57,6 +57,7 @@ component HostTile inherits Focusable {
 
     accessible-role: button;
     accessible-label: root.host.name;
+    context-actions: true;
     border-radius: Theme.radius;
     background: root.pressed ? Theme.border : (root.focused || root.hovered ? Theme.card-hover : Theme.card);
     border-width: root.focused ? 2px : 1px;
@@ -119,9 +120,12 @@ component HostTile inherits Focusable {
             }
             VerticalLayout {
                 alignment: center;
-                Icon {
-                    name: "chevron-right";
-                    tint: root.focused ? Theme.accent : Theme.faint;
+                IconButton {
+                    icon: "more";
+                    label: "Options for " + root.host.name;
+                    tint: Theme.muted;
+                    nav(key) => { return root.nav(key); }
+                    clicked => { root.context-requested(); }
                 }
             }
         }
@@ -163,9 +167,23 @@ export component HostsPage inherits Page {
     in property <[HostCard]> hosts;
     in property <bool> scanning;
     callback open-host(string);
+    callback edit-host(string);
+    callback delete-host(string);
     callback add-host;
     callback refresh;
     callback settings;
+
+    // Keep the target by id while background checks can refresh the list.
+    private property <HostCard> action-host;
+    private property <bool> actions-open;
+    private property <bool> delete-open;
+
+    function close-host-actions() {
+        root.actions-open = false;
+        root.delete-open = false;
+        home-scope.focus();
+        root.nav = -1;
+    }
 
     // Focus: a host card (0…), the header's Refresh (-2), Settings (-3) and
     // Add host (-4, the floating button on phones), or the empty page's
@@ -435,6 +453,10 @@ export component HostsPage inherits Page {
                 clicked => {
                     root.open-host(host.id);
                 }
+                context-requested => {
+                    root.action-host = host;
+                    root.actions-open = true;
+                }
             }
         }
     }
@@ -460,6 +482,40 @@ export component HostsPage inherits Page {
         clicked => {
             root.add-host();
         }
+    }
+
+    if root.actions-open: OptionSheet {
+        width: 100%;
+        height: 100%;
+        title: root.action-host.name;
+        options: ["Edit", "Delete"];
+        current: -1;
+        picked(index) => {
+            if (index == 0) {
+                root.close-host-actions();
+                root.edit-host(root.action-host.id);
+            } else {
+                root.actions-open = false;
+                root.delete-open = true;
+            }
+        }
+        dismissed => { root.close-host-actions(); }
+    }
+
+    if root.delete-open: OptionSheet {
+        width: 100%;
+        height: 100%;
+        title: "Delete " + root.action-host.name + "?";
+        description: "This removes the saved host from this device. You can add and pair it again.";
+        options: ["Cancel", "Delete"];
+        current: -1;
+        picked(index) => {
+            root.close-host-actions();
+            if (index == 1) {
+                root.delete-host(root.action-host.id);
+            }
+        }
+        dismissed => { root.close-host-actions(); }
     }
 }
 
