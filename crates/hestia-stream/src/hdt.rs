@@ -1,9 +1,31 @@
 //! HDT/1 WAN receiver feedback. See docs/hdt-feedback.md for the wire contract.
 
+mod rate;
+pub(crate) use rate::RateAdvisor;
+
 use crate::StreamStats;
 
 pub(crate) const ATTRIBUTE: &str = "x-hermes-hdt.feedback";
 pub(crate) const MESSAGE_TYPE: u16 = 0x4844;
+
+pub(crate) const RATE_ATTRIBUTE: &str = "x-hermes-hdt.rateAdvice";
+pub(crate) const RATE_TYPE: u16 = 0x4845;
+
+pub(crate) fn offers_v1(sdp: &str, attribute: &str) -> bool {
+    let mut versions = sdp.lines().filter_map(|line| {
+        let (name, value) = line.trim().strip_prefix("a=")?.split_once(':')?;
+        (name == attribute).then(|| value.trim())
+    });
+    versions.next() == Some("1") && versions.next().is_none()
+}
+
+pub(crate) fn encode_rate(elapsed_ms: u64, target_kbps: u32) -> [u8; 16] {
+    let mut out = [0; 16];
+    out[..4].copy_from_slice(b"HDA1");
+    out[4..12].copy_from_slice(&elapsed_ms.to_be_bytes());
+    out[12..].copy_from_slice(&target_kbps.to_be_bytes());
+    out
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeedbackMode {
@@ -18,11 +40,7 @@ impl FeedbackMode {
         if !enabled {
             return Self::Off;
         }
-        let mut versions = sdp.lines().filter_map(|line| {
-            let (name, value) = line.trim().strip_prefix("a=")?.split_once(':')?;
-            (name == ATTRIBUTE).then(|| value.trim())
-        });
-        if versions.next() != Some("1") || versions.next().is_some() {
+        if !offers_v1(sdp, ATTRIBUTE) {
             return Self::Unsupported;
         }
         if encrypted_control {

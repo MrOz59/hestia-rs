@@ -1595,6 +1595,15 @@ fn add_negotiated_to_report(n: &hestia_stream::rtsp::Negotiated, r: &mut report:
     };
     if let Some(status) = feedback {
         r.field("Negotiated", "HDT WAN feedback", status);
+        r.field(
+            "Negotiated",
+            "HDT rate advice",
+            if n.hdt_rate_advice {
+                "local report + host"
+            } else {
+                "local report only"
+            },
+        );
     }
     r.field("Negotiated", "video", format!("{:?}", n.video_format));
     r.field(

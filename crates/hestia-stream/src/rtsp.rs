@@ -308,6 +308,7 @@ pub struct Negotiated {
     pub host_feature_flags: u32,
     pub supports_fec_status: bool,
     pub hdt_feedback: crate::hdt::FeedbackMode,
+    pub hdt_rate_advice: bool,
 }
 
 impl Negotiated {
@@ -519,6 +520,11 @@ pub fn handshake(cfg: &HandshakeConfig) -> Result<Negotiated, RtspError> {
     let control = setup(&mut client, "streamid=control/13/0")?;
 
     let packet_size = cfg.packet_size - cfg.packet_size % 16;
+    let hdt_feedback = crate::hdt::FeedbackMode::negotiate(
+        cfg.hdt_feedback,
+        &host_sdp.raw,
+        encryption & sdp::SS_ENC_CONTROL_V2 != 0,
+    );
     let negotiated = Negotiated {
         remote,
         audio_port: server_port(&audio).unwrap_or(48000),
@@ -540,11 +546,10 @@ pub fn handshake(cfg: &HandshakeConfig) -> Result<Negotiated, RtspError> {
         audio_encrypted: encryption & sdp::SS_ENC_AUDIO != 0,
         packet_size,
         host_feature_flags: host_sdp.feature_flags(),
-        hdt_feedback: crate::hdt::FeedbackMode::negotiate(
-            cfg.hdt_feedback,
-            &host_sdp.raw,
-            encryption & sdp::SS_ENC_CONTROL_V2 != 0,
-        ),
+        hdt_feedback,
+        hdt_rate_advice: hdt_feedback == crate::hdt::FeedbackMode::Active
+            && cfg.bitrate_kbps > 0
+            && crate::hdt::offers_v1(&host_sdp.raw, crate::hdt::RATE_ATTRIBUTE),
         // Sunshine-family protocol extension, independent of host input feature bits.
         supports_fec_status: host_sdp.raw.lines().any(|line| line.trim().starts_with("a=x-ss-"))
             || video.get("X-SS-Ping-Payload").is_some(),
@@ -565,6 +570,7 @@ pub fn handshake(cfg: &HandshakeConfig) -> Result<Negotiated, RtspError> {
         audio_encryption: negotiated.audio_encrypted,
         streaming_remotely: cfg.streaming_remotely,
         hdt_feedback: negotiated.hdt_feedback == crate::hdt::FeedbackMode::Active,
+        hdt_rate_advice: negotiated.hdt_rate_advice,
         ipv6: remote.is_ipv6(),
         host_address: remote.ip().to_string(),
         video_port: negotiated.video_port,

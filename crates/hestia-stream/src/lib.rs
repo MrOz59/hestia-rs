@@ -111,6 +111,10 @@ pub enum StreamEvent {
     FirstFrame,
     /// Roughly once a second.
     Stats(StreamStats),
+    /// Initial or changed diagnostic estimate, independent of host acceptance.
+    HdtRateAdvice {
+        kbps: u32,
+    },
     Rumble {
         gamepad: u8,
         low: u16,

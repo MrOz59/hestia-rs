@@ -2254,7 +2254,7 @@ export component SettingsPage inherits Page {
                         }
                         SwitchRow {
                             label: "HDT WAN feedback";
-                            hint: "Send network measurements to compatible hosts on the next stream. Resets on restart.";
+                            hint: "Record bitrate advice and share feedback with compatible hosts. Resets on restart.";
                             checked: root.debug-hdt-feedback;
                             want-focus: root.at(33);
                             nav(k) => { return root.move(33, k); }

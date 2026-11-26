@@ -501,6 +501,9 @@ impl SessionListener for Listener {
                     self.controller.ui(move |ui| ui.set_stream_stats(line));
                 }
             }
+            StreamEvent::HdtRateAdvice { kbps } => {
+                report::lock(&self.report).event(format!("HDT suggested video budget: {kbps} kbps"))
+            }
             StreamEvent::FirstFrame => {
                 self.first_frame.store(true, Ordering::Relaxed);
                 report::lock(&self.report).first_frame();
