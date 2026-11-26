@@ -14,7 +14,7 @@ use i_slint_common::unicode_utils::{
 use i_slint_core::MotionPreference;
 use i_slint_core::SharedString;
 use i_slint_core::animations::Instant;
-use i_slint_core::api::{PhysicalPosition, PhysicalSize};
+use i_slint_core::api::PhysicalSize;
 use i_slint_core::graphics::{Color, euclid};
 use i_slint_core::input::{InternalKeyEvent, KeyEvent, KeyEventType};
 use i_slint_core::item_rendering::HasFont;
@@ -960,7 +960,6 @@ fn callback_set_insets<'local>(
     i_slint_core::api::invoke_from_event_loop(move || {
         if let Some(w) = CURRENT_WINDOW.with_borrow(|x| x.upgrade()) {
             w.update_window_insets(
-                PhysicalPosition::new(window_left as _, window_top as _),
                 PhysicalSize::new(
                     (window_right - window_left) as _,
                     (window_bottom - window_top) as _,

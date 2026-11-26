@@ -692,7 +692,6 @@ impl AndroidWindowAdapter {
 
     pub(super) fn update_window_insets(
         &self,
-        window_origin: PhysicalPosition,
         window_size: PhysicalSize,
         safe_area: PhysicalEdges,
         keyboard: PhysicalEdges,
@@ -701,34 +700,31 @@ impl AndroidWindowAdapter {
         WindowInner::from_pub(&self.window)
             .set_window_item_safe_area(safe_area.to_logical(scale_factor));
 
-        let window_origin = window_origin.to_logical(scale_factor);
         let window_size = window_size.to_logical(scale_factor);
         let keyboard = keyboard.to_logical(scale_factor);
 
-        // Assume that the keyboard is only on one side.
+        // Slint positions the keyboard relative to the window, including in
+        // split screen. Insets cover at most one side.
         let rect = if keyboard.bottom > (0 as i_slint_core::Coord) {
             (
-                LogicalPosition::new(
-                    window_origin.x,
-                    window_origin.y + window_size.height - keyboard.bottom as i_slint_core::Coord,
-                ),
+                LogicalPosition::new(0., window_size.height - keyboard.bottom as i_slint_core::Coord),
                 LogicalSize::new(window_size.width, keyboard.bottom as _),
             )
         } else if keyboard.top > (0 as i_slint_core::Coord) {
             (
-                LogicalPosition::new(window_origin.x, window_origin.y),
+                LogicalPosition::default(),
                 LogicalSize::new(window_size.width, keyboard.top as _),
             )
         } else if keyboard.left > (0 as i_slint_core::Coord) {
             (
-                LogicalPosition::new(window_origin.x, window_origin.y),
+                LogicalPosition::default(),
                 LogicalSize::new(keyboard.left as _, window_size.height),
             )
         } else if keyboard.right > (0 as i_slint_core::Coord) {
             (
                 LogicalPosition::new(
-                    window_origin.x + window_size.width - keyboard.right as i_slint_core::Coord,
-                    window_origin.y,
+                    window_size.width - keyboard.right as i_slint_core::Coord,
+                    0.,
                 ),
                 LogicalSize::new(keyboard.right as _, window_size.height),
             )

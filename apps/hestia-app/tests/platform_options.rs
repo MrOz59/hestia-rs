@@ -13,6 +13,134 @@ fn row(ui: &AppWindow, label: &str, expected: bool) {
 }
 
 #[test]
+fn android_pairing_keeps_both_fields_and_submit_above_the_keyboard() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    use slint::{LogicalPosition, LogicalSize};
+    use std::{cell::Cell, rc::Rc, time::Duration};
+
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_is_android(true);
+    ui.set_starting(false);
+    ui.show().unwrap();
+    ui.window().set_size(LogicalSize::new(412.0, 915.0));
+    ui.set_pair_visible(true);
+    ui.set_pair_otp_mode(true);
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(20));
+    slint::platform::update_timers_and_animations();
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(400));
+    slint::platform::update_timers_and_animations();
+
+    let element = |id| {
+        ElementHandle::find_by_element_id(&ui, id)
+            .next()
+            .unwrap_or_else(|| panic!("Missing element {id}"))
+    };
+    let pin = element("AppWindow::otp-pin");
+    let passphrase = element("AppWindow::otp-passphrase");
+    let pair = element("AppWindow::submit-otp");
+    let bottom = |field: &ElementHandle| field.absolute_position().y + field.size().height;
+    let pair_bottom = bottom(&pair);
+    let set_keyboard = |top| {
+        ui.window().set_virtual_keyboard(
+            LogicalPosition::new(0.0, if top == 915.0 { 0.0 } else { top }),
+            LogicalSize::new(412.0, 915.0 - top),
+            i_slint_core::InternalToken,
+        );
+        slint::platform::update_timers_and_animations();
+    };
+    let type_text = |value: &str| {
+        for character in value.chars() {
+            ui.window().dispatch_event(WindowEvent::KeyPressed {
+                text: character.to_string().into(),
+            });
+            ui.window().dispatch_event(WindowEvent::KeyReleased {
+                text: character.to_string().into(),
+            });
+        }
+    };
+
+    pin.mock_single_click(PointerEventButton::Left);
+    set_keyboard(590.0);
+    assert!(bottom(&pin) < 590.0);
+    type_text("1234");
+    assert_eq!(ui.get_otp_pin(), "1234");
+
+    passphrase.mock_single_click(PointerEventButton::Left);
+    set_keyboard(500.0);
+    assert!(bottom(&passphrase) < 500.0);
+    assert!(bottom(&pair) < 500.0);
+    type_text("pair word");
+    assert_eq!(ui.get_otp_passphrase(), "pair word");
+
+    let submitted = Rc::new(Cell::new(false));
+    let result = submitted.clone();
+    ui.on_pair_submit_otp(move |pin, passphrase| {
+        assert_eq!(pin, "1234");
+        assert_eq!(passphrase, "pair word");
+        result.set(true);
+    });
+    pair.mock_single_click(PointerEventButton::Left);
+    assert!(submitted.get());
+
+    // A short IME viewport can show the active field or the footer. Scrolling
+    // reaches the footer while leaving the keyboard open.
+    passphrase.mock_single_click(PointerEventButton::Left);
+    set_keyboard(170.0);
+    assert!(passphrase.absolute_position().y >= 24.0);
+    assert!(bottom(&passphrase) <= 170.0);
+    assert!(bottom(&pair) > 170.0);
+    ui.window().dispatch_event(WindowEvent::PointerScrolled {
+        position: LogicalPosition::new(206.0, 90.0),
+        delta_x: 0.0,
+        delta_y: -300.0,
+    });
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(400));
+    slint::platform::update_timers_and_animations();
+    assert!(bottom(&pair) <= 170.0);
+
+    set_keyboard(915.0);
+    assert_eq!(bottom(&pair), pair_bottom);
+}
+
+#[test]
+fn android_host_forms_stay_above_the_keyboard() {
+    use slint::{LogicalPosition, LogicalSize};
+    use std::time::Duration;
+
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_is_android(true);
+    ui.set_starting(false);
+    ui.show().unwrap();
+    ui.window().set_size(LogicalSize::new(412.0, 915.0));
+
+    for (edit_host, id) in [(false, "AppWindow::add-address"), (true, "AppWindow::host-address")] {
+        ui.set_add_visible(!edit_host);
+        ui.set_host_edit_visible(edit_host);
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(20));
+        slint::platform::update_timers_and_animations();
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(400));
+        slint::platform::update_timers_and_animations();
+        let address = ElementHandle::find_by_element_id(&ui, id).next().unwrap();
+        let bottom = || address.absolute_position().y + address.size().height;
+        assert!(bottom() > 590.0);
+        ui.window().set_virtual_keyboard(
+            LogicalPosition::new(0.0, 590.0),
+            LogicalSize::new(412.0, 325.0),
+            i_slint_core::InternalToken,
+        );
+        assert!(bottom() < 590.0);
+        ui.window().set_virtual_keyboard(
+            LogicalPosition::default(),
+            LogicalSize::default(),
+            i_slint_core::InternalToken,
+        );
+        assert!(bottom() > 590.0);
+    }
+}
+
+#[test]
 fn settings_follow_the_decoder_and_platform() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();
