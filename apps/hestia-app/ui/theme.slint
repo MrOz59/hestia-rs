@@ -161,6 +161,7 @@ export component Icon inherits Path {
 // and the keyboard.
 export component Focusable inherits Rectangle {
     in property <bool> enabled: true;
+    in property <bool> context-actions: false;
     in property <bool> want-focus;
     out property <bool> focused: fs.has-focus;
     out property <bool> pressed: touch.pressed;
@@ -168,9 +169,12 @@ export component Focusable inherits Rectangle {
     // Room kept around the control when it scrolls into view.
     in property <length> reveal: 20px;
     callback clicked();
+    callback context-requested();
     callback nav(string) -> bool;
     callback key(string) -> bool;
     callback entered();
+    private property <bool> hold-pending;
+    private property <bool> held;
 
     init => {
         if (self.want-focus) {
@@ -198,6 +202,10 @@ export component Focusable inherits Rectangle {
             root.entered();
         }
         key-pressed(event) => {
+            if (root.enabled && root.context-actions && event.text == Key.Menu) {
+                root.context-requested();
+                return accept;
+            }
             if (event.text == Key.Return || event.text == " ") {
                 if (root.enabled) {
                     root.clicked();
@@ -220,9 +228,37 @@ export component Focusable inherits Rectangle {
     touch := TouchArea {
         enabled: root.enabled;
         mouse-cursor: pointer;
+        pointer-event(event) => {
+            if (root.context-actions && event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.held = false;
+                root.hold-pending = true;
+            }
+            if (root.context-actions && event.button == PointerEventButton.right && event.kind == PointerEventKind.up && self.has-hover) {
+                Nav.keyboard = false;
+                root.context-requested();
+            }
+        }
+        moved => {
+            if (root.hold-pending && (Math.abs(self.mouse-x - self.pressed-x) > 10px || Math.abs(self.mouse-y - self.pressed-y) > 10px)) {
+                root.hold-pending = false;
+            }
+        }
         clicked => {
+            if (!root.held) {
+                Nav.keyboard = false;
+                root.clicked();
+            }
+        }
+    }
+
+    Timer {
+        running: root.hold-pending && touch.pressed;
+        interval: 500ms;
+        triggered => {
+            root.hold-pending = false;
+            root.held = true;
             Nav.keyboard = false;
-            root.clicked();
+            root.context-requested();
         }
     }
 }

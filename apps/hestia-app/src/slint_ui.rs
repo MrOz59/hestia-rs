@@ -559,7 +559,9 @@ pub(crate) fn wire(ui: &AppWindow, controller: &Arc<Controller>) {
     let c = controller.clone();
     ui.on_open_host_editor(move || c.edit_current_host());
     let c = controller.clone();
-    ui.on_save_host_edit(move |name, address| c.save_current_host(name.to_string(), address.to_string()));
+    ui.on_edit_host(move |id| c.edit_host(id.to_string()));
+    let c = controller.clone();
+    ui.on_save_host_edit(move |name, address| c.save_host_edit(name.to_string(), address.to_string()));
 
     let c = controller.clone();
     ui.on_pair_retry(move || c.restart_pairing());
@@ -580,6 +582,8 @@ pub(crate) fn wire(ui: &AppWindow, controller: &Arc<Controller>) {
     ui.on_quit_app(move || c.quit_app());
     let c = controller.clone();
     ui.on_forget_host(move || c.forget_current());
+    let c = controller.clone();
+    ui.on_delete_host(move |id| c.forget_host(id.to_string()));
     let c = controller.clone();
     ui.on_back_to_hosts(move || c.back_to_hosts());
     let c = controller.clone();

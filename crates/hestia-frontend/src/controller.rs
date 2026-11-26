@@ -39,6 +39,7 @@ struct State {
     snapshots: HashMap<String, HostSnapshot>,
     checking: HashSet<String>,
     current_host: Option<String>,
+    editing_host: Option<String>,
     apps: Vec<AppInfo>,
     /// Host being paired and a generation counter that invalidates results
     /// of abandoned attempts.
@@ -368,7 +369,9 @@ impl Controller {
             {
                 let mut st = c.state();
                 st.checking.remove(&id);
-                if let Ok(snapshot) = &result {
+                if let Ok(snapshot) = &result
+                    && core.host(&snapshot.record.id).is_ok()
+                {
                     st.snapshots.remove(&id);
                     if st.current_host.as_deref() == Some(id.as_str()) {
                         st.current_host = Some(snapshot.record.id.clone());
@@ -464,16 +467,24 @@ impl Controller {
         });
     }
 
-    /// Host page → Edit: the dialog for the open host's name on this
-    /// device and the address it is reached at.
+    /// Opens the editor from the host's apps page.
     pub fn edit_current_host(self: &Shared) {
-        let Some(core) = self.core() else { return };
         let Some(id) = self.state().current_host.clone() else {
             return;
         };
-        let Ok(host) = core.host(&id) else { return };
+        self.edit_host(id);
+    }
+
+    /// Opens the editor for a saved host, including an offline host.
+    pub fn edit_host(self: &Shared, id: String) {
+        let Some(core) = self.core() else { return };
+        let Ok(host) = core.host(&id) else {
+            self.toast("The host list changed. Choose the host again.");
+            return;
+        };
         let name = host.display_name().to_owned();
         let address = host.active_address().to_string();
+        self.state().editing_host = Some(id);
         self.ui(move |ui| {
             ui.set_host_edit_name(name);
             ui.set_host_edit_address(address);
@@ -484,9 +495,9 @@ impl Controller {
 
     /// The edit dialog's Save. The pairing stays: it belongs to the host,
     /// not to an address.
-    pub fn save_current_host(self: &Shared, name: String, address: String) {
+    pub fn save_host_edit(self: &Shared, name: String, address: String) {
         let Some(core) = self.core() else { return };
-        let Some(id) = self.state().current_host.clone() else {
+        let Some(id) = self.state().editing_host.clone() else {
             return;
         };
         if let Err(e) = core.edit_host_details(&id, &name, &address) {
@@ -494,16 +505,18 @@ impl Controller {
             self.ui(move |ui| ui.set_host_edit_error(message));
             return;
         }
-        let header = core.host(&id).ok().map(|record| {
+        let header = core.host(&id).ok().and_then(|record| {
             let mut st = self.state();
-            match st.snapshots.get_mut(&id) {
+            let detail = match st.snapshots.get_mut(&id) {
                 Some(snapshot) => {
                     snapshot.record = record;
                     (snapshot.record.display_name().to_owned(), view::host_detail(snapshot))
                 }
                 None => (record.display_name().to_owned(), record.address.clone()),
-            }
+            };
+            (st.current_host.as_deref() == Some(id.as_str())).then_some(detail)
         });
+        self.state().editing_host = None;
         self.ui(move |ui| {
             if let Some((name, detail)) = header {
                 ui.set_host_name(name);
@@ -520,19 +533,43 @@ impl Controller {
 
     /// Forgets the open host (its pairing too).
     pub fn forget_current(self: &Shared) {
-        let Some(core) = self.core() else { return };
-        let Some(id) = self.state().current_host.take() else {
+        let Some(id) = self.state().current_host.clone() else {
             return;
         };
-        let name = core.host(&id).map(|h| h.display_name().to_owned()).unwrap_or_default();
+        self.forget_host(id);
+    }
+
+    /// Deletes a host and its local pairing directly from the saved list.
+    pub fn forget_host(self: &Shared, id: String) {
+        let Some(core) = self.core() else { return };
+        let Ok(host) = core.host(&id) else {
+            self.toast("The host list changed. Choose the host again.");
+            return;
+        };
         if let Err(e) = core.forget(&id) {
             self.toast(format!("Could not forget host: {e}"));
             return;
         }
-        self.state().snapshots.remove(&id);
-        self.ui(|ui| ui.set_screen(Screen::Hosts));
+        let was_open = {
+            let mut st = self.state();
+            st.snapshots.remove(&id);
+            st.checking.remove(&id);
+            let was_open = st.current_host.as_deref() == Some(id.as_str());
+            if was_open {
+                st.current_host = None;
+            }
+            was_open
+        };
+        if was_open {
+            self.ui(|ui| ui.set_screen(Screen::Hosts));
+        }
         self.push_hosts();
-        self.toast(format!("Forgot {name}. Remove this device in the host's web UI too."));
+        let name = host.display_name();
+        if host.is_paired() {
+            self.toast(format!("Forgot {name}. Remove this device in the host's web UI too."));
+        } else {
+            self.toast(format!("Deleted {name}"));
+        }
     }
 
     // ------------------------------------------------------------------

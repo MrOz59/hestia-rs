@@ -85,6 +85,7 @@ export component AppWindow inherits Window {
     in-out property <string> host-edit-address;
     in property <string> host-edit-error;
     callback open-host-editor();
+    callback edit-host(string);
     callback save-host-edit(string, string);
     in property <string> host-detail;
     in property <[string]> host-chips;
@@ -100,6 +101,7 @@ export component AppWindow inherits Window {
     callback band-warning-cancel();
     callback quit-app();
     callback forget-host();
+    callback delete-host(string);
     callback back-to-hosts();
 
     // Session
@@ -472,6 +474,12 @@ export component AppWindow inherits Window {
             scanning: root.scanning;
             open-host(id) => {
                 root.open-host(id);
+            }
+            edit-host(id) => {
+                root.edit-host(id);
+            }
+            delete-host(id) => {
+                root.delete-host(id);
             }
             add-host => {
                 root.add-visible = true;
@@ -854,29 +862,46 @@ export component AppWindow inherits Window {
             dismissed => { root.host-edit-visible = false; }
 
             DialogTitle { text: "Edit host"; }
-            DialogText { text: "Choose a local name and change the preferred IP or DNS address. The paired host identity is preserved."; }
-            host-alias := TextField {
-                placeholder: "Host name";
-                text <=> root.host-edit-name;
-                auto-edit: !root.is-android;
-                want-focus: root.dlg == 0;
-                nav(k) => {
-                    if (k == Key.DownArrow) { root.dlg = 1; return true; }
-                    return false;
+            VerticalLayout {
+                spacing: 4px;
+                name-label := DialogText {
+                    text: "Name";
+                    font-size: Theme.caption-size;
+                    accessible-role: none;
                 }
-                entered => { root.dlg = 0; }
+                host-alias := TextField {
+                    accessible-label: name-label.text;
+                    placeholder: "Host name";
+                    text <=> root.host-edit-name;
+                    auto-edit: !root.is-android;
+                    want-focus: root.dlg == 0;
+                    nav(k) => {
+                        if (k == Key.DownArrow) { root.dlg = 1; return true; }
+                        return false;
+                    }
+                    entered => { root.dlg = 0; }
+                }
             }
-            host-address := TextField {
-                placeholder: "192.168.0.10:47989";
-                text <=> root.host-edit-address;
-                auto-edit: !root.is-android;
-                want-focus: root.dlg == 1;
-                nav(k) => {
-                    if (k == Key.UpArrow) { root.dlg = 0; return true; }
-                    if (k == Key.DownArrow) { root.dlg = 3; return true; }
-                    return false;
+            VerticalLayout {
+                spacing: 4px;
+                address-label := DialogText {
+                    text: "Host address";
+                    font-size: Theme.caption-size;
+                    accessible-role: none;
                 }
-                entered => { root.dlg = 1; }
+                host-address := TextField {
+                    accessible-label: address-label.text;
+                    placeholder: "IP or DNS name, optionally with :port";
+                    text <=> root.host-edit-address;
+                    auto-edit: !root.is-android;
+                    want-focus: root.dlg == 1;
+                    nav(k) => {
+                        if (k == Key.UpArrow) { root.dlg = 0; return true; }
+                        if (k == Key.DownArrow) { root.dlg = 3; return true; }
+                        return false;
+                    }
+                    entered => { root.dlg = 1; }
+                }
             }
             if root.host-edit-error != "": DialogText { text: root.host-edit-error; }
             HorizontalLayout {

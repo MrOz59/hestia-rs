@@ -141,6 +141,97 @@ fn android_host_forms_stay_above_the_keyboard() {
 }
 
 #[test]
+fn holding_an_offline_host_offers_edit_and_confirmed_delete() {
+    use hestia_app::HostCard;
+    use slint::platform::{PointerEventButton, WindowEvent};
+    use slint::{LogicalPosition, LogicalSize, ModelRc, VecModel};
+    use std::{cell::Cell, rc::Rc, time::Duration};
+
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_is_android(true);
+    ui.set_starting(false);
+    ui.window().set_size(LogicalSize::new(412.0, 915.0));
+    ui.set_hosts(ModelRc::new(VecModel::from(vec![HostCard {
+        id: "offline".into(),
+        name: "Offline PC".into(),
+        address: "192.168.1.111:47989".into(),
+        ..Default::default()
+    }])));
+    ui.show().unwrap();
+
+    let opened = Rc::new(Cell::new(false));
+    let result = opened.clone();
+    ui.on_open_host(move |_| result.set(true));
+    let deleted = Rc::new(Cell::new(false));
+    let result = deleted.clone();
+    ui.on_delete_host(move |id| result.set(id == "offline"));
+    let edited = Rc::new(Cell::new(false));
+    let result = edited.clone();
+    let weak = ui.as_weak();
+    ui.on_edit_host(move |id| {
+        result.set(id == "offline");
+        let ui = weak.upgrade().unwrap();
+        ui.set_host_edit_name("Offline PC".into());
+        ui.set_host_edit_address("192.168.1.111:47989".into());
+        ui.set_host_edit_visible(true);
+    });
+
+    let advance = |ms| {
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(ms));
+        slint::platform::update_timers_and_animations();
+    };
+    let animation_finished = || {
+        advance(20);
+        advance(400);
+    };
+    animation_finished();
+    let card = ElementHandle::find_by_accessible_label(&ui, "Offline PC")
+        .next()
+        .unwrap();
+    let origin = card.absolute_position();
+    let size = card.size();
+    let position = LogicalPosition::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
+    let button = PointerEventButton::Left;
+    ui.window()
+        .dispatch_event(WindowEvent::PointerPressed { position, button });
+    advance(150);
+    advance(550);
+    ui.window()
+        .dispatch_event(WindowEvent::PointerReleased { position, button });
+    animation_finished();
+
+    assert!(!opened.get());
+    row(&ui, "Edit", true);
+    let press_delete = || {
+        ElementHandle::find_by_accessible_label(&ui, "Delete")
+            .next()
+            .unwrap()
+            .mock_single_click(button);
+    };
+    press_delete();
+    assert!(!deleted.get());
+    animation_finished();
+    press_delete();
+    assert!(deleted.get());
+
+    ElementHandle::find_by_accessible_label(&ui, "Options for Offline PC")
+        .next()
+        .unwrap()
+        .mock_single_click(button);
+    animation_finished();
+    ElementHandle::find_by_accessible_label(&ui, "Edit")
+        .next()
+        .unwrap()
+        .mock_single_click(button);
+    assert!(edited.get());
+    assert!(!opened.get());
+    animation_finished();
+    row(&ui, "Name", true);
+    row(&ui, "Host address", true);
+}
+
+#[test]
 fn settings_follow_the_decoder_and_platform() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();

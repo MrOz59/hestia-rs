@@ -1040,7 +1040,12 @@ impl HestiaClient {
     /// Forgets a host locally (the host keeps its own paired-client entry
     /// until removed in its web UI).
     pub fn forget(&self, id: &str) -> Result<()> {
-        self.update_hosts(|hosts| hosts.retain(|h| h.id != id))
+        let mut hosts = self.lock_hosts();
+        let mut saved = hosts.clone();
+        saved.retain(|h| h.id != id);
+        self.store.save_hosts(&saved)?;
+        *hosts = saved;
+        Ok(())
     }
 
     /// A ready-to-use GameStream client for a host, at the address in use.
@@ -1180,6 +1185,46 @@ impl HestiaClient {
         Probe { answer, taken, error }
     }
 
+    /// Applies a probe only while the saved host is still at the address it
+    /// used when the check started, including when none of its addresses answered.
+    fn save_probe(&self, checked: &HostRecord, probe: &Probe) -> Result<HostRecord> {
+        let mut hosts = self.lock_hosts();
+        let mut updated = hosts
+            .iter()
+            .find(|host| host.id == checked.id)
+            .cloned()
+            .ok_or_else(|| CoreError::UnknownHost(checked.id.clone()))?;
+        if updated.active_address() != checked.active_address() {
+            return Err(CoreError::Invalid("host address changed during the check".into()));
+        }
+        if probe.answer.is_none() && probe.taken.is_empty() {
+            return Ok(updated);
+        }
+
+        for taken in &probe.taken {
+            updated.forget_address(taken);
+        }
+        if let Some((address, client, info)) = &probe.answer {
+            updated.set_active(address.clone());
+            if !info.unique_id.is_empty() {
+                updated.id = info.unique_id.clone();
+            }
+            if !info.hostname.is_empty() {
+                updated.name = info.hostname.clone();
+            }
+            updated.https_port = client.https_port();
+            updated.mac = info.mac.clone().or(updated.mac);
+            updated.last_seen = Some(now_secs());
+        }
+
+        // A new address of a known host can merge into its paired record.
+        let mut saved = hosts.clone();
+        let updated = store_merged(&mut saved, &checked.id, updated);
+        self.store.save_hosts(&saved)?;
+        *hosts = saved;
+        Ok(updated)
+    }
+
     /// Talks to the host: `/serverinfo` on every address it is known by, and
     /// for paired Hermes hosts the Hestia capabilities. Updates the stored
     /// record (id, name, ports, the address in use...), merging it with
@@ -1187,19 +1232,8 @@ impl HestiaClient {
     pub fn refresh(&self, id: &str) -> Result<HostSnapshot> {
         let record = self.host(id)?;
         let probe = self.probe(&record);
-        let Some((address, mut client, mut info)) = probe.answer else {
-            let record = if probe.taken.is_empty() {
-                record
-            } else {
-                self.update_hosts(|hosts| {
-                    let h = hosts.iter_mut().find(|h| h.id == record.id)?;
-                    for taken in &probe.taken {
-                        h.forget_address(taken);
-                    }
-                    Some(h.clone())
-                })?
-                .unwrap_or(record)
-            };
+        let record = self.save_probe(&record, &probe)?;
+        let Some((_, mut client, mut info)) = probe.answer else {
             return Ok(HostSnapshot {
                 paired: record.is_paired(),
                 record,
@@ -1211,34 +1245,7 @@ impl HestiaClient {
             });
         };
 
-        let asked_pinned = client.is_pinned();
-        let https_port = client.https_port();
-        let record = self.update_hosts(|hosts| {
-            // Start from the stored copy: it may have changed while we probed.
-            let mut updated = hosts
-                .iter()
-                .find(|h| h.id == record.id)
-                .cloned()
-                .unwrap_or_else(|| record.clone());
-            for taken in &probe.taken {
-                updated.forget_address(taken);
-            }
-            updated.set_active(address.clone());
-            if !info.unique_id.is_empty() {
-                updated.id = info.unique_id.clone();
-            }
-            if !info.hostname.is_empty() {
-                updated.name = info.hostname.clone();
-            }
-            updated.https_port = https_port;
-            updated.mac = info.mac.clone().or(updated.mac);
-            updated.last_seen = Some(now_secs());
-            // A new address of a host we know (its Tailscale one, a new DHCP
-            // lease...) merges into that host's record, pairing included.
-            store_merged(hosts, &record.id, updated)
-        })?;
-
-        if record.is_paired() && !asked_pinned {
+        if record.is_paired() && !client.is_pinned() {
             // We only learned this is a paired host from the answer (over
             // plain HTTP): ask again with its certificate for the real status.
             client.set_server_cert(record.server_cert_der());
@@ -1867,6 +1874,39 @@ mod host_records {
             addresses: vec![HostAddress::new(address, DEFAULT_HTTP_PORT)],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn failed_probe_does_not_change_an_edited_or_deleted_host() {
+        let dir = test_dir("stale-host-probe");
+        let store = Store::open(&dir).unwrap();
+        let new_address = "192.168.0.11";
+        let mut old = host("A", "192.168.0.10");
+        old.remember_address(HostAddress::new(new_address, DEFAULT_HTTP_PORT));
+        store.save_hosts(std::slice::from_ref(&old)).unwrap();
+        let client = HestiaClient::open(&dir).unwrap();
+        let probe = Probe {
+            answer: None,
+            taken: vec![new_address.into()],
+            error: Some("host did not answer".into()),
+        };
+        client.edit_host_details("A", "Desk", new_address).unwrap();
+        let edited = client.host("A").unwrap();
+
+        // The stale result would remove the user's new address and fall
+        // back to the old one if it were applied.
+        assert!(matches!(client.save_probe(&old, &probe), Err(CoreError::Invalid(_))));
+        assert_eq!(client.host("A").unwrap(), edited);
+        assert_eq!(store.load_hosts().unwrap(), std::slice::from_ref(&edited));
+
+        client.forget("A").unwrap();
+        assert!(matches!(
+            client.save_probe(&edited, &probe),
+            Err(CoreError::UnknownHost(_))
+        ));
+        assert!(client.hosts().is_empty());
+        assert!(store.load_hosts().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// What `refresh` stores once a new address answered as a known host.
