@@ -22,6 +22,9 @@
    a finger. For a mouse pointer, `Down`, `Up` and `Cancel` are dropped
    (the button events carry the press) and `Move` is a pointer move.
 
-Everything else is unchanged. To update: copy the new upstream directory,
-reapply these four changes, and bump the pinned slint version in the root
-Cargo.toml together with `version` here.
+5. **Keyboard position** (`androidwindowadapter.rs`, `javahelper.rs`).
+   Report the keyboard rectangle in Slint window coordinates, including in
+   Android split-screen and freeform windows.
+
+To update, copy the new upstream directory, reapply the changes listed above,
+and bump the pinned Slint version in the root `Cargo.toml` and this crate.

@@ -33,6 +33,13 @@ export component AppWindow inherits Window {
         Theme.window-height = self.height;
     }
 
+    // Reserve only the keyboard area overlapping the safe-area content. Android
+    // can resize the window as well as reporting the keyboard rectangle.
+    private property <length> keyboard-overlap: root.is-android
+        && root.virtual-keyboard-size.height > 0px && root.virtual-keyboard-position.y > 0px
+        ? Math.clamp(keys.y + keys.height - root.virtual-keyboard-position.y, 0px, keys.height)
+        : 0px;
+
     // 0 = hosts, 1 = apps, 2 = session (launching / errors), 3 = settings, 4 = stream, 5 = host tools,
     // 6 = stream report, 7 = animated session launch
     in-out property <int> screen: 0;
@@ -830,13 +837,21 @@ export component AppWindow inherits Window {
         if root.host-edit-visible: Modal {
             width: 100%;
             height: 100%;
+            bottom-inset: root.keyboard-overlap;
+            changed available-height => {
+                if (host-alias.editing) {
+                    host-alias.ensure-visible(ScrollBehavior.instant);
+                } else if (host-address.editing) {
+                    host-address.ensure-visible(ScrollBehavior.instant);
+                }
+            }
             hold-focus: root.dlg < 0;
             arrow => { root.dlg = 0; }
             dismissed => { root.host-edit-visible = false; }
 
             DialogTitle { text: "Edit host"; }
             DialogText { text: "Choose a local name and change the preferred IP or DNS address. The paired host identity is preserved."; }
-            TextField {
+            host-alias := TextField {
                 placeholder: "Host name";
                 text <=> root.host-edit-name;
                 auto-edit: !root.is-android;
@@ -847,7 +862,7 @@ export component AppWindow inherits Window {
                 }
                 entered => { root.dlg = 0; }
             }
-            TextField {
+            host-address := TextField {
                 placeholder: "192.168.0.10:47989";
                 text <=> root.host-edit-address;
                 auto-edit: !root.is-android;
@@ -943,6 +958,12 @@ export component AppWindow inherits Window {
         if root.add-visible: Modal {
             width: 100%;
             height: 100%;
+            bottom-inset: root.keyboard-overlap;
+            changed available-height => {
+                if (add-address.editing) {
+                    add-address.ensure-visible(ScrollBehavior.instant);
+                }
+            }
             hold-focus: root.dlg < 0;
             arrow => {
                 root.dlg = 0;
@@ -959,7 +980,7 @@ export component AppWindow inherits Window {
             DialogText {
                 text: "The IP address or name of the PC running Hermes. Add :port if it doesn't use 47989.";
             }
-            TextField {
+            add-address := TextField {
                 placeholder: "192.168.0.10";
                 text <=> root.add-address;
                 enabled: !root.add-busy;
@@ -1061,10 +1082,11 @@ export component AppWindow inherits Window {
         // again (2). One-time code: PIN (0), passphrase (1), Cancel (2),
         // Pair (3).
         // ---------------------------------------------------------------
-        if root.pair-visible: Modal {
+        if root.pair-visible: pair-dialog := Modal {
             width: 100%;
             height: 100%;
             card-width: 460px;
+            bottom-inset: root.keyboard-overlap;
             hold-focus: root.dlg < 0;
             arrow => {
                 root.dlg = root.pair-otp-mode ? 0 : 1;
@@ -1124,12 +1146,20 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if root.pair-otp-mode: VerticalLayout {
+            if root.pair-otp-mode: otp-fields := VerticalLayout {
+                property <length> visible-height: pair-dialog.available-height;
+                changed visible-height => {
+                    if (otp-pin.editing) {
+                        otp-pin.ensure-visible(ScrollBehavior.instant);
+                    } else if (otp-passphrase.editing) {
+                        otp-passphrase.ensure-visible(ScrollBehavior.instant);
+                    }
+                }
                 spacing: 10px;
                 DialogText {
                     text: "Enter the one-time PIN and passphrase shown by Hermes.";
                 }
-                TextField {
+                otp-pin := TextField {
                     placeholder: "PIN";
                     input-type: InputType.number;
                     text <=> root.otp-pin;
@@ -1147,7 +1177,7 @@ export component AppWindow inherits Window {
                         root.dlg = 0;
                     }
                 }
-                TextField {
+                otp-passphrase := TextField {
                     placeholder: "Passphrase";
                     text <=> root.otp-passphrase;
                     enabled: !root.pair-busy;
@@ -1239,7 +1269,7 @@ export component AppWindow inherits Window {
                         root.pair-retry();
                     }
                 }
-                if root.pair-otp-mode: ActionButton {
+                if root.pair-otp-mode: submit-otp := ActionButton {
                     text: "Pair";
                     kind: 1;
                     enabled: !root.pair-busy && root.otp-pin != "" && root.otp-passphrase != "";
