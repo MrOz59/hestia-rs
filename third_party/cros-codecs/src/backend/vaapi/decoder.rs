@@ -218,7 +218,9 @@ impl<V: VideoFrame> VaapiBackend<V> {
 
     /// No VA context exists until the codec has parsed a real sequence.
     pub(crate) fn context(&self) -> anyhow::Result<&Rc<Context>> {
-        self.context.as_ref().ok_or_else(|| anyhow!("VA context not initialized; no stream sequence"))
+        self.context
+            .as_ref()
+            .ok_or_else(|| anyhow!("VA context not initialized; no stream sequence"))
     }
 
     pub(crate) fn new_sequence<StreamData>(
@@ -255,7 +257,13 @@ impl<V: VideoFrame> VaapiBackend<V> {
                 None,
                 true,
             )
-            .map_err(|e| anyhow!("creating VA context for profile {profile}, {}x{}: {e}", coded.width, coded.height))?;
+            .map_err(|e| {
+                anyhow!(
+                    "creating VA context for profile {profile}, {}x{}: {e}",
+                    coded.width,
+                    coded.height
+                )
+            })?;
         // Keep the old context and stream info intact if reconfiguration fails.
         self.stream_info.display_resolution = visible;
         self.stream_info.coded_resolution = coded;
