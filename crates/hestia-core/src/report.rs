@@ -161,6 +161,7 @@ pub struct StreamReport {
     events: Vec<(Duration, String)>,
     samples: Vec<(Duration, StatsSample)>,
     first_frame: Option<Duration>,
+    video_frame_totals: Option<(u64, u64)>,
     outcome: Option<(Duration, String)>,
     decoder_totals: Option<(u64, u64, u64)>,
 }
@@ -266,6 +267,7 @@ impl StreamReport {
             events: Vec::new(),
             samples: Vec::new(),
             first_frame: None,
+            video_frame_totals: None,
             outcome: None,
             decoder_totals: None,
         }
@@ -280,9 +282,11 @@ impl StreamReport {
     }
 
     pub fn video_transport(&mut self, video: &VideoTransportStats) {
+        let assembled = video.frames + video.dropped_waiting_idr;
+        self.video_frame_totals = Some((assembled, video.frames));
         let values = [
             ("UDP packets received", video.packets),
-            ("complete frames assembled", video.frames + video.dropped_waiting_idr),
+            ("complete frames assembled", assembled),
             ("frames forwarded to decoder", video.frames),
             ("frames lost during assembly", video.lost_frames),
             ("lost frames whose packets still arrived", video.late_frames),
@@ -432,7 +436,7 @@ impl StreamReport {
         if self.first_frame.is_none() {
             let at = self.started_at.elapsed();
             self.first_frame = Some(at);
-            self.events.push((at, "first video frame".into()));
+            self.events.push((at, "first video frame ready for decoding".into()));
         }
     }
 
@@ -469,10 +473,14 @@ impl StreamReport {
             ),
             format!("Duration: {}", human(self.duration())),
         ];
-        match self.first_frame {
-            Some(at) => out.push(format!("First assembled video frame after {}", human(at))),
-            None => out.push("No video frame was received".into()),
-        }
+        out.push(match (self.first_frame, self.video_frame_totals) {
+            (Some(at), _) => format!("First video frame ready for decoding after {}", human(at)),
+            (None, Some((0, 0))) => "No complete video frame was assembled".into(),
+            (None, Some((assembled, 0))) => {
+                format!("Complete video frames assembled ({assembled}), none forwarded for decoding")
+            }
+            (None, _) => "First video frame timing unavailable".into(),
+        });
         // Skip the first second (ramp-up) when there is more.
         let steady: Vec<&StatsSample> = self
             .samples
@@ -807,7 +815,8 @@ mod tests {
             "  name     cachy",
             "  video  H264 1920x1080@60",
             "RTSP handshake",
-            "first video frame",
+            "First video frame ready for decoding after",
+            "first video frame ready for decoding",
             "ended: the app was closed on the host",
             "Video: 59.3 fps average (lowest 58.0), 20.0 Mbps",
             "Network: RTT 4 ms average, max 5 ms",
@@ -831,10 +840,28 @@ mod tests {
         second.dropped_waiting_idr = 60;
         second.verdict = Some("waiting for IDR");
         r.sample(second);
+        let video = VideoCounters::default();
+        video.dropped_waiting_idr.store(74, Ordering::Relaxed);
+        r.video_transport(&VideoTransportStats::from(&video));
         let text = r.render_with_logs(&[]);
+        assert!(text.contains("Complete video frames assembled (74), none forwarded for decoding"));
         assert!(text.contains("No assembled video: 0/1"));
         assert!(text.contains("No video forwarded: 1/1"));
         assert!(text.contains("1 s waiting for IDR"));
+    }
+
+    #[test]
+    fn startup_summary_distinguishes_zero_frames_from_missing_timing() {
+        let mut r = StreamReport::new("Startup", 0);
+        assert_eq!(r.summary_lines()[2], "First video frame timing unavailable");
+
+        let video = VideoCounters::default();
+        r.video_transport(&VideoTransportStats::from(&video));
+        assert_eq!(r.summary_lines()[2], "No complete video frame was assembled");
+
+        video.frames.store(1, Ordering::Relaxed);
+        r.video_transport(&VideoTransportStats::from(&video));
+        assert_eq!(r.summary_lines()[2], "First video frame timing unavailable");
     }
 
     #[test]
