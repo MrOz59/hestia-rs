@@ -568,7 +568,8 @@ impl Controller {
         launch: Launch,
     ) -> Result<(), String> {
         let (decoder, formats) = video.decoder;
-        let config = launched.stream_config(&formats).map_err(|e| e.to_string())?;
+        let mut config = launched.stream_config(&formats).map_err(|e| e.to_string())?;
+        config.hdt_feedback = self.state().hdt_feedback;
         #[cfg(target_os = "android")]
         let config = platform::configure_stream_network(config);
         hestia_core::add_stream_config_to_report(&config, decoder.name(), &mut report::lock(&session_report));

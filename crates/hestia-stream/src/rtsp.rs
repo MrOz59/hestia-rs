@@ -286,6 +286,7 @@ pub struct HandshakeConfig {
     pub audio_channels: u8,
     pub audio_channel_mask: u32,
     pub streaming_remotely: bool,
+    pub hdt_feedback: bool,
 }
 
 /// What the handshake negotiated; everything the UDP/ENet streams need.
@@ -306,6 +307,7 @@ pub struct Negotiated {
     pub packet_size: u32,
     pub host_feature_flags: u32,
     pub supports_fec_status: bool,
+    pub hdt_feedback: crate::hdt::FeedbackMode,
 }
 
 impl Negotiated {
@@ -538,6 +540,11 @@ pub fn handshake(cfg: &HandshakeConfig) -> Result<Negotiated, RtspError> {
         audio_encrypted: encryption & sdp::SS_ENC_AUDIO != 0,
         packet_size,
         host_feature_flags: host_sdp.feature_flags(),
+        hdt_feedback: crate::hdt::FeedbackMode::negotiate(
+            cfg.hdt_feedback,
+            &host_sdp.raw,
+            encryption & sdp::SS_ENC_CONTROL_V2 != 0,
+        ),
         // Sunshine-family protocol extension, independent of host input feature bits.
         supports_fec_status: host_sdp.raw.lines().any(|line| line.trim().starts_with("a=x-ss-"))
             || video.get("X-SS-Ping-Payload").is_some(),
@@ -557,6 +564,7 @@ pub fn handshake(cfg: &HandshakeConfig) -> Result<Negotiated, RtspError> {
         encryption_enabled: encryption,
         audio_encryption: negotiated.audio_encrypted,
         streaming_remotely: cfg.streaming_remotely,
+        hdt_feedback: negotiated.hdt_feedback == crate::hdt::FeedbackMode::Active,
         ipv6: remote.is_ipv6(),
         host_address: remote.ip().to_string(),
         video_port: negotiated.video_port,

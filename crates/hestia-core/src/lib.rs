@@ -589,6 +589,7 @@ impl LaunchedSession {
             remote_input_key: self.request.remote_input_key,
             remote_input_key_id: self.request.remote_input_key_id,
             streaming_remotely,
+            hdt_feedback: false,
             show_video_through_loss: self.settings.show_video_through_loss,
         })
     }
@@ -1585,6 +1586,16 @@ pub fn add_stream_config_to_report(c: &hestia_stream::StreamConfig, decoder: &st
 
 /// Adds what the RTSP handshake settled on to a report.
 fn add_negotiated_to_report(n: &hestia_stream::rtsp::Negotiated, r: &mut report::StreamReport) {
+    use hestia_stream::hdt::FeedbackMode;
+    let feedback = match n.hdt_feedback {
+        FeedbackMode::Off => None,
+        FeedbackMode::Active => Some("v1 active"),
+        FeedbackMode::Unsupported => Some("inactive (host did not offer v1)"),
+        FeedbackMode::ControlEncryptionRequired => Some("inactive (encrypted control unavailable)"),
+    };
+    if let Some(status) = feedback {
+        r.field("Negotiated", "HDT WAN feedback", status);
+    }
     r.field("Negotiated", "video", format!("{:?}", n.video_format));
     r.field(
         "Negotiated",

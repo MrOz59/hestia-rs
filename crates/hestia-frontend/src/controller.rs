@@ -55,6 +55,8 @@ struct State {
     /// Settings → Debug as saved, and the taps on About that unlock it.
     debug: hestia_core::DebugOptions,
     debug_taps: debug::Taps,
+    /// Experimental protocol opt-in for this app run only.
+    hdt_feedback: bool,
     /// The app held back by the shared-band warning, and whether the user
     /// chose to stream anyway (not asked again until the app restarts).
     pending_launch: Option<u32>,
