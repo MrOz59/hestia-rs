@@ -44,6 +44,7 @@ slint = { workspace = true, features = ["unstable-winit-030"] }
 # (src/wl_surface.rs): the Wayland crates winit already uses.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+rfd = "0.18"
 wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }

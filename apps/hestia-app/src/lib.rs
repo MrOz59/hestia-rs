@@ -9,6 +9,7 @@
 
 #[cfg(target_os = "android")]
 mod android_pip;
+mod appearance;
 #[cfg(not(target_os = "android"))]
 mod desktop_input;
 #[cfg(not(target_os = "android"))]
@@ -16,6 +17,7 @@ mod gl_video;
 #[cfg(target_os = "android")]
 mod gpu_render;
 mod slint_ui;
+mod theme_file;
 #[cfg(target_os = "linux")]
 mod wl_surface;
 
@@ -24,6 +26,7 @@ use std::sync::Arc;
 
 use hestia_frontend::Controller;
 use hestia_frontend::presentation::GpuWindow;
+use slint::ComponentHandle;
 
 slint::include_modules!();
 
@@ -52,6 +55,11 @@ fn run_window(
     #[cfg(not(target_os = "android"))]
     desktop_input::install();
     let ui = AppWindow::new()?;
+    #[cfg(target_os = "android")]
+    let picker = theme_file::Picker::new(app);
+    #[cfg(not(target_os = "android"))]
+    let picker = theme_file::Picker::new();
+    appearance::install(&ui, data_dir.clone(), picker);
     ui.set_is_android(cfg!(target_os = "android"));
     #[cfg(target_os = "android")]
     ui.set_has_touch_input(!matches!(

@@ -20,6 +20,8 @@ export component SessionLaunch inherits Rectangle {
     in property <string> app;
     in property <string> host;
     in property <string> stage;
+    // Flame, Pulse, Orbit, Still.
+    in property <int> style;
     in property <bool> leaving;
     callback cancel();
     private property <length> emblem: min(root.width * 0.6, root.height * 0.44);
@@ -27,7 +29,7 @@ export component SessionLaunch inherits Rectangle {
     private property <length> centre-x: root.width / 2;
     // The block (flame, labels, fuse) is centred on the screen.
     private property <length> centre-y: root.height / 2 - root.emblem * 0.275;
-    private property <duration> clock: Theme.launch-motion ? animation-tick() : 0ms;
+    private property <duration> clock: Theme.launch-motion && root.style != 3 ? animation-tick() : 0ms;
     // The fuse burns from its start to 15% past its end, where its trail
     // cools out, then relights. 600 ms ahead, so a still scene shows it lit.
     private property <length> fuse-length: min(root.width - 64px, root.emblem);
@@ -38,141 +40,195 @@ export component SessionLaunch inherits Rectangle {
     clip: true;
     background: Theme.launch-backdrop;
 
-    // The fire's warmth, breathing slowly.
-    Rectangle {
-        width: root.emblem * 2.6;
-        height: self.width;
-        x: root.centre-x - self.width / 2;
-        y: root.centre-y - root.emblem * 0.04 - self.height / 2;
-        transform-scale: 1 + 0.035 * sin(360deg * mod(root.clock, 4800ms) / 4800ms);
-        background: @radial-gradient(circle, Theme.launch-accent.with-alpha(0.20), Theme.launch-accent.with-alpha(0.07) 40%, Theme.launch-accent.with-alpha(0) 70%);
+    if root.style == 0 || root.style == 3: Rectangle {
+        // The fire's warmth, breathing slowly.
+        Rectangle {
+            width: root.emblem * 2.6;
+            height: self.width;
+            x: root.centre-x - self.width / 2;
+            y: root.centre-y - root.emblem * 0.04 - self.height / 2;
+            transform-scale: 1 + 0.035 * sin(360deg * mod(root.clock, 4800ms) / 4800ms);
+            background: @radial-gradient(circle, Theme.launch-accent.with-alpha(0.20), Theme.launch-accent.with-alpha(0.07) 40%, Theme.launch-accent.with-alpha(0) 70%);
+        }
+
+        // Embers rise across the whole screen, swaying and twinkling: hot near
+        // the floor, cooling to the accent and fading as they climb. Each wraps
+        // outside the viewport and keeps its own column and starting height.
+        for k in 16: Rectangle {
+            private property <duration> period: 17s + 2s * mod(k, 5);
+            private property <duration> sway: 3100ms + 700ms * mod(k, 4);
+            private property <duration> twinkle: 1700ms + 400ms * mod(k, 3);
+            private property <float> rise: mod(mod(root.clock, self.period) / self.period + mod(7 + k * 29, 89) / 89, 1.0);
+            width: max(1.5px, root.emblem * 0.007);
+            height: self.width;
+            border-radius: self.width / 2;
+            x: root.width * mod(11 + k * 53, 103) / 103 + root.emblem * 0.05 * sin(360deg * mod(root.clock, self.sway) / self.sway + k * 61deg) - self.width / 2;
+            y: (root.height + 2 * self.height) * (1 - self.rise) - self.height;
+            background: Theme.launch-highlight.mix(Theme.launch-accent, 1 - self.rise).with-alpha(0.45 * (0.65 + 0.35 * sin(360deg * mod(root.clock, self.twinkle) / self.twinkle + k * 83deg)) * (0.3 + 0.7 * (1 - self.rise)));
+        }
+        // Nearer embers: bigger, faster, with a glow. One square whose gradient
+        // holds both: the ember's edge is 8.8% of the radius to the corners.
+        for j in 6: Rectangle {
+            private property <duration> period: 10s + 1500ms * mod(j, 3);
+            private property <duration> sway: 3400ms + 600ms * mod(j, 3);
+            private property <duration> twinkle: 1300ms + 300ms * mod(j, 3);
+            private property <float> rise: mod(mod(root.clock, self.period) / self.period + mod(3 + j * 41, 97) / 97, 1.0);
+            private property <length> ember: max(2.5px, root.emblem * 0.016);
+            private property <color> heat: Theme.launch-highlight.mix(Theme.launch-accent, 1 - self.rise);
+            private property <float> glow: 0.85 * (0.65 + 0.35 * sin(360deg * mod(root.clock, self.twinkle) / self.twinkle + j * 83deg)) * (0.3 + 0.7 * (1 - self.rise));
+            width: self.ember * 8;
+            height: self.width;
+            x: root.width * (0.08 + 0.84 * mod(2 + j * 5, 6) / 5) + root.emblem * 0.10 * sin(360deg * mod(root.clock, self.sway) / self.sway + j * 61deg) - self.width / 2;
+            y: (root.height + 2 * self.ember) * (1 - self.rise) - self.ember / 2 - self.height / 2;
+            background: @radial-gradient(circle, self.heat.with-alpha(self.glow), self.heat.with-alpha(self.glow) 7.5%, self.heat.with-alpha(0.35 * self.glow) 10%, self.heat.with-alpha(0) 70%);
+        }
+
+        // The flame's light flickers on its surroundings.
+        Rectangle {
+            width: root.emblem * 0.95;
+            height: self.width;
+            x: root.centre-x - self.width / 2;
+            y: root.centre-y - root.emblem * 0.02 - self.height / 2;
+            transform-scale: 1 + 0.04 * sin(360deg * mod(root.clock, 900ms) / 900ms) + 0.025 * sin(360deg * mod(root.clock, 310ms) / 310ms + 1.1rad);
+            background: @radial-gradient(circle, Theme.launch-accent.with-alpha(0.42), Theme.launch-accent.with-alpha(0.12) 45%, Theme.launch-accent.with-alpha(0) 70%);
+        }
+        // Crackle: sparks leave the flame's body and drift up and out, each on
+        // its own beat, cooling as they go.
+        for j in 6: Rectangle {
+            private property <duration> life: 1300ms + 250ms * mod(j * 2, 5);
+            private property <float> age: mod(mod(root.clock, self.life) / self.life + mod(j * 0.43, 1.0), 1.0);
+            width: max(1px, root.emblem * (0.016 - 0.010 * self.age));
+            height: self.width;
+            border-radius: self.width / 2;
+            x: root.centre-x + root.flame-size * 0.1 * sin(j * 131deg) + root.emblem * (0.14 * sin(j * 131deg + 20deg) * self.age + 0.02 * sin(540deg * self.age + j * 1rad)) - self.width / 2;
+            y: root.centre-y - root.flame-size * 0.10 - root.emblem * 0.42 * self.age;
+            background: Theme.launch-highlight.mix(Theme.launch-accent, 1 - self.age).with-alpha((1 - self.age) * min(1.0, self.age * 8));
+        }
+        // Tongues break off the tip, rise and shrink away (behind the flame, so
+        // they come out of it).
+        for j in 2: Path {
+            private property <duration> life: 900ms + 230ms * j;
+            private property <float> age: mod(mod(root.clock, self.life) / self.life + 0.5 * j, 1.0);
+            width: root.flame-size * 0.10;
+            height: root.flame-size * 0.175;
+            x: root.centre-x + root.flame-size * 0.03 * (j == 0 ? -1 : 1) + root.emblem * 0.03 * sin(360deg * self.age + j * 2rad) - self.width / 2;
+            y: root.centre-y - root.flame-size * 0.40 - root.emblem * 0.16 * self.age;
+            viewbox-width: 12;
+            viewbox-height: 21;
+            transform-scale: 1 - 0.7 * self.age;
+            fill: Theme.launch-accent.mix(Theme.launch-highlight, 70%).with-alpha((1 - self.age) * min(1.0, self.age * 5));
+            commands: "M6 0 C9 7 12 11 12 15 C12 18.5 9.3 21 6 21 C2.7 21 0 18.5 0 15 C0 11 3 7 6 0 Z";
+        }
+
+        // The flame, in a 100 × 100 box, each layer flickering around its base
+        // at its own rates; the quickest ones make it hiss. Gradients span the
+        // box, not the shape.
+        Rectangle {
+            width: root.flame-size;
+            height: self.width;
+            x: root.centre-x - self.width / 2;
+            y: root.centre-y - self.height / 2;
+            // A darker flame behind, mirrored, licks out on the other side.
+            Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: 100;
+                viewbox-height: 100;
+                transform-origin: { x: self.width * 0.5, y: self.height * 0.84 };
+                transform-rotation: 2.5deg * sin(360deg * mod(root.clock, 1700ms) / 1700ms + 2rad);
+                transform-scale-x: 1.08;
+                transform-scale-y: 1.08 * (1 + 0.05 * sin(360deg * mod(root.clock, 1100ms) / 1100ms) + 0.02 * sin(360deg * mod(root.clock, 330ms) / 330ms + 1rad));
+                fill: Theme.launch-accent.darker(0.35);
+                commands: "M50 6 C46 20 30 30 28 52 C26.5 70 37 84 50 84 C63 84 73 72 72 57 C71 47 66 40 61 34 C61 42 58 47 54 49 C57 36 55 20 50 6 Z";
+            }
+            Path {
+                private property <float> flicker: sin(360deg * mod(root.clock, 830ms) / 830ms);
+                width: 100%;
+                height: 100%;
+                viewbox-width: 100;
+                viewbox-height: 100;
+                transform-origin: { x: self.width * 0.5, y: self.height * 0.84 };
+                transform-rotation: -1.8deg * sin(360deg * mod(root.clock, 1900ms) / 1900ms);
+                transform-scale-x: 1 - 0.02 * self.flicker;
+                transform-scale-y: 1 + 0.045 * self.flicker + 0.02 * sin(360deg * mod(root.clock, 370ms) / 370ms + 2rad);
+                fill: @linear-gradient(180deg, Theme.launch-accent, Theme.launch-accent 60%, Theme.launch-accent.darker(0.2));
+                commands: "M50 6 C54 20 70 30 72 52 C73.5 70 63 84 50 84 C37 84 27 72 28 57 C29 47 34 40 39 34 C39 42 42 47 46 49 C43 36 45 20 50 6 Z";
+            }
+            Path {
+                private property <float> flicker: sin(360deg * mod(root.clock, 610ms) / 610ms);
+                width: 100%;
+                height: 100%;
+                viewbox-width: 100;
+                viewbox-height: 100;
+                transform-origin: { x: self.width * 0.5, y: self.height * 0.79 };
+                transform-rotation: 1.5deg * sin(360deg * mod(root.clock, 1300ms) / 1300ms + 1rad);
+                transform-scale-x: 1 - 0.035 * self.flicker;
+                transform-scale-y: 1 + 0.07 * self.flicker + 0.03 * sin(360deg * mod(root.clock, 290ms) / 290ms + 0.5rad);
+                fill: @linear-gradient(180deg, Theme.launch-highlight.mix(Theme.launch-accent, 50%), Theme.launch-highlight);
+                commands: "M51 34 C55 44 64 50 63 63 C62.5 73 57 79 50 79 C43 79 37.5 74 38 66 C38.5 59 42 55 45 52 C45.5 57 47.5 60 50 61 C48 52 49 42 51 34 Z";
+            }
+            Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: 100;
+                viewbox-height: 100;
+                transform-origin: { x: self.width * 0.5, y: self.height * 0.77 };
+                transform-scale: 1 + 0.06 * sin(360deg * mod(root.clock, 470ms) / 470ms + 1.3rad) + 0.03 * sin(360deg * mod(root.clock, 230ms) / 230ms);
+                fill: Theme.launch-core;
+                commands: "M50 54 C53 60 57 63 57 69 C57 74 54 77 50 77 C46 77 43 74 43 70 C43 65 47 61 50 54 Z";
+            }
+        }
+
     }
 
-    // Embers rise across the whole screen, swaying and twinkling: hot near
-    // the floor, cooling to the accent and fading as they climb. Each wraps
-    // outside the viewport and keeps its own column and starting height.
-    for k in 16: Rectangle {
-        private property <duration> period: 17s + 2s * mod(k, 5);
-        private property <duration> sway: 3100ms + 700ms * mod(k, 4);
-        private property <duration> twinkle: 1700ms + 400ms * mod(k, 3);
-        private property <float> rise: mod(mod(root.clock, self.period) / self.period + mod(7 + k * 29, 89) / 89, 1.0);
-        width: max(1.5px, root.emblem * 0.007);
-        height: self.width;
-        border-radius: self.width / 2;
-        x: root.width * mod(11 + k * 53, 103) / 103 + root.emblem * 0.05 * sin(360deg * mod(root.clock, self.sway) / self.sway + k * 61deg) - self.width / 2;
-        y: (root.height + 2 * self.height) * (1 - self.rise) - self.height;
-        background: Theme.launch-highlight.mix(Theme.launch-accent, 1 - self.rise).with-alpha(0.45 * (0.65 + 0.35 * sin(360deg * mod(root.clock, self.twinkle) / self.twinkle + k * 83deg)) * (0.3 + 0.7 * (1 - self.rise)));
-    }
-    // Nearer embers: bigger, faster, with a glow. One square whose gradient
-    // holds both: the ember's edge is 8.8% of the radius to the corners.
-    for j in 6: Rectangle {
-        private property <duration> period: 10s + 1500ms * mod(j, 3);
-        private property <duration> sway: 3400ms + 600ms * mod(j, 3);
-        private property <duration> twinkle: 1300ms + 300ms * mod(j, 3);
-        private property <float> rise: mod(mod(root.clock, self.period) / self.period + mod(3 + j * 41, 97) / 97, 1.0);
-        private property <length> ember: max(2.5px, root.emblem * 0.016);
-        private property <color> heat: Theme.launch-highlight.mix(Theme.launch-accent, 1 - self.rise);
-        private property <float> glow: 0.85 * (0.65 + 0.35 * sin(360deg * mod(root.clock, self.twinkle) / self.twinkle + j * 83deg)) * (0.3 + 0.7 * (1 - self.rise));
-        width: self.ember * 8;
-        height: self.width;
-        x: root.width * (0.08 + 0.84 * mod(2 + j * 5, 6) / 5) + root.emblem * 0.10 * sin(360deg * mod(root.clock, self.sway) / self.sway + j * 61deg) - self.width / 2;
-        y: (root.height + 2 * self.ember) * (1 - self.rise) - self.ember / 2 - self.height / 2;
-        background: @radial-gradient(circle, self.heat.with-alpha(self.glow), self.heat.with-alpha(self.glow) 7.5%, self.heat.with-alpha(0.35 * self.glow) 10%, self.heat.with-alpha(0) 70%);
+    if root.style == 1: Rectangle {
+        for ring in 3: Rectangle {
+            private property <float> wave: mod(root.clock + ring * 740ms, 2220ms) / 2220ms;
+            width: root.flame-size * (0.28 + 0.68 * self.wave);
+            height: self.width;
+            x: root.centre-x - self.width / 2;
+            y: root.centre-y - self.height / 2;
+            border-radius: self.width / 2;
+            border-width: max(1px, root.emblem * (0.016 - 0.012 * self.wave));
+            border-color: Theme.launch-accent.with-alpha(0.82 * (1 - self.wave));
+        }
+        Rectangle {
+            private property <float> breath: (1 + sin(360deg * mod(root.clock, 2220ms) / 2220ms)) / 2;
+            width: root.flame-size * (0.34 + 0.13 * self.breath);
+            height: self.width;
+            x: root.centre-x - self.width / 2;
+            y: root.centre-y - self.height / 2;
+            background: @radial-gradient(circle, Theme.launch-core, Theme.launch-highlight 23%,
+                Theme.launch-accent.with-alpha(0.48) 41%, transparent 70%);
+        }
     }
 
-    // The flame's light flickers on its surroundings.
-    Rectangle {
-        width: root.emblem * 0.95;
-        height: self.width;
-        x: root.centre-x - self.width / 2;
-        y: root.centre-y - root.emblem * 0.02 - self.height / 2;
-        transform-scale: 1 + 0.04 * sin(360deg * mod(root.clock, 900ms) / 900ms) + 0.025 * sin(360deg * mod(root.clock, 310ms) / 310ms + 1.1rad);
-        background: @radial-gradient(circle, Theme.launch-accent.with-alpha(0.42), Theme.launch-accent.with-alpha(0.12) 45%, Theme.launch-accent.with-alpha(0) 70%);
-    }
-    // Crackle: sparks leave the flame's body and drift up and out, each on
-    // its own beat, cooling as they go.
-    for j in 6: Rectangle {
-        private property <duration> life: 1300ms + 250ms * mod(j * 2, 5);
-        private property <float> age: mod(mod(root.clock, self.life) / self.life + mod(j * 0.43, 1.0), 1.0);
-        width: max(1px, root.emblem * (0.016 - 0.010 * self.age));
-        height: self.width;
-        border-radius: self.width / 2;
-        x: root.centre-x + root.flame-size * 0.1 * sin(j * 131deg) + root.emblem * (0.14 * sin(j * 131deg + 20deg) * self.age + 0.02 * sin(540deg * self.age + j * 1rad)) - self.width / 2;
-        y: root.centre-y - root.flame-size * 0.10 - root.emblem * 0.42 * self.age;
-        background: Theme.launch-highlight.mix(Theme.launch-accent, 1 - self.age).with-alpha((1 - self.age) * min(1.0, self.age * 8));
-    }
-    // Tongues break off the tip, rise and shrink away (behind the flame, so
-    // they come out of it).
-    for j in 2: Path {
-        private property <duration> life: 900ms + 230ms * j;
-        private property <float> age: mod(mod(root.clock, self.life) / self.life + 0.5 * j, 1.0);
-        width: root.flame-size * 0.10;
-        height: root.flame-size * 0.175;
-        x: root.centre-x + root.flame-size * 0.03 * (j == 0 ? -1 : 1) + root.emblem * 0.03 * sin(360deg * self.age + j * 2rad) - self.width / 2;
-        y: root.centre-y - root.flame-size * 0.40 - root.emblem * 0.16 * self.age;
-        viewbox-width: 12;
-        viewbox-height: 21;
-        transform-scale: 1 - 0.7 * self.age;
-        fill: Theme.launch-accent.mix(Theme.launch-highlight, 70%).with-alpha((1 - self.age) * min(1.0, self.age * 5));
-        commands: "M6 0 C9 7 12 11 12 15 C12 18.5 9.3 21 6 21 C2.7 21 0 18.5 0 15 C0 11 3 7 6 0 Z";
-    }
-
-    // The flame, in a 100 × 100 box, each layer flickering around its base
-    // at its own rates; the quickest ones make it hiss. Gradients span the
-    // box, not the shape.
-    Rectangle {
-        width: root.flame-size;
-        height: self.width;
-        x: root.centre-x - self.width / 2;
-        y: root.centre-y - self.height / 2;
-        // A darker flame behind, mirrored, licks out on the other side.
-        Path {
-            width: 100%;
-            height: 100%;
-            viewbox-width: 100;
-            viewbox-height: 100;
-            transform-origin: { x: self.width * 0.5, y: self.height * 0.84 };
-            transform-rotation: 2.5deg * sin(360deg * mod(root.clock, 1700ms) / 1700ms + 2rad);
-            transform-scale-x: 1.08;
-            transform-scale-y: 1.08 * (1 + 0.05 * sin(360deg * mod(root.clock, 1100ms) / 1100ms) + 0.02 * sin(360deg * mod(root.clock, 330ms) / 330ms + 1rad));
-            fill: Theme.launch-accent.darker(0.35);
-            commands: "M50 6 C46 20 30 30 28 52 C26.5 70 37 84 50 84 C63 84 73 72 72 57 C71 47 66 40 61 34 C61 42 58 47 54 49 C57 36 55 20 50 6 Z";
-        }
-        Path {
-            private property <float> flicker: sin(360deg * mod(root.clock, 830ms) / 830ms);
-            width: 100%;
-            height: 100%;
-            viewbox-width: 100;
-            viewbox-height: 100;
-            transform-origin: { x: self.width * 0.5, y: self.height * 0.84 };
-            transform-rotation: -1.8deg * sin(360deg * mod(root.clock, 1900ms) / 1900ms);
-            transform-scale-x: 1 - 0.02 * self.flicker;
-            transform-scale-y: 1 + 0.045 * self.flicker + 0.02 * sin(360deg * mod(root.clock, 370ms) / 370ms + 2rad);
-            fill: @linear-gradient(180deg, Theme.launch-accent, Theme.launch-accent 60%, Theme.launch-accent.darker(0.2));
-            commands: "M50 6 C54 20 70 30 72 52 C73.5 70 63 84 50 84 C37 84 27 72 28 57 C29 47 34 40 39 34 C39 42 42 47 46 49 C43 36 45 20 50 6 Z";
-        }
-        Path {
-            private property <float> flicker: sin(360deg * mod(root.clock, 610ms) / 610ms);
-            width: 100%;
-            height: 100%;
-            viewbox-width: 100;
-            viewbox-height: 100;
-            transform-origin: { x: self.width * 0.5, y: self.height * 0.79 };
-            transform-rotation: 1.5deg * sin(360deg * mod(root.clock, 1300ms) / 1300ms + 1rad);
-            transform-scale-x: 1 - 0.035 * self.flicker;
-            transform-scale-y: 1 + 0.07 * self.flicker + 0.03 * sin(360deg * mod(root.clock, 290ms) / 290ms + 0.5rad);
-            fill: @linear-gradient(180deg, Theme.launch-highlight.mix(Theme.launch-accent, 50%), Theme.launch-highlight);
-            commands: "M51 34 C55 44 64 50 63 63 C62.5 73 57 79 50 79 C43 79 37.5 74 38 66 C38.5 59 42 55 45 52 C45.5 57 47.5 60 50 61 C48 52 49 42 51 34 Z";
-        }
-        Path {
-            width: 100%;
-            height: 100%;
-            viewbox-width: 100;
-            viewbox-height: 100;
-            transform-origin: { x: self.width * 0.5, y: self.height * 0.77 };
-            transform-scale: 1 + 0.06 * sin(360deg * mod(root.clock, 470ms) / 470ms + 1.3rad) + 0.03 * sin(360deg * mod(root.clock, 230ms) / 230ms);
-            fill: Theme.launch-core;
-            commands: "M50 54 C53 60 57 63 57 69 C57 74 54 77 50 77 C46 77 43 74 43 70 C43 65 47 61 50 54 Z";
+    if root.style == 2: Rectangle {
+        for lane in 2: Rectangle {
+            private property <angle> tilt: lane == 0 ? 31deg : -31deg;
+            private property <duration> period: lane == 0 ? 2600ms : 3400ms;
+            private property <angle> phase: 360deg * mod(root.clock + lane * 910ms, self.period) / self.period;
+            width: root.flame-size * 0.90;
+            height: self.width * 0.47;
+            x: root.centre-x - self.width / 2;
+            y: root.centre-y - self.height / 2;
+            transform-rotation: self.tilt;
+            Path {
+                viewbox-width: 100;
+                viewbox-height: 48;
+                fill: transparent;
+                stroke: Theme.launch-accent.with-alpha(0.55);
+                stroke-width: 1.5px;
+                commands: "M1 24 A49 23 0 0 1 99 24 A49 23 0 0 1 1 24 Z";
+            }
+            Rectangle {
+                width: root.emblem * 0.12;
+                height: self.width;
+                x: parent.width * (0.5 + 0.49 * cos(parent.phase)) - self.width / 2;
+                y: parent.height * (0.5 + 0.49 * sin(parent.phase)) - self.height / 2;
+                background: @radial-gradient(circle, Theme.launch-core, Theme.launch-highlight 24%,
+                    Theme.launch-accent.with-alpha(0.45) 43%, transparent 70%);
+            }
         }
     }
 

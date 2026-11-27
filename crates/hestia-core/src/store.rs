@@ -10,6 +10,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::HostRecord;
+use crate::appearance::Appearance;
 use crate::settings::StreamSettings;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +24,37 @@ pub struct StoredIdentity {
 #[serde(default)]
 pub struct StoredHosts {
     pub hosts: Vec<HostRecord>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppearanceTheme {
+    Daylight,
+    Midnight,
+    Electric,
+    FrostedGlass,
+    Blue,
+    DarkRainbow,
+    #[default]
+    #[serde(other)]
+    Hearth,
+}
+
+impl AppearanceTheme {
+    /// The order of the theme choices in Settings and the matching Slint palettes.
+    pub const ALL: [Self; 7] = [
+        Self::Hearth,
+        Self::Daylight,
+        Self::Midnight,
+        Self::Electric,
+        Self::FrostedGlass,
+        Self::Blue,
+        Self::DarkRainbow,
+    ];
+
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|&theme| theme == self).unwrap_or(0)
+    }
 }
 
 /// Settings → Debug, unlocked by tapping About seven times. Device-wide,
@@ -98,6 +130,25 @@ impl Store {
         self.write("settings.json", settings)
     }
 
+    pub fn load_theme(&self) -> io::Result<AppearanceTheme> {
+        Ok(self.load_appearance()?.theme)
+    }
+
+    pub fn save_theme(&self, theme: AppearanceTheme) -> io::Result<()> {
+        let mut appearance = self.load_appearance()?;
+        appearance.theme = theme;
+        appearance.active_pack = None;
+        self.save_appearance(&appearance)
+    }
+
+    pub fn load_appearance(&self) -> io::Result<Appearance> {
+        Ok(self.read("appearance.json")?.unwrap_or_default())
+    }
+
+    pub fn save_appearance(&self, appearance: &Appearance) -> io::Result<()> {
+        self.write("appearance.json", appearance)
+    }
+
     pub fn load_debug_options(&self) -> io::Result<DebugOptions> {
         Ok(self.read("debug.json")?.unwrap_or_default())
     }
@@ -133,6 +184,21 @@ fn restrict_permissions(_path: &Path) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_defaults_to_hearth_and_survives_reopening_the_store() {
+        let dir = std::env::temp_dir().join(format!("hestia-appearance-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        assert_eq!(store.load_theme().unwrap(), AppearanceTheme::Hearth);
+        for theme in AppearanceTheme::ALL {
+            store.save_theme(theme).unwrap();
+            assert_eq!(Store::open(&dir).unwrap().load_theme().unwrap(), theme);
+        }
+        fs::write(dir.join("appearance.json"), r#"{"theme":"future-theme"}"#).unwrap();
+        assert_eq!(store.load_theme().unwrap(), AppearanceTheme::Hearth);
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn debug_options_default_off_and_round_trip() {

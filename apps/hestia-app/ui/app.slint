@@ -1,4 +1,4 @@
-import { Theme, Nav, Icon, ActionButton, Loader, TextField, Modal, DialogTitle, DialogText } from "theme.slint";
+import { Theme, ThemeStyle, Nav, FrostBackdrop, FrostGlints, Icon, ActionButton, Loader, TextField, Modal, DialogTitle, DialogText } from "theme.slint";
 import { HostCard, AppCard, CommandRow, PreflightRow, HostsPage, AppsPage, SessionPage, SettingsPage, ToolsPage, ReportPage } from "pages.slint";
 import { SessionLaunch } from "session-launch.slint";
 import { StreamView, PadControl } from "stream.slint";
@@ -6,7 +6,7 @@ import { StreamView, PadControl } from "stream.slint";
 export { HostCard, AppCard, CommandRow, PreflightRow } from "pages.slint";
 export { PadControl } from "stream.slint";
 // Themes set the palette's run-time roles (the launch's, for now) from Rust.
-export { Theme } from "theme.slint";
+export { Theme, ThemeStyle, PaletteOverride, VoltagePaths } from "theme.slint";
 
 export component AppWindow inherits Window {
     title: "Hestia";
@@ -16,7 +16,7 @@ export component AppWindow inherits Window {
     min-height: 400px;
     // Direct video: the picture is on a surface behind the window, so the
     // window is clear wherever the UI draws nothing.
-    background: root.stream-direct-video && root.screen == 4 ? transparent : root.stream-picture-in-picture ? black : Theme.bg;
+    background: root.stream-direct-video && root.screen == 4 ? transparent : root.stream-picture-in-picture ? black : Theme.backdrop;
     default-font-family: Theme.font;
     default-font-size: Theme.body-size;
     forward-focus: keys;
@@ -25,6 +25,8 @@ export component AppWindow inherits Window {
     init => {
         Theme.window-width = self.width;
         Theme.window-height = self.height;
+        root.apply-theme();
+        Theme.effects-motion = root.effects-motion;
     }
     changed width => {
         Theme.window-width = self.width;
@@ -43,6 +45,44 @@ export component AppWindow inherits Window {
     // 0 = hosts, 1 = apps, 2 = session (launching / errors), 3 = settings, 4 = stream, 5 = host tools,
     // 6 = stream report, 7 = animated session launch
     in-out property <int> screen: 0;
+    in-out property <int> saved-theme: 0;
+    in-out property <int> saved-launch-style: 0;
+    out property <[string]> builtin-theme-names: ["Hearth (dark)", "Daylight (light)", "Midnight", "Electric", "Frosted Glass", "Blue", "Dark Rainbow"];
+    in property <[string]> theme-names: root.builtin-theme-names;
+    in property <[string]> theme-menu: root.theme-names;
+    in property <[ThemeStyle]> theme-styles;
+    in-out property <string> theme-import-message;
+    out property <int> appearance-session;
+    private property <int> cfg-theme: 0;
+    private property <int> cfg-launch-style: 0;
+    private property <bool> theme-save-failed;
+    private property <int> effective-theme: root.screen == 3 ? root.cfg-theme : root.saved-theme;
+    function apply-theme() {
+        if root.effective-theme >= 0 && root.effective-theme < root.theme-styles.length {
+            Theme.selection = root.theme-styles[root.effective-theme].base;
+            Theme.overrides = root.theme-styles[root.effective-theme].colors;
+        } else {
+            Theme.selection = root.effective-theme;
+            Theme.overrides = [];
+        }
+    }
+    changed effective-theme => {
+        root.apply-theme();
+    }
+    changed theme-styles => {
+        root.apply-theme();
+    }
+    public function preview-theme(index: int) {
+        root.cfg-theme = index;
+        root.theme-save-failed = false;
+    }
+    private property <bool> effects-motion: root.screen != 4 && root.screen != 7 && !root.launch-preview;
+    changed effects-motion => {
+        Theme.effects-motion = root.effects-motion;
+    }
+    callback import-theme(int);
+    callback discard-theme-preview();
+    callback save-theme(int, int) -> int;
 
     // Startup (identity generation on first run)
     in property <bool> starting: true;
@@ -166,8 +206,15 @@ export component AppWindow inherits Window {
         if root.screen != 4 {
             root.retain-launch = root.screen == 7;
         }
-        if root.screen != 3 {
+        if root.screen == 3 {
+            root.appearance-session += 1;
+            root.cfg-theme = root.saved-theme;
+            root.cfg-launch-style = root.saved-launch-style;
+            root.theme-import-message = "";
+            root.theme-save-failed = false;
+        } else {
             root.launch-preview = false;
+            root.discard-theme-preview();
         }
         if root.is-android {
             root.stream-pip-config(root.screen == 4, root.stream-picture-aspect);
@@ -280,7 +327,7 @@ export component AppWindow inherits Window {
     callback debug-hide();
     callback debug-verbose-log-toggled(bool);
     callback debug-copy-info();
-    // Settings → Debug → Launch screen preview: the launch page with no
+    // Settings → Loading screen preview: the launch page with no
     // stream behind it, stepping through the launch stages, until Back.
     property <bool> launch-preview;
     property <int> launch-preview-stage;
@@ -417,6 +464,11 @@ export component AppWindow inherits Window {
     callback form-navigation-changed(bool);
     changed form-navigation => {
         root.form-navigation-changed(self.form-navigation);
+    }
+
+    if Theme.frost-effects && root.effects-motion: FrostBackdrop {
+        width: root.width;
+        height: root.height;
     }
 
     // Every screen lives inside this scope, so keys nobody else handled
@@ -648,7 +700,7 @@ export component AppWindow inherits Window {
             }
         }
 
-        if root.screen == 7 || (root.screen == 4 && root.retain-launch && Theme.launch-motion && !root.stream-picture-in-picture): SessionLaunch {
+        if root.screen == 7 || (root.screen == 4 && root.retain-launch && Theme.launch-motion && root.saved-launch-style != 3 && !root.stream-picture-in-picture): SessionLaunch {
             width: 100%;
             height: 100%;
             leaving: root.screen == 4;
@@ -657,6 +709,7 @@ export component AppWindow inherits Window {
             app: root.session-title;
             host: root.session-subtitle;
             stage: root.session-lines.length > 0 ? root.session-lines[0] : "";
+            style: root.saved-launch-style;
             cancel => { root.back-to-apps(); }
             init => { root.page-depth = 2; }
         }
@@ -774,6 +827,13 @@ export component AppWindow inherits Window {
             direct-video <=> root.cfg-direct-video;
             allow-tearing <=> root.cfg-allow-tearing;
             frame-pacing <=> root.cfg-frame-pacing;
+            theme <=> root.cfg-theme;
+            theme-names: root.theme-names;
+            theme-menu: root.theme-menu;
+            theme-import-message: root.theme-import-message;
+            import-theme => { root.import-theme(root.appearance-session); }
+            launch-style <=> root.cfg-launch-style;
+            theme-save-failed: root.theme-save-failed;
             show-video-through-loss <=> root.cfg-show-video-through-loss;
             android: root.is-android;
             physical-keyboard: root.cfg-physical-keyboard;
@@ -828,16 +888,27 @@ export component AppWindow inherits Window {
                 root.screen = root.settings-return;
             }
             save => {
-                root.save-settings();
-                root.screen = root.settings-return;
+                let selected = root.cfg-theme != root.saved-theme || root.cfg-launch-style != root.saved-launch-style
+                    ? root.save-theme(root.cfg-theme, root.cfg-launch-style) : root.saved-theme;
+                if selected < 0 {
+                    root.theme-save-failed = true;
+                } else {
+                    root.saved-theme = selected;
+                    root.saved-launch-style = root.cfg-launch-style;
+                    root.save-settings();
+                    root.screen = root.settings-return;
+                }
             }
         }
+
+        if Theme.frost-effects && root.effects-motion: FrostGlints { }
 
         if root.screen == 3 && root.launch-preview: SessionLaunch {
             width: 100%;
             height: 100%;
             app: "Launch preview";
             host: root.version-text;
+            style: root.cfg-launch-style;
             stage: root.launch-preview-stage == 0 ? "Starting on the host…"
                 : root.launch-preview-stage == 1 ? "Connecting to the stream…" : "Waiting for the first video frame…";
             cancel => { root.launch-preview = false; }

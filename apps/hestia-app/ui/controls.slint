@@ -3,7 +3,7 @@
 // up / down (D-pad) move between rows, left / right change the value, and
 // Return / the D-pad centre opens or toggles it.
 
-import { Theme, Nav, Icon, Focusable, ActionButton, IconButton, Toggle, TextField, Modal, DialogTitle, DialogText } from "theme.slint";
+import { Theme, Nav, Icon, Focusable, ActionButton, IconButton, Toggle, TextField, Modal, DialogTitle, DialogText, ThemeHeading, VoltageTrace } from "theme.slint";
 
 // Title and an optional note, left of a row's control.
 export component RowText inherits VerticalLayout {
@@ -34,7 +34,8 @@ export component RowText inherits VerticalLayout {
 // again on every frame of a fade (see `ActionButton` for the other rules).
 export component RowBase inherits Focusable {
     border-radius: Theme.radius - 5px;
-    background: root.pressed ? Theme.border : (root.focused || root.hovered ? Theme.card-hover : Theme.card.transparentize(1));
+    background: root.pressed && !Theme.electric-effects && !Theme.frost-effects ? Theme.border
+        : root.pressed || root.focused || root.hovered ? Theme.card-hover : transparent;
     border-width: root.focused ? 2px : 0px;
     border-color: Theme.accent;
     drop-shadow-blur: 18px;
@@ -45,22 +46,25 @@ export component RowBase inherits Focusable {
 export component Group inherits VerticalLayout {
     in property <string> title;
     spacing: 8px;
-    if root.title != "": Text {
-        text: root.title;
-        color: Theme.muted;
-        font-size: Theme.body-size;
-        font-weight: 600;
+    if root.title != "": ThemeHeading {
+        label: root.title;
+        tone: Theme.muted;
+        text-size: Theme.body-size;
+        weight: 600;
     }
     Rectangle {
         height: rows.preferred-height;
         border-radius: Theme.radius;
-        background: Theme.card;
-        border-width: 1px;
-        border-color: Theme.border.transparentize(0.5);
+        background: Theme.panel-face;
+        border-width: Theme.electric-effects ? 1.5px : 1px;
+        border-color: Theme.panel-edge;
         rows := VerticalLayout {
             padding: 4px;
             spacing: 2px;
             @children
+        }
+        if Theme.electric-effects && Theme.effects-motion: VoltageTrace {
+            phase-offset: root.y;
         }
     }
 }
@@ -114,6 +118,7 @@ export component SwitchRow inherits RowBase {
 // One value out of a list: left / right step through it, Return or a tap
 // opens the whole list (`open`).
 export component ChoiceRow inherits RowBase {
+    in property <length> value-min-width;
     in property <string> label;
     in property <string> hint;
     in property <[string]> options;
@@ -165,6 +170,7 @@ export component ChoiceRow inherits RowBase {
                 }
             }
             Text {
+                min-width: min(root.value-min-width, self.max-width);
                 max-width: root.width * 0.42;
                 text: root.options[root.index];
                 color: Theme.text;
@@ -677,12 +683,9 @@ export component TopBar inherits Rectangle {
             alignment: center;
             horizontal-stretch: 1;
             padding-left: root.show-back ? 4px : 0px;
-            Text {
-                text: root.title;
-                color: Theme.text;
-                font-size: Theme.compact ? 23px : (Theme.short ? 25px : 30px);
-                font-weight: 700;
-                overflow: elide;
+            ThemeHeading {
+                label: root.title;
+                text-size: Theme.compact ? 23px : (Theme.short ? 25px : 30px);
             }
             if root.subtitle != "": Text {
                 text: root.subtitle;

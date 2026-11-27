@@ -17,4 +17,5 @@ hestia-stream.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+zip = { version = "9.8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 log = { workspace = true, features = ["std"] }
