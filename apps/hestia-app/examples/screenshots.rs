@@ -345,11 +345,11 @@ fn main() {
 
     ui.set_screen(3);
     show(&window, size);
-    // Down from Preset to the bitrate slider.
-    press(&window, Key::DownArrow, 4);
+    // Down from Theme to the bitrate slider.
+    press(&window, Key::DownArrow, 6);
     save(&window, size, &out.join("tv-settings.png"));
     // The option list of the frame rate row.
-    press(&window, Key::UpArrow, 1);
+    press(&window, Key::UpArrow, 2);
     press(&window, Key::Return, 1);
     save(&window, size, &out.join("tv-settings-options.png"));
     press(&window, Key::Escape, 1);

@@ -36,6 +36,8 @@ Every push to `main` that passes CI replaces the **`nightly`** pre-release
 | `ui-screenshots.zip` | the screens, rendered headless (phone and desktop) |
 | `SHA256SUMS` | checksums |
 
+[Download theme packs](docs/THEME-DOWNLOADS.md)
+
 On Linux, run `chmod +x Hestia-RS-x86_64.AppImage` once, then launch
 `./Hestia-RS-x86_64.AppImage` to open the GUI. If FUSE is unavailable, use
 `./Hestia-RS-x86_64.AppImage --appimage-extract-and-run`.
@@ -161,6 +163,9 @@ a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
 
 ### Settings
 
+- **Appearance** offers seven built-in themes and loads shared ZIP theme packs.
+  Choose Flame, Pulse, Orbit or Still for the loading screen and preview it
+  in Settings. [Theme packs and builder](docs/THEME-PACKS.md)
 - **Presets**: Fast (≤1080p60), Balanced (native, ≤60 fps), Quality (native
   resolution and refresh, more bitrate) and Battery saver (720p30), computed
   from this device's display (EDID on Linux, `Display.Mode` on Android) with
@@ -193,8 +198,7 @@ a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
   started, with the hosts' last known state, shared the same way.
 - **Debug options**: tap Settings → About seven times (as with Android's
   developer options) to show a Debug section at the end of Settings. It
-  previews the launch screen without a stream until Back, holds the launch
-  animation still, keeps every library's Debug lines in the app log and
+  keeps every library's Debug lines in the app log and
   reports (verbose log), and shows this device's details, display and
   decoders, copied with a tap. It stays until hidden again.
 
@@ -206,9 +210,9 @@ a76f6edbd5bfffbc6953f90673b8487c6029398db16f67ae9f6b2da84a2f6b0b
   whole app works with a remote. The arrows move an ember focus glow over
   every control, left/right change a settings row's value, and the focused
   control always scrolls into view.
-- **UI**: a dark, warm theme with an ember-orange accent and the bundled
-  Outfit typeface (SIL OFL, `apps/hestia-app/fonts`), with layouts for
-  phones, TVs and desktop windows.
+- **UI**: Hearth defaults to a dark, warm palette with an ember-orange accent.
+  Phone, TV and desktop layouts use the bundled Outfit typeface
+  (SIL OFL, `apps/hestia-app/fonts`).
 - **Swappable toolkit**: everything but drawing lives in `hestia-frontend`,
   behind a small port. Slint is one shell; another toolkit (egui, Qt…) would
   be another, with no change to the app

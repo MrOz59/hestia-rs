@@ -40,26 +40,239 @@ export global Nav {
     in-out property <bool> keyboard;
 }
 
+struct ThemePalette {
+    bg: color,
+    surface: color,
+    card: color,
+    card-hover: color,
+    border: color,
+    text: color,
+    muted: color,
+    faint: color,
+    accent: color,
+    accent-hover: color,
+    accent-pressed: color,
+    on-accent: color,
+    glow: color,
+    ok: color,
+    warn: color,
+    danger: color,
+    info: color,
+    scrim: color,
+}
+
+export struct VoltagePaths {
+    arc: string,
+    forks: string,
+}
+
+export struct PaletteOverride {
+    supplied: bool,
+    color: color,
+}
+
+export struct ThemeStyle {
+    base: int,
+    colors: [PaletteOverride],
+}
+
 export global Theme {
-    // Palette
-    out property <color> bg: #110e0c;           // soot
-    out property <color> surface: #1a1613;      // ash: bars, sheets, menus
-    out property <color> card: #231e1a;         // coal: groups, tiles
-    out property <color> card-hover: #2e2823;
-    out property <color> border: #3b332c;       // seams
-    out property <color> text: #f5eee8;         // bone
-    out property <color> muted: #ab9f95;        // smoke
-    out property <color> faint: #71675f;        // cinder
-    out property <color> accent: #ff7a2e;       // ember
-    out property <color> accent-hover: #ff9a57;
-    out property <color> accent-pressed: #e3631d;
-    out property <color> on-accent: #1f0c02;
-    out property <color> glow: #ff7a2e80;
-    out property <color> ok: #67d491;
-    out property <color> warn: #f5b43f;
-    out property <color> danger: #ff6868;
-    out property <color> info: #9ec5ea;
-    out property <color> scrim: #0a0807c8;
+    in-out property <int> selection;
+    in-out property <[PaletteOverride]> overrides;
+    pure function role(index: int, fallback: color) -> color {
+        return index < root.overrides.length && root.overrides[index].supplied ? root.overrides[index].color : fallback;
+    }
+    property <ThemePalette> palette: root.selection == 1 ? root.daylight
+        : root.selection == 2 ? root.midnight
+        : root.selection == 3 ? root.electric
+        : root.selection == 4 ? root.frosted-glass
+        : root.selection == 5 ? root.blue
+        : root.selection == 6 ? root.dark-rainbow : root.hearth;
+    property <ThemePalette> hearth: {
+        bg: #110e0c,
+        surface: #1a1613,
+        card: #231e1a,
+        card-hover: #2e2823,
+        border: #3b332c,
+        text: #f5eee8,
+        muted: #ab9f95,
+        faint: #71675f,
+        accent: #ff7a2e,
+        accent-hover: #ff9a57,
+        accent-pressed: #e3631d,
+        on-accent: #1f0c02,
+        glow: #ff7a2e80,
+        ok: #67d491,
+        warn: #f5b43f,
+        danger: #ff6868,
+        info: #9ec5ea,
+        scrim: #0a0807c8,
+    };
+    property <ThemePalette> daylight: {
+        bg: #edf2f9,
+        surface: #f8fafd,
+        card: #ffffff,
+        card-hover: #e5ebf9,
+        border: #bdc9df,
+        text: #172238,
+        muted: #44536d,
+        faint: #586984,
+        accent: #3b4e9d,
+        accent-hover: #4359af,
+        accent-pressed: #2c3b7d,
+        on-accent: #ffffff,
+        glow: #415ab74d,
+        ok: #176848,
+        warn: #795000,
+        danger: #aa2642,
+        info: #254d93,
+        scrim: #172238a8,
+    };
+    property <ThemePalette> midnight: {
+        bg: #070709,
+        surface: #101015,
+        card: #17171e,
+        card-hover: #21212b,
+        border: #383846,
+        text: #f0edf7,
+        muted: #c5bfd5,
+        faint: #aba5bf,
+        accent: #c1a2ff,
+        accent-hover: #d2baff,
+        accent-pressed: #ae8be9,
+        on-accent: #21143b,
+        glow: #ac82ff66,
+        ok: #83d8a8,
+        warn: #f1bb79,
+        danger: #ff9eb5,
+        info: #9ec6fa,
+        scrim: #070709d9,
+    };
+    property <ThemePalette> electric: {
+        bg: #0b0927,
+        surface: #141333,
+        card: #151b3c,
+        card-hover: #213457,
+        border: #5b90cd,
+        text: #eaf9ff,
+        muted: #becfe2,
+        faint: #a2bad5,
+        accent: #34efff,
+        accent-hover: #81f8ff,
+        accent-pressed: #08c6df,
+        on-accent: #041824,
+        glow: #34efff66,
+        ok: #82ffc9,
+        warn: #ffda70,
+        danger: #ff9bb7,
+        info: #a9d5ff,
+        scrim: #071225dd,
+    };
+    property <ThemePalette> frosted-glass: {
+        bg: #102d42,
+        surface: #254a61e8,
+        card: #9bd6ed2b,
+        card-hover: #2d526bcf,
+        border: #91c2d4,
+        text: #f3fbff,
+        muted: #d3ecf7,
+        faint: #c9e2ef,
+        accent: #b7f0ff,
+        accent-hover: #d9f9ff,
+        accent-pressed: #92d4e9,
+        on-accent: #0b283c,
+        glow: #b5e9fc69,
+        ok: #a9f0db,
+        warn: #ffe0a1,
+        danger: #ffd8e4,
+        info: #b7e7ff,
+        scrim: #061421d6,
+    };
+    property <ThemePalette> blue: {
+        bg: #0a1427,
+        surface: #101e35,
+        card: #142842,
+        card-hover: #1b3958,
+        border: #38708d,
+        text: #eaf9ff,
+        muted: #becfe2,
+        faint: #a2bad5,
+        accent: #34efff,
+        accent-hover: #81f8ff,
+        accent-pressed: #08c6df,
+        on-accent: #041824,
+        glow: #34efff66,
+        ok: #82ffc9,
+        warn: #ffda70,
+        danger: #ff9bb7,
+        info: #a9d5ff,
+        scrim: #071225dd,
+    };
+    property <ThemePalette> dark-rainbow: {
+        bg: #000000,
+        surface: #0b0612,
+        card: #0a0613,
+        card-hover: #140d20,
+        border: #332148,
+        text: #faf4ff,
+        muted: #d3c7e4,
+        faint: #b7a9cf,
+        accent: #ea89ff,
+        accent-hover: #f2b0ff,
+        accent-pressed: #cd7dfb,
+        on-accent: #210b34,
+        glow: #db66ff78,
+        ok: #79ffbc,
+        warn: #ffe07c,
+        danger: #ff83af,
+        info: #78e4ff,
+        scrim: #080413d9,
+    };
+
+    out property <color> bg: root.role(0, root.palette.bg);
+    out property <color> surface: root.role(1, root.palette.surface);
+    out property <color> card: root.role(2, root.palette.card);
+    out property <color> card-hover: root.role(3, root.palette.card-hover);
+    out property <color> border: root.role(4, root.palette.border);
+    out property <color> text: root.role(5, root.palette.text);
+    out property <color> muted: root.role(6, root.palette.muted);
+    out property <color> faint: root.role(7, root.palette.faint);
+    out property <color> accent: root.role(8, root.palette.accent);
+    out property <color> accent-hover: root.role(9, root.palette.accent-hover);
+    out property <color> accent-pressed: root.role(10, root.palette.accent-pressed);
+    out property <color> on-accent: root.role(11, root.palette.on-accent);
+    out property <color> glow: root.role(12, root.palette.glow);
+    out property <color> ok: root.role(13, root.palette.ok);
+    out property <color> warn: root.role(14, root.palette.warn);
+    out property <color> danger: root.role(15, root.palette.danger);
+    out property <color> info: root.role(16, root.palette.info);
+    out property <color> scrim: root.role(17, root.palette.scrim);
+    out property <bool> electric-effects: root.selection == 3;
+    out property <bool> frost-effects: root.selection == 4;
+    out property <bool> rainbow-effects: root.selection == 6;
+    in-out property <bool> effects-motion: true;
+    out property <int> spectrum-phase: root.rainbow-effects && root.effects-motion
+        ? floor(96 * mod(animation-tick(), 6100ms) / 6100ms) : 0;
+    pure callback spectrum-heading(string, int) -> styled-text;
+    pure callback voltage-paths(float, float, float, int) -> VoltagePaths;
+    out property <color> primary-fill: root.rainbow-effects ? #241334 : root.accent;
+    out property <color> primary-hover: root.rainbow-effects ? #301b46 : root.accent-hover;
+    out property <color> primary-pressed: root.rainbow-effects ? #1c102e : root.accent-pressed;
+    out property <color> primary-ink: root.rainbow-effects ? root.text : root.on-accent;
+    out property <brush> backdrop: root.bg != root.palette.bg ? root.bg : root.frost-effects
+        ? @linear-gradient(145deg, #091c34 0%, #123c51 42%, #102d42 68%, #15253f 100%)
+        : root.electric-effects ? @linear-gradient(145deg, #0b0927, #15113b 48%, #08192e) : root.bg;
+    out property <brush> panel-face: root.card != root.palette.card && root.frost-effects
+        ? @linear-gradient(160deg, root.card.brighter(0.15), root.card 61%, root.card.darker(0.18))
+        : root.frost-effects
+        ? @linear-gradient(160deg, #225479c0, #0e314db3 61%, #182e4dc0)
+        : root.electric-effects ? @linear-gradient(130deg, #24205a, root.card 72%)
+        : root.rainbow-effects ? @linear-gradient(145deg, #110820, root.card 55%, #090c18) : root.card;
+    out property <brush> panel-edge: root.border != root.palette.border ? root.border : root.frost-effects
+        ? @linear-gradient(155deg, #def8ffe0, #83ccde6b 34%, #b5e9fc46 78%, #c4eefe96)
+        : root.electric-effects ? @linear-gradient(110deg, #d3fcff, #24d5ff 24%, #af82ff 71%, #38e8ff)
+        : root.rainbow-effects ? @linear-gradient(125deg, #39224d, root.border 48%, #272342)
+        : root.border.transparentize(0.5);
     out property <string> font: "Outfit";
 
     // Session launch (session-launch.slint). Each role follows the palette
@@ -89,8 +302,8 @@ export global Theme {
     out property <length> gap: root.compact ? 12px : 18px;
     // Touch targets: 48px on phones.
     out property <length> control-height: root.compact ? 48px : 44px;
-    out property <length> radius: 18px;
-    out property <length> radius-sm: 12px;
+    out property <length> radius: root.electric-effects ? 7px : root.frost-effects ? 22px : 18px;
+    out property <length> radius-sm: root.electric-effects ? 6px : root.frost-effects ? 15px : 12px;
 
     // Type scale (Outfit)
     out property <length> display-size: root.compact || root.short ? 26px : 32px;
@@ -100,15 +313,132 @@ export global Theme {
     out property <length> caption-size: root.compact ? 13px : 12px;
 }
 
+export component ThemeHeading inherits VerticalLayout {
+    in property <string> label;
+    in property <length> text-size;
+    in property <int> weight: 700;
+    in property <color> tone: Theme.text;
+    if Theme.rainbow-effects: StyledText {
+        text: Theme.spectrum-heading(root.label, Theme.spectrum-phase);
+        default-font-size: root.text-size;
+        max-lines: 1;
+    }
+    if !Theme.rainbow-effects: Text {
+        text: root.label;
+        color: root.tone;
+        font-size: root.text-size;
+        font-weight: root.weight;
+        overflow: elide;
+    }
+}
+
+export component FrostBackdrop inherits Rectangle {
+    clip: true;
+    Image {
+        width: root.width;
+        height: root.height;
+        source: @image-url("../artwork/frosted-window.jpg");
+        image-fit: cover;
+    }
+    Rectangle {
+        background: @linear-gradient(90deg, #031428ab, #071b315b 60%, #071b3150);
+    }
+}
+
+// Tiny front reflections stay visible over the frosted panels. Stagger
+// their timing and use a soft halo so they read like reflections on ice.
+export component FrostGlints inherits Rectangle {
+    private property <duration> clock: animation-tick();
+    for i in 24: Rectangle {
+        private property <duration> period: 2400ms + mod(i * 487ms, 2200ms);
+        private property <float> phase: mod(root.clock + i * 719ms, self.period) / self.period;
+        private property <float> pulse: max(0, sin(self.phase * 360deg));
+        private property <float> brightness: self.pulse * self.pulse * self.pulse * self.pulse;
+        width: 15px + mod(i * 7, 12) * 1px;
+        height: self.width;
+        x: root.width * (mod(11 + i * 37, 97) + 2) / 100 - self.width / 2;
+        y: root.height * (mod(23 + i * 53 + i * i * 7, 97) + 2) / 100 - self.height / 2;
+        background: @radial-gradient(circle, #c7eeff.with-alpha(0.49 * self.brightness), transparent 68%);
+        Path {
+            width: parent.width * (0.38 + 0.24 * parent.brightness);
+            height: self.width;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            viewbox-width: 20;
+            viewbox-height: 20;
+            fill: #f4fcff.with-alpha(0.82 * parent.brightness);
+            commands: "M10 0 Q11 9 20 10 Q11 11 10 20 Q9 11 0 10 Q9 9 10 0 Z";
+        }
+    }
+}
+
+// The strands wind in and out across the outline while following all four edges.
+export component VoltageTrace inherits Rectangle {
+    in property <length> corner-radius: Theme.radius;
+    in property <length> phase-offset;
+    private property <int> tick: floor(mod(animation-tick(), 900000ms) / 33ms + root.phase-offset / 6px);
+    private property <VoltagePaths> strands: Theme.voltage-paths(root.width / 1px, root.height / 1px, root.corner-radius / 1px, root.tick);
+
+    Path {
+        width: root.width;
+        height: root.height;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        fill: transparent;
+        stroke: #5375ff46;
+        stroke-width: 7px;
+        commands: root.strands.arc;
+    }
+    Path {
+        width: root.width;
+        height: root.height;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        fill: transparent;
+        stroke: @linear-gradient(115deg, #58ddff, #99adff 52%, #60ddfe);
+        stroke-width: 3px;
+        commands: root.strands.arc;
+    }
+    Path {
+        width: root.width;
+        height: root.height;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        fill: transparent;
+        stroke: #ecffff;
+        stroke-width: 1.15px;
+        commands: root.strands.arc;
+    }
+    Path {
+        width: root.width;
+        height: root.height;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        fill: transparent;
+        stroke: @linear-gradient(145deg, #caffff, #777bffba);
+        stroke-width: 1.1px;
+        commands: root.strands.forks;
+    }
+}
+
 // Material Icons (Apache License 2.0), 24x24 view box.
 export component Icon inherits Path {
     in property <string> name;
     in property <color> tint: Theme.text;
+    // Midnight colors neutral glyphs. A control can supply its own tint.
+    pure function icon-tint() -> color {
+        if (Theme.selection != 2 || root.tint != Theme.text) { return root.tint; }
+        if (root.name == "monitor" || root.name == "refresh" || root.name == "aspect") { return #65dffa; }
+        if (root.name == "gamepad" || root.name == "play" || root.name == "download") { return #74edb0; }
+        if (root.name == "settings" || root.name == "tools" || root.name == "share") { return #cba6ff; }
+        if (root.name == "report" || root.name == "stats") { return #ff91c2; }
+        return root.tint;
+    }
     width: 22px;
     height: 22px;
     viewbox-width: 24;
     viewbox-height: 24;
-    fill: root.tint;
+    fill: root.icon-tint();
     commands: root.name == "back" ? "M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"
         : root.name == "refresh" ? "M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"
         : root.name == "add" ? "M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"
@@ -271,7 +601,7 @@ export component ActionButton inherits Focusable {
     in property <int> kind: 0;
     property <color> fg: !root.enabled
         ? (root.kind == 1 ? Theme.accent.transparentize(0.4) : (root.kind == 2 ? Theme.danger.transparentize(0.5) : Theme.faint))
-        : (root.kind == 1 ? Theme.on-accent : (root.kind == 2 ? Theme.danger : Theme.text));
+        : (root.kind == 1 ? Theme.primary-ink : (root.kind == 2 ? Theme.danger : Theme.text));
     property <bool> lit: root.hovered || root.focused;
 
     accessible-role: button;
@@ -282,15 +612,15 @@ export component ActionButton inherits Focusable {
     horizontal-stretch: 0;
     border-radius: Theme.radius-sm;
     background: !root.enabled
-        ? (root.kind == 1 ? Theme.accent.transparentize(0.82) : (root.kind == 2 ? Theme.danger.transparentize(0.94) : (root.kind == 3 ? Theme.card.transparentize(1) : Theme.card.transparentize(0.45))))
+        ? (root.kind == 1 ? Theme.primary-fill.transparentize(0.82) : (root.kind == 2 ? Theme.danger.transparentize(0.94) : (root.kind == 3 ? Theme.card.transparentize(1) : Theme.card.transparentize(0.45))))
         : root.kind == 1
-            ? (root.pressed ? Theme.accent-pressed : (root.lit ? Theme.accent-hover : Theme.accent))
+            ? (root.pressed ? Theme.primary-pressed : (root.lit ? Theme.primary-hover : Theme.primary-fill))
             : root.kind == 2
                 ? (root.pressed || root.lit ? Theme.danger.transparentize(0.74) : Theme.danger.transparentize(0.88))
                 : root.kind == 3
                     ? (root.pressed ? Theme.card-hover : (root.lit ? Theme.card : Theme.card.transparentize(1)))
                     : (root.pressed ? Theme.border : (root.lit ? Theme.card-hover : Theme.card));
-    border-width: root.focused ? 2px : (root.kind == 0 || root.kind == 2 ? 1px : 0px);
+    border-width: root.focused ? 2px : (root.kind == 0 || root.kind == 2 || (root.kind == 1 && Theme.rainbow-effects) ? 1px : 0px);
     border-color: root.focused
         ? (root.kind == 1 ? Theme.text : Theme.accent)
         : (root.kind == 2 ? Theme.danger.transparentize(root.enabled ? 0.6 : 0.8) : Theme.border.transparentize(root.enabled ? 0 : 0.5));
@@ -330,7 +660,7 @@ export component IconButton inherits Focusable {
     in property <string> label;
     // 1: ember fill; 3: quiet.
     in property <int> kind: 3;
-    in property <color> tint: root.kind == 1 ? Theme.on-accent : Theme.text;
+    in property <color> tint: root.kind == 1 ? Theme.primary-ink : Theme.text;
     property <bool> lit: root.hovered || root.focused;
 
     accessible-role: button;
@@ -340,10 +670,10 @@ export component IconButton inherits Focusable {
     horizontal-stretch: 0;
     border-radius: self.height / 2;
     background: root.kind == 1
-        ? (root.pressed ? Theme.accent-pressed : (root.lit ? Theme.accent-hover : Theme.accent.transparentize(root.enabled ? 0 : 0.8)))
+        ? (root.pressed ? Theme.primary-pressed : (root.lit ? Theme.primary-hover : Theme.primary-fill.transparentize(root.enabled ? 0 : 0.8)))
         : (root.pressed ? Theme.border : (root.lit ? Theme.card-hover : Theme.card.transparentize(1)));
-    border-width: root.focused ? 2px : 0px;
-    border-color: root.kind == 1 ? Theme.text : Theme.accent;
+    border-width: root.focused ? 2px : (root.kind == 1 && Theme.rainbow-effects ? 1px : 0px);
+    border-color: root.kind == 1 ? (root.focused ? Theme.text : Theme.border) : Theme.accent;
     drop-shadow-blur: 18px;
     drop-shadow-color: root.focused ? Theme.glow : transparent;
     transform-scale: root.pressed && root.enabled ? 0.9 : 1;
@@ -736,7 +1066,7 @@ export component Page inherits Rectangle {
     Rectangle {
         // Above everything the page adds, overlays included.
         z: 1000;
-        background: Theme.bg;
+        background: Theme.backdrop;
         opacity: root.arrived ? 0 : 1;
         visible: self.opacity > 0;
         animate opacity { duration: 240ms; easing: ease-out-quad; }

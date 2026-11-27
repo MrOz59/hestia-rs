@@ -1,6 +1,6 @@
 #![cfg(debug_assertions)]
 
-use hestia_app::AppWindow;
+use hestia_app::{AppWindow, Theme};
 use i_slint_backend_testing::ElementHandle;
 use slint::ComponentHandle;
 
@@ -264,6 +264,135 @@ fn settings_follow_the_decoder_and_platform() {
     row(&ui, "GPU colour conversion", false);
     ui.set_is_android(false);
     row(&ui, "GPU colour conversion", true); // Also used by Linux software decode.
+}
+
+#[test]
+fn appearance_previews_and_only_persists_on_save() {
+    use slint::platform::{Key, PointerEventButton, WindowEvent};
+    use std::{cell::Cell, rc::Rc, time::Duration};
+
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_starting(false);
+    ui.show().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1180.0, 900.0));
+
+    let saved = Rc::new(Cell::new(None));
+    let saved_from_ui = saved.clone();
+    ui.on_save_theme(move |index, _| {
+        saved_from_ui.set(Some(index));
+        index
+    });
+    let settle = || {
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(400));
+        slint::platform::update_timers_and_animations();
+    };
+    let tap = |label: &str| {
+        ElementHandle::find_by_accessible_label(&ui, label)
+            .next()
+            .unwrap_or_else(|| panic!("missing {label}"))
+            .mock_single_click(PointerEventButton::Left);
+        settle();
+    };
+
+    ui.set_screen(3);
+    settle();
+    for (index, label) in [
+        "Daylight (light)",
+        "Midnight",
+        "Electric",
+        "Frosted Glass",
+        "Blue",
+        "Dark Rainbow",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        tap("Theme");
+        tap(label);
+        assert_eq!(ui.global::<Theme>().get_selection(), index as i32 + 1);
+        assert_eq!(ui.global::<Theme>().get_electric_effects(), label == "Electric");
+        assert_eq!(ui.global::<Theme>().get_frost_effects(), label == "Frosted Glass");
+        assert_eq!(ui.global::<Theme>().get_rainbow_effects(), label == "Dark Rainbow");
+    }
+    assert_eq!(saved.get(), None);
+    tap("Back");
+    assert_eq!(ui.global::<Theme>().get_selection(), 0);
+    assert_eq!(ui.get_saved_theme(), 0);
+
+    ui.set_screen(3);
+    settle();
+    for key in [Key::DownArrow, Key::RightArrow, Key::UpArrow, Key::Return] {
+        ui.window().dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+        ui.window()
+            .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+        settle();
+    }
+    assert_eq!(saved.get(), Some(1));
+    assert_eq!(ui.get_saved_theme(), 1);
+    assert_eq!(ui.global::<Theme>().get_selection(), 1);
+
+    ui.set_screen(1);
+    settle();
+    tap("Host settings");
+    tap("Theme");
+    tap("Frosted Glass");
+    tap("Save");
+    assert_eq!(ui.get_screen(), 1);
+    assert_eq!(ui.get_saved_theme(), 4);
+    assert_eq!(ui.global::<Theme>().get_selection(), 4);
+}
+
+#[test]
+fn theme_picker_imports_and_loading_screen_is_previewed_before_saving() {
+    use slint::platform::PointerEventButton;
+    use slint::{Model, ModelRc, SharedString, VecModel};
+    use std::{cell::Cell, rc::Rc, time::Duration};
+
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_starting(false);
+    ui.show().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(432.0, 880.0));
+    let mut menu: Vec<SharedString> = ui.get_theme_names().iter().collect();
+    menu.push("Load Theme Pack from File".into());
+    ui.set_theme_menu(ModelRc::new(VecModel::from(menu)));
+    let import = Rc::new(Cell::new(None));
+    let called = import.clone();
+    ui.on_import_theme(move |session| called.set(Some(session)));
+    ui.on_save_theme(|index, _| index);
+    let settle = || {
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(400));
+        slint::platform::update_timers_and_animations();
+    };
+    let tap = |label: &str| {
+        ElementHandle::find_by_accessible_label(&ui, label)
+            .next()
+            .unwrap_or_else(|| panic!("missing {label}"))
+            .mock_single_click(PointerEventButton::Left);
+        settle();
+    };
+    ui.set_screen(3);
+    settle();
+    tap("Theme");
+    tap("Load Theme Pack from File");
+    assert_eq!(import.get(), Some(ui.get_appearance_session()));
+    assert_eq!(ui.get_saved_theme(), 0);
+
+    tap("Animation");
+    tap("Pulse");
+    tap("Preview loading screen");
+    assert_eq!(ui.get_saved_launch_style(), 0);
+    tap("Cancel launch");
+    tap("Back");
+    assert_eq!(ui.get_saved_launch_style(), 0);
+
+    ui.set_screen(3);
+    settle();
+    tap("Animation");
+    tap("Orbit");
+    tap("Save");
+    assert_eq!(ui.get_saved_launch_style(), 2);
 }
 
 #[test]

@@ -4,7 +4,7 @@
 // control reports back through `entered` so Tab and the mouse keep it in
 // step. `refocus` (bumped by the window when a dialog closes) resets it.
 
-import { Theme, Nav, Icon, Focusable, Page, ActionButton, IconButton, Chip, Loader, TextField, Modal, DialogTitle, DialogText } from "theme.slint";
+import { Theme, Nav, Icon, Focusable, Page, ActionButton, IconButton, Chip, Loader, TextField, Modal, DialogTitle, DialogText, ThemeHeading, VoltageTrace } from "theme.slint";
 import { Group, SwitchRow, ChoiceRow, SliderRow, ActionRow, InfoRow, FieldRow, ProfileRow, OptionSheet, TopBar, EmptyState } from "controls.slint";
 
 export struct HostCard {
@@ -59,9 +59,12 @@ component HostTile inherits Focusable {
     accessible-label: root.host.name;
     context-actions: true;
     border-radius: Theme.radius;
-    background: root.pressed ? Theme.border : (root.focused || root.hovered ? Theme.card-hover : Theme.card);
+    background: root.pressed && !Theme.electric-effects && !Theme.frost-effects ? Theme.border
+        : root.pressed || root.focused || root.hovered ? Theme.card-hover : Theme.panel-face;
     border-width: root.focused ? 2px : 1px;
-    border-color: root.focused ? Theme.accent : (root.ready ? Theme.accent.transparentize(0.72) : Theme.border.transparentize(0.3));
+    border-color: root.focused ? Theme.accent
+        : (Theme.frost-effects || Theme.electric-effects || Theme.rainbow-effects) ? Theme.panel-edge
+        : root.ready ? Theme.accent.transparentize(0.72) : Theme.border.transparentize(0.3);
     // The glow's texture comes from the background and border, so those
     // change at once; the card's motion is the lift.
     drop-shadow-blur: 26px;
@@ -69,6 +72,8 @@ component HostTile inherits Focusable {
     z: root.focused ? 1 : 0;
     transform-scale: root.pressed ? 0.98 : (root.focused ? 1.03 : 1);
     animate transform-scale { duration: 240ms; easing: ease-out-back; }
+
+    if Theme.electric-effects && Theme.effects-motion && (root.focused || root.hovered): VoltageTrace { }
 
     VerticalLayout {
         padding: Theme.compact ? 16px : 18px;
@@ -283,6 +288,7 @@ export component HostsPage inherits Page {
 
     // The hearth: a warm glow behind the name.
     Rectangle {
+        visible: !Theme.rainbow-effects;
         x: -280px;
         y: -340px;
         width: 820px;
@@ -313,11 +319,9 @@ export component HostsPage inherits Page {
                 VerticalLayout {
                     alignment: center;
                     spacing: 2px;
-                    Text {
-                        text: "Hestia";
-                        color: Theme.text;
-                        font-size: Theme.display-size;
-                        font-weight: 700;
+                    ThemeHeading {
+                        label: "Hestia";
+                        text-size: Theme.display-size;
                     }
                     HorizontalLayout {
                         spacing: 8px;
@@ -529,8 +533,9 @@ component AppTile inherits Focusable {
 
     accessible-role: button;
     accessible-label: root.app.title;
-    border-radius: 14px;
-    background: Theme.card;
+    border-radius: root.tile-radius;
+    property <length> tile-radius: Theme.electric-effects ? Theme.radius : 14px;
+    background: Theme.panel-face;
     drop-shadow-blur: 30px;
     drop-shadow-color: root.focused ? Theme.glow : transparent;
     // The focused poster comes forward, above its neighbours; a press gives.
@@ -539,7 +544,7 @@ component AppTile inherits Focusable {
     animate transform-scale { duration: 260ms; easing: ease-out-back; }
 
     Rectangle {
-        border-radius: 14px;
+        border-radius: root.tile-radius;
         clip: true;
 
         // Box art fades in when it arrives (an image has no children, so its
@@ -643,10 +648,15 @@ component AppTile inherits Focusable {
 
     // The frame, drawn over the picture.
     Rectangle {
-        border-radius: 14px;
+        border-radius: root.tile-radius;
         border-width: root.focused ? 3px : (root.app.running ? 2px : 1px);
-        border-color: root.focused ? Theme.accent : (root.app.running ? Theme.accent.transparentize(0.25) : (root.hovered ? Theme.faint : #ffffff14));
+        border-color: root.focused ? Theme.accent
+            : (Theme.frost-effects || Theme.electric-effects || Theme.rainbow-effects) ? Theme.panel-edge
+            : root.app.running ? Theme.accent.transparentize(0.25) : root.hovered ? Theme.faint : #ffffff14;
         animate border-color { duration: 120ms; }
+    }
+    if Theme.electric-effects && Theme.effects-motion && root.lit: VoltageTrace {
+        corner-radius: root.tile-radius;
     }
 }
 
@@ -1435,6 +1445,13 @@ export component SettingsPage inherits Page {
     in-out property <bool> hardware-decoding;
     in-out property <bool> gpu-video;
     in-out property <bool> direct-video;
+    in-out property <int> theme;
+    in property <[string]> theme-names;
+    in property <[string]> theme-menu;
+    in property <string> theme-import-message;
+    callback import-theme();
+    in-out property <int> launch-style;
+    in property <bool> theme-save-failed;
     in-out property <bool> allow-tearing;
     in-out property <int> frame-pacing;
     in-out property <bool> show-video-through-loss;
@@ -1482,18 +1499,24 @@ export component SettingsPage inherits Page {
     property <[string]> pacing-names: ["Prefer lowest latency", "Balanced"];
     property <[string]> orientation-names: ["Landscape", "Portrait", "Follow the device"];
     property <[string]> speaker-names: ["Stereo", "5.1 surround", "7.1 surround"];
+    property <[string]> launch-styles: ["Flame", "Pulse", "Orbit", "Still"];
+    property <int> theme-row: 36;
+    property <int> launch-row: 37;
+    property <int> preview-row: 38;
+    property <int> controller-tester-row: 39;
     property <string> custom-text;
     property <string> profile-text;
 
     // Focus: the header's Back (-2) and Save (-3), then the rows in page
-    // order: 0…3, Frame pacing (35), 4, Metered bitrate (24), 5…7, Direct
-    // video (19), 8, Allow tearing (34), Video through losses (28), 9…18,
+    // order: Theme (36), loading screen (37, 38), 0…3, Frame pacing (35), 4,
+    // Metered bitrate (24), 5…7, Direct video (19), 8, Allow tearing (34),
+    // Video through losses (28), 9…18,
     // saved profiles (100…), keyboard shortcuts (25…27), 20…23, then
-    // Debug (29…33) once unlocked.
+    // Debug (31…33, then 39 on Android) once unlocked.
     property <int> nav: -1;
     focus-first => {
         if (root.nav == -1) {
-            root.nav = 0;
+            root.nav = root.theme-row;
         }
     }
     in property <int> refocus;
@@ -1511,9 +1534,9 @@ export component SettingsPage inherits Page {
     property <int> profile-count: root.profile-names.length;
     // The shortcut rows, shown with a physical keyboard only.
     property <int> shortcut-count: root.physical-keyboard ? 3 : 0;
-    property <int> debug-count: root.debug-options ? (root.android ? 6 : 5) : 0;
+    property <int> debug-count: root.debug-options ? (root.android ? 4 : 3) : 0;
     changed debug-options => {
-        if (!root.debug-options && ((root.nav >= 29 && root.nav <= 33) || root.nav == 36)) {
+        if (!root.debug-options && ((root.nav >= 31 && root.nav <= 33) || root.nav == root.controller-tester-row)) {
             root.nav = 23;
         }
     }
@@ -1521,7 +1544,7 @@ export component SettingsPage inherits Page {
     changed previewing => {
         if (!root.previewing) {
             if (Nav.keyboard) {
-                root.nav = 29;
+                root.nav = root.preview-row;
             } else {
                 home-scope.focus();
             }
@@ -1539,8 +1562,8 @@ export component SettingsPage inherits Page {
     pure function pos(i: int) -> int {
         return i < 19 ? i
             : i >= 100 ? 19 + (i - 100)
-            : i == 36 ? 28 + root.profile-count + root.shortcut-count
-            : i >= 29 ? 23 + root.profile-count + root.shortcut-count + (i - 29)
+            : i == root.controller-tester-row ? 26 + root.profile-count + root.shortcut-count
+            : i >= 31 ? 23 + root.profile-count + root.shortcut-count + (i - 31)
             : i >= 25 ? 19 + root.profile-count + (i - 25)
             : 19 + root.profile-count + root.shortcut-count + (i - 20);
     }
@@ -1549,14 +1572,18 @@ export component SettingsPage inherits Page {
             : p < 19 + root.profile-count ? 100 + (p - 19)
             : p < 19 + root.profile-count + root.shortcut-count ? 25 + (p - 19 - root.profile-count)
             : p < 23 + root.profile-count + root.shortcut-count ? 20 + (p - 19 - root.profile-count - root.shortcut-count)
-            : p == 28 + root.profile-count + root.shortcut-count ? 36
-            : 29 + (p - 23 - root.profile-count - root.shortcut-count);
+            : p == 26 + root.profile-count + root.shortcut-count ? root.controller-tester-row
+            : 31 + (p - 23 - root.profile-count - root.shortcut-count);
     }
     pure function valid(i: int) -> bool {
         return (i != 8 || root.mediacodec || root.gpu-conversion) && (i != 10 || root.android)
             && (i != 18 || root.host-name != "");
     }
     pure function step(from: int, dir: int) -> int {
+        if (from == root.theme-row) { return dir > 0 ? root.launch-row : root.theme-row; }
+        if (from == root.launch-row) { return dir > 0 ? root.preview-row : root.theme-row; }
+        if (from == root.preview-row) { return dir > 0 ? 0 : root.launch-row; }
+        if (from == 0 && dir < 0) { return root.preview-row; }
         if (from == 35) { return dir > 0 ? 4 : 3; }
         if (root.android && ((from == 3 && dir > 0) || (from == 4 && dir < 0))) { return 35; }
         if (from == 24) { return dir > 0 ? 5 : 4; }
@@ -1589,7 +1616,7 @@ export component SettingsPage inherits Page {
             } else if (key == Key.LeftArrow && from == -3) {
                 root.nav = -2;
             } else if (key == Key.DownArrow) {
-                root.nav = 0;
+                root.nav = root.theme-row;
             } else {
                 return false;
             }
@@ -1625,6 +1652,14 @@ export component SettingsPage inherits Page {
             root.audio = i;
         } else if (id == 35) {
             root.frame-pacing = i;
+        } else if (id == root.theme-row) {
+            if (i == root.theme-names.length) {
+                root.import-theme();
+            } else {
+                root.theme = i;
+            }
+        } else if (id == root.launch-row) {
+            root.launch-style = i;
         }
     }
 
@@ -1636,7 +1671,7 @@ export component SettingsPage inherits Page {
         }
         key-pressed(event) => {
             if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
-                root.nav = 0;
+                root.nav = root.theme-row;
                 return accept;
             }
             return reject;
@@ -1689,6 +1724,62 @@ export component SettingsPage inherits Page {
                     padding-top: 6px;
                     padding-bottom: 40px;
                     spacing: 24px;
+
+                    Group {
+                        title: "Appearance";
+                        ChoiceRow {
+                            label: "Theme";
+                            value-min-width: 108px;
+                            hint: root.theme-save-failed ? "Could not save the theme. Try again." : "Save to apply the preview on this device";
+                            options: root.theme-names;
+                            index <=> root.theme;
+                            want-focus: root.at(root.theme-row);
+                            nav(k) => {
+                                return root.move(root.theme-row, k);
+                            }
+                            entered => {
+                                root.nav = root.theme-row;
+                            }
+                            open => {
+                                root.sheet = root.theme-row;
+                            }
+                        }
+                        if root.theme-import-message != "": Rectangle {
+                            height: note.preferred-height + 12px;
+                            note := Text {
+                                x: 16px;
+                                width: parent.width - 32px;
+                                text: root.theme-import-message;
+                                color: Theme.muted;
+                                font-size: Theme.caption-size;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    Group {
+                        title: "Loading screen";
+                        ChoiceRow {
+                            label: "Animation";
+                            options: root.launch-styles;
+                            index <=> root.launch-style;
+                            want-focus: root.at(root.launch-row);
+                            nav(k) => { return root.move(root.launch-row, k); }
+                            entered => { root.nav = root.launch-row; }
+                            open => { root.sheet = root.launch-row; }
+                        }
+                        ActionRow {
+                            label: "Preview loading screen";
+                            icon: "play";
+                            want-focus: root.at(root.preview-row);
+                            nav(k) => { return root.move(root.preview-row, k); }
+                            entered => { root.nav = root.preview-row; }
+                            clicked => {
+                                root.nav = -1;
+                                root.preview-launch();
+                            }
+                        }
+                    }
 
                     Group {
                         title: "Stream quality";
@@ -2223,39 +2314,6 @@ export component SettingsPage inherits Page {
 
                     if root.debug-options: Group {
                         title: "Debug";
-                        ActionRow {
-                            label: "Launch screen preview";
-                            hint: "The launch animation with no stream behind it, until Back";
-                            icon: "play";
-                            want-focus: root.at(29);
-                            nav(k) => {
-                                return root.move(29, k);
-                            }
-                            entered => {
-                                root.nav = 29;
-                            }
-                            clicked => {
-                                // Off the row while the preview holds the
-                                // focus, so coming back focuses it again.
-                                root.nav = -1;
-                                root.preview-launch();
-                            }
-                        }
-                        SwitchRow {
-                            label: "Launch animation";
-                            hint: "Off holds the launch screen still, until the app restarts";
-                            checked: Theme.launch-motion;
-                            want-focus: root.at(30);
-                            nav(k) => {
-                                return root.move(30, k);
-                            }
-                            entered => {
-                                root.nav = 30;
-                            }
-                            toggled(on) => {
-                                Theme.launch-motion = on;
-                            }
-                        }
                         SwitchRow {
                             label: "Verbose log";
                             hint: "Debug lines from every library in the app log and stream reports";
@@ -2319,7 +2377,6 @@ export component SettingsPage inherits Page {
                                 root.nav = 33;
                             }
                             clicked => {
-                                Theme.launch-motion = true;
                                 root.debug-hide();
                             }
                         }
@@ -2327,9 +2384,9 @@ export component SettingsPage inherits Page {
                             label: "Controller tester";
                             hint: "Identify connected gamepads and inspect raw and mapped inputs offline";
                             icon: "gamepad";
-                            want-focus: root.at(36);
-                            nav(k) => { return root.move(36, k); }
-                            entered => { root.nav = 36; }
+                            want-focus: root.at(root.controller-tester-row);
+                            nav(k) => { return root.move(root.controller-tester-row, k); }
+                            entered => { root.nav = root.controller-tester-row; }
                             clicked => { root.open-controller-tester(); }
                         }
                     }
@@ -2341,11 +2398,14 @@ export component SettingsPage inherits Page {
     if root.sheet >= 0: OptionSheet {
         width: 100%;
         height: 100%;
-        title: root.sheet == 0 ? "Preset" : root.sheet == 1 ? "Resolution" : root.sheet == 3 ? "Frame rate"
+        title: root.sheet == root.theme-row ? "Theme" : root.sheet == root.launch-row ? "Loading screen animation"
+            : root.sheet == 0 ? "Preset" : root.sheet == 1 ? "Resolution" : root.sheet == 3 ? "Frame rate"
             : root.sheet == 5 ? "Codec" : root.sheet == 9 ? "Picture" : root.sheet == 10 ? "Orientation" : root.sheet == 35 ? "Video frame pacing" : "Speakers";
-        options: root.sheet == 0 ? root.preset-names : root.sheet == 1 ? root.resolution-options : root.sheet == 3 ? root.fps-options
+        options: root.sheet == root.theme-row ? root.theme-menu : root.sheet == root.launch-row ? root.launch-styles
+            : root.sheet == 0 ? root.preset-names : root.sheet == 1 ? root.resolution-options : root.sheet == 3 ? root.fps-options
             : root.sheet == 5 ? root.codec-names : root.sheet == 9 ? root.scale-names : root.sheet == 10 ? root.orientation-names : root.sheet == 35 ? root.pacing-names : root.speaker-names;
-        current: root.sheet == 0 ? root.preset : root.sheet == 1 ? root.resolution : root.sheet == 3 ? root.fps
+        current: root.sheet == root.theme-row ? root.theme : root.sheet == root.launch-row ? root.launch-style
+            : root.sheet == 0 ? root.preset : root.sheet == 1 ? root.resolution : root.sheet == 3 ? root.fps
             : root.sheet == 5 ? root.codec : root.sheet == 9 ? root.video-scale : root.sheet == 10 ? root.orientation : root.sheet == 35 ? root.frame-pacing : root.audio;
         picked(i) => {
             root.choose(root.sheet, i);
