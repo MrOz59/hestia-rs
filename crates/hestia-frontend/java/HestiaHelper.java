@@ -88,12 +88,24 @@ public final class HestiaHelper {
             out.append(String.format(java.util.Locale.ROOT,
                 "ID %d: %s | %s | VID:PID %04x:%04x | sources 0x%08x\n",
                 id, device.getName(), family, vendor, product, device.getSources()));
+            if (Build.VERSION.SDK_INT >= 29) {
+                out.append("  external: ").append(device.isExternal()).append('\n');
+            }
+            int[] keys = {19, 20, 21, 22, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105,
+                          106, 107, 108, 109, 110, 188, 189, 190, 191, 192, 193, 194, 195,
+                          196, 197, 198, 199, 200, 201, 202, 203};
+            boolean[] present = device.hasKeys(keys);
+            out.append("  supported keys:");
+            for (int i = 0; i < keys.length; i++) {
+                if (present[i]) out.append(' ').append(android.view.KeyEvent.keyCodeToString(keys[i]));
+            }
+            out.append('\n');
             for (InputDevice.MotionRange range : device.getMotionRanges()) {
                 if ((range.getSource() & InputDevice.SOURCE_JOYSTICK) != InputDevice.SOURCE_JOYSTICK) continue;
                 out.append(String.format(java.util.Locale.ROOT,
-                    "  %s min %.3f max %.3f flat %.3f\n",
+                    "  %s min %.3f max %.3f flat %.3f fuzz %.3f resolution %.3f\n",
                     android.view.MotionEvent.axisToString(range.getAxis()),
-                    range.getMin(), range.getMax(), range.getFlat()));
+                    range.getMin(), range.getMax(), range.getFlat(), range.getFuzz(), range.getResolution()));
             }
         }
         return out.length() == 0 ? "No game controllers detected." : out.toString();

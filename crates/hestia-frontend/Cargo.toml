@@ -34,6 +34,8 @@ hestia-media = { workspace = true, features = ["audio"] }
 libc = "0.2"
 
 [target.'cfg(target_os = "android")'.dependencies]
+# Monotonic timestamps for Android input diagnostics.
+libc = "0.2"
 # Share sheet, keyboard, codec discovery and network routing go through the
 # app's Java helper (same jni version as Slint's Android backend).
 jni = "0.21"

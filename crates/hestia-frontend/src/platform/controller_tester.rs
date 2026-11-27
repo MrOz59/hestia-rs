@@ -9,6 +9,8 @@ use crate::gamepad::{self, Axes, Control, Controllers};
 
 const MAX_HISTORY: usize = 160;
 const MAX_DEVICES: usize = 8;
+const METRIC_WINDOW: usize = 512;
+const NS_PER_MS: f64 = 1_000_000.0;
 const AXIS_NAMES: [&str; 12] = [
     "X", "Y", "Z", "RZ", "RX", "RY", "LTRIGGER", "RTRIGGER", "BRAKE", "GAS", "HAT_X", "HAT_Y",
 ];
@@ -19,13 +21,108 @@ fn axis_values(a: Axes) -> [f32; 12] {
     ]
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
+struct Window {
+    values: VecDeque<u64>,
+}
+
+impl Window {
+    fn push(&mut self, value: u64) {
+        if self.values.len() == METRIC_WINDOW {
+            self.values.pop_front();
+        }
+        self.values.push_back(value);
+    }
+
+    fn summary(&self) -> String {
+        if self.values.is_empty() {
+            return "n/a".into();
+        }
+        let mut values: Vec<_> = self.values.iter().copied().collect();
+        values.sort_unstable();
+        let mean = values.iter().map(|&v| v as f64).sum::<f64>() / values.len() as f64;
+        let p95 = values[(values.len() * 95).div_ceil(100) - 1];
+        let max = values[values.len() - 1];
+        format!(
+            "mean {:.3} ms | P95 {:.3} ms | max {:.3} ms (n={})",
+            mean / NS_PER_MS,
+            p95 as f64 / NS_PER_MS,
+            max as f64 / NS_PER_MS,
+            values.len()
+        )
+    }
+
+    fn rate(&self) -> Option<f64> {
+        if self.values.is_empty() {
+            return None;
+        }
+        let mean = self.values.iter().map(|&v| v as f64).sum::<f64>() / self.values.len() as f64;
+        (mean > 0.0).then_some(1_000_000_000.0 / mean)
+    }
+}
+
+#[derive(Clone, Default)]
+struct Timing {
+    age: Window,
+    intervals: Window,
+    processing: Window,
+    last_event: Option<i64>,
+    historical: u64,
+    invalid_times: u64,
+    duplicates_or_reordered: u64,
+}
+
+impl Timing {
+    fn record(&mut self, event_ns: i64, arrival_ns: i64, historical: bool, interval: bool) {
+        self.historical += u64::from(historical);
+        if event_ns <= 0 || arrival_ns < event_ns {
+            self.invalid_times += 1;
+            return;
+        }
+        self.age.push((arrival_ns - event_ns) as u64);
+        if interval {
+            if let Some(last) = self.last_event {
+                if event_ns <= last {
+                    self.duplicates_or_reordered += 1;
+                    return;
+                }
+                // Long gaps are usually idle time, not a controller report interval.
+                let delta = (event_ns - last) as u64;
+                if delta <= 250_000_000 {
+                    self.intervals.push(delta);
+                }
+            }
+            self.last_event = Some(event_ns);
+        }
+    }
+
+    fn report(&self, out: &mut String, label: &str, intervals: bool) {
+        let _ = writeln!(out, "  {label} Android event age: {}", self.age.summary());
+        let _ = writeln!(out, "  {label} diagnostic processing: {}", self.processing.summary());
+        if intervals {
+            let rate = self.intervals.rate().map_or_else(|| "n/a".into(), |hz| format!("{hz:.1} Hz"));
+            let _ = writeln!(out, "  {label} observed motion rate: {rate}");
+            let _ = writeln!(out, "  {label} intervals: {}", self.intervals.summary());
+            let _ = writeln!(
+                out,
+                "  {label} historical: {} | equal/out-of-order timestamps: {}",
+                self.historical, self.duplicates_or_reordered
+            );
+        }
+        if self.invalid_times > 0 {
+            let _ = writeln!(out, "  {label} invalid timestamps: {}", self.invalid_times);
+        }
+    }
+}
+
+#[derive(Clone, Default)]
 struct Sample {
     mapped: GamepadState,
     axes: Option<([f32; 12], [f32; 12], [f32; 12])>,
     motion_count: u64,
     last_motion_source: u32,
     last_motion_action: u32,
+    timing: [Timing; 4],
 }
 
 #[derive(Default)]
@@ -129,6 +226,37 @@ impl Tester {
         }
     }
 
+    // The sample source is independent from the GameStream preview. Historical
+    // data contributes to raw extrema and timing, not the current mapper state.
+    fn historical_motion(&mut self, id: i32, axes: Axes) {
+        let Some(sample) = self.remember(id, None) else {
+            return;
+        };
+        let values = axis_values(axes);
+        let (_, min, max) = sample.axes.get_or_insert((values, values, values));
+        for i in 0..values.len() {
+            min[i] = min[i].min(values[i]);
+            max[i] = max[i].max(values[i]);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn timing(
+        &mut self,
+        id: i32,
+        lane: usize,
+        event_ns: i64,
+        arrival_ns: i64,
+        historical: bool,
+        processing_ns: u64,
+    ) {
+        if let Some(sample) = self.remember(id, None) {
+            let timing = &mut sample.timing[lane];
+            timing.record(event_ns, arrival_ns, historical, lane % 2 == 1);
+            timing.processing.push(processing_ns);
+        }
+    }
+
     fn report(&self, devices: &str) -> String {
         let mut out = String::from("Hestia controller tester — current mapping (no corrections)\n\n");
         for line in devices.lines().filter(|line| !line.starts_with("  ")) {
@@ -153,6 +281,15 @@ impl Tester {
                 "  LS {:?}  RS {:?}  LT {}  RT {}",
                 s.left_stick, s.right_stick, s.left_trigger, s.right_trigger
             );
+            for (lane, label) in ["Activity key", "Activity motion", "Native key", "Native motion"]
+                .into_iter()
+                .enumerate()
+            {
+                let timing = &sample.timing[lane];
+                if !timing.age.values.is_empty() || timing.invalid_times > 0 {
+                    timing.report(&mut out, label, lane % 2 == 1);
+                }
+            }
             if let Some((current, min, max)) = &sample.axes {
                 let _ = writeln!(
                     out,
@@ -186,7 +323,7 @@ mod android {
 
     use android_activity::input::{InputEvent, KeyAction, MotionAction};
     use jni::objects::JObject;
-    use jni::sys::{jboolean, jfloat, jint};
+    use jni::sys::{jboolean, jfloat, jint, jlong};
     use jni::{JNIEnv, NativeMethod};
 
     use super::*;
@@ -197,6 +334,7 @@ mod android {
         motions: u64,
         captured_keys: u64,
         captured_motions: u64,
+        historical: u64,
     }
 
     #[derive(Default)]
@@ -205,6 +343,7 @@ mod android {
         devices: String,
         last_inventory: Option<Instant>,
         activity_status: String,
+        dispatch_status: String,
         activity: Counts,
         native: Counts,
     }
@@ -241,12 +380,12 @@ mod android {
                 let methods = [
                     NativeMethod {
                         name: "nativeControllerTesterKey".into(),
-                        sig: "(IIIIIZZ)Z".into(),
+                        sig: "(IIIIIZZJJ)Z".into(),
                         fn_ptr: activity_key as *mut std::ffi::c_void,
                     },
                     NativeMethod {
                         name: "nativeControllerTesterMotion".into(),
-                        sig: "(IIIZFFFFFFFFFFFF)Z".into(),
+                        sig: "(IIIZZJJFFFFFFFFFFFF)Z".into(),
                         fn_ptr: activity_motion as *mut std::ffi::c_void,
                     },
                 ];
@@ -263,6 +402,39 @@ mod android {
         })
     }
 
+    fn monotonic_ns() -> i64 {
+        let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: clock_gettime writes to a valid timespec; CLOCK_MONOTONIC
+        // is the uptime time base used by Android input timestamps.
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+            return 0;
+        }
+        ts.tv_sec as i64 * 1_000_000_000 + ts.tv_nsec as i64
+    }
+
+    fn elapsed_ns(start: Instant) -> u64 {
+        start.elapsed().as_nanos().min(u64::MAX as u128) as u64
+    }
+
+    fn dispatch_status() -> String {
+        use jni::objects::JString;
+        let mut status = String::new();
+        let result = super::super::android::with_activity(|env, activity| {
+            let value = env
+                .call_method(activity, "controllerTesterDispatchStatus", "()Ljava/lang/String;", &[])?
+                .l()?;
+            let value = JString::from(value);
+            status = env.get_string(&value)?.into();
+            env.delete_local_ref(value)?;
+            Ok(())
+        });
+        if result.is_err() {
+            "unavailable".into()
+        } else {
+            status
+        }
+    }
+
     fn is_gamepad_key(code: u32, scan: i32) -> bool {
         (96..=110).contains(&code) || (188..=203).contains(&code) || (0x130..=0x13f).contains(&scan)
     }
@@ -277,7 +449,10 @@ mod android {
         action: jint,
         repeat: jboolean,
         candidate: jboolean,
+        event_ms: jlong,
+        arrival_ms: jlong,
     ) -> jboolean {
+        let start = Instant::now();
         if super::super::gamepads::streaming() {
             return 0;
         }
@@ -288,7 +463,9 @@ mod android {
             return 0;
         }
         s.activity.captured_keys += 1;
-        s.tester.key(id, source as u32, scan, code as u32, action == 0, repeat != 0);
+        s.tester
+            .key(id, source as u32, scan, code as u32, action == 0, repeat != 0);
+        s.tester.timing(id, 0, event_ms * 1_000_000, arrival_ms * 1_000_000, false, elapsed_ns(start));
         1
     }
 
@@ -300,6 +477,9 @@ mod android {
         source: jint,
         action: jint,
         candidate: jboolean,
+        historical: jboolean,
+        event_ms: jlong,
+        arrival_ms: jlong,
         x: jfloat,
         y: jfloat,
         z: jfloat,
@@ -313,16 +493,18 @@ mod android {
         hat_x: jfloat,
         hat_y: jfloat,
     ) -> jboolean {
+        let start = Instant::now();
         if super::super::gamepads::streaming() {
             return 0;
         }
         let mut guard = session();
         let Some(s) = guard.as_mut() else { return 0 };
-        s.activity.motions += 1;
+        if historical == 0 {
+            s.activity.motions += 1;
+        }
         if candidate == 0 || action != 2 {
             return 0;
         }
-        s.activity.captured_motions += 1;
         let axes = Axes {
             x,
             y,
@@ -337,7 +519,21 @@ mod android {
             hat_x,
             hat_y,
         };
-        s.tester.motion(id, source as u32, action as u32, axes);
+        if historical != 0 {
+            s.activity.historical += 1;
+            s.tester.historical_motion(id, axes);
+        } else {
+            s.activity.captured_motions += 1;
+            s.tester.motion(id, source as u32, action as u32, axes);
+        }
+        s.tester.timing(
+            id,
+            1,
+            event_ms * 1_000_000,
+            arrival_ms * 1_000_000,
+            historical != 0,
+            elapsed_ns(start),
+        );
         1
     }
 
@@ -379,24 +575,34 @@ mod android {
         });
         // Do not hold the state lock across JNI.
         let devices = refresh.then(inventory);
+        let dispatch = refresh.then(dispatch_status);
         let mut guard = session();
         let Some(s) = guard.as_mut() else { return String::new() };
         if let Some(devices) = devices {
             s.devices = devices;
             s.last_inventory = Some(Instant::now());
         }
-        let mut out = format!("Capture: Android Activity {}\n", s.activity_status);
+        if let Some(dispatch) = dispatch {
+            s.dispatch_status = dispatch;
+        }
+        let mut out = format!(
+            "Capture: Android Activity {}\nUnbuffered dispatch: {}\n",
+            s.activity_status, s.dispatch_status
+        );
+        out.push_str(concat!(
+            "Timing: Android event to callback (not physical Bluetooth latency). ",
+            "Activity timestamps: milliseconds; native: nanoseconds. ",
+            "Motion rate uses recent non-idle timestamp intervals, not HID polling rate.\n"
+        ));
         for (name, c) in [("Activity", &s.activity), ("Native queue", &s.native)] {
             let _ = writeln!(
                 out,
-                "{name}: keys {} (captured {}), motions {} (captured {})",
-                c.keys, c.captured_keys, c.motions, c.captured_motions
+                "{name}: keys {} (captured {}), motions {} (captured {}), historical samples {}",
+                c.keys, c.captured_keys, c.motions, c.captured_motions, c.historical
             );
         }
-        let captured = s.activity.captured_keys
-            + s.activity.captured_motions
-            + s.native.captured_keys
-            + s.native.captured_motions;
+        let captured =
+            s.activity.captured_keys + s.activity.captured_motions + s.native.captured_keys + s.native.captured_motions;
         if captured == 0 {
             out.push_str(concat!(
                 "No gamepad events captured. If these counters stay zero while using the controller, ",
@@ -415,6 +621,8 @@ mod android {
         }
         match event {
             InputEvent::KeyEvent(key) => {
+                let start = Instant::now();
+                let arrival = monotonic_ns();
                 let source = u32::from(key.source());
                 let code = u32::from(key.key_code());
                 let id = key.device_id();
@@ -435,10 +643,13 @@ mod android {
                 s.native.captured_keys += 1;
                 s.tester
                     .key(id, source, key.scan_code(), code, pressed, key.repeat_count() > 0);
+                s.tester.timing(id, 2, key.event_time(), arrival, false, elapsed_ns(start));
                 // Even unknown controller buttons must not navigate the settings.
                 true
             }
             InputEvent::MotionEvent(motion) => {
+                let start = Instant::now();
+                let arrival = monotonic_ns();
                 let source = u32::from(motion.source());
                 let candidate = source & gamepad::SOURCE_JOYSTICK == gamepad::SOURCE_JOYSTICK;
                 let mut guard = session();
@@ -448,12 +659,37 @@ mod android {
                     return false;
                 }
                 s.native.captured_motions += 1;
+                let id = motion.device_id();
+                let pointer = motion.pointer_at_index(0);
+                for historical in pointer.history() {
+                    use android_activity::input::Axis;
+                    let start = Instant::now();
+                    let axes = Axes {
+                        x: historical.axis_value(Axis::X),
+                        y: historical.axis_value(Axis::Y),
+                        z: historical.axis_value(Axis::Z),
+                        rz: historical.axis_value(Axis::Rz),
+                        rx: historical.axis_value(Axis::Rx),
+                        ry: historical.axis_value(Axis::Ry),
+                        ltrigger: historical.axis_value(Axis::Ltrigger),
+                        rtrigger: historical.axis_value(Axis::Rtrigger),
+                        brake: historical.axis_value(Axis::Brake),
+                        gas: historical.axis_value(Axis::Gas),
+                        hat_x: historical.axis_value(Axis::HatX),
+                        hat_y: historical.axis_value(Axis::HatY),
+                    };
+                    s.native.historical += 1;
+                    s.tester.historical_motion(id, axes);
+                    s.tester
+                        .timing(id, 3, historical.event_time(), arrival, true, elapsed_ns(start));
+                }
                 s.tester.motion(
                     motion.device_id(),
                     source,
                     2,
                     super::super::gamepads::android_axes(motion),
                 );
+                s.tester.timing(id, 3, motion.event_time(), arrival, false, elapsed_ns(start));
                 true
             }
             _ => false,
@@ -471,6 +707,41 @@ pub(super) fn capture(event: &android_activity::input::InputEvent<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timing_uses_bounded_windows_and_excludes_idle_and_reordered_intervals() {
+        let mut timing = Timing::default();
+        timing.record(1_000_000, 3_000_000, true, true);
+        timing.record(5_000_000, 6_000_000, false, true);
+        timing.record(5_000_000, 7_000_000, false, true);
+        timing.record(400_000_000, 401_000_000, false, true);
+        timing.record(404_000_000, 405_000_000, false, true);
+        timing.record(500_000_000, 499_000_000, false, true);
+        assert_eq!(timing.intervals.rate(), Some(250.0));
+        assert_eq!(timing.historical, 1);
+        assert_eq!(timing.invalid_times, 1);
+        assert_eq!(timing.duplicates_or_reordered, 1);
+        for i in 0..METRIC_WINDOW + 10 {
+            timing.processing.push(i as u64);
+        }
+        assert_eq!(timing.processing.values.len(), METRIC_WINDOW);
+    }
+
+    #[test]
+    fn historical_axes_keep_extrema_without_changing_current_mapping() {
+        let mut tester = Tester::default();
+        tester.historical_motion(
+            2,
+            Axes {
+                x: 1.0,
+                ..Default::default()
+            },
+        );
+        tester.motion(2, gamepad::SOURCE_JOYSTICK, 2, Axes::default());
+        let report = tester.report("");
+        assert!(report.contains("X 0.000 [0.000, 1.000]"));
+        assert_eq!(tester.samples[&2].mapped.left_stick, (0, 0));
+    }
 
     #[test]
     fn reports_raw_and_current_mapping_even_when_wrong_or_unknown() {

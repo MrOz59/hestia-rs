@@ -7,11 +7,13 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.os.Build;
+import android.os.SystemClock;
 import android.util.Log;
 import android.util.Rational;
 import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.View;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -31,14 +33,47 @@ public final class HestiaActivity extends NativeActivity {
     // queue remains a fallback for events that bypass Activity dispatch.
     private volatile boolean controllerTesterEnabled;
     private native boolean nativeControllerTesterKey(int deviceId, int source, int scanCode,
-            int keyCode, int action, boolean repeat, boolean candidate);
+            int keyCode, int action, boolean repeat, boolean candidate, long eventTimeMs, long arrivalMs);
     private native boolean nativeControllerTesterMotion(int deviceId, int source, int action,
-            boolean candidate, float x, float y, float z, float rz, float rx, float ry,
+            boolean candidate, boolean historical, long eventTimeMs, long arrivalMs,
+            float x, float y, float z, float rz, float rx, float ry,
             float lt, float rt, float brake, float gas, float hatX, float hatY);
 
     @SuppressWarnings("unused") // Called from Rust through JNI.
     private void setControllerTesterEnabled(boolean enabled) {
         controllerTesterEnabled = enabled;
+        runOnUiThread(this::updateControllerTesterDispatch);
+    }
+
+    private volatile boolean controllerTesterUnbufferedRequested;
+
+    private void updateControllerTesterDispatch() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            View decor = getWindow().getDecorView();
+            if (decor.isAttachedToWindow()) {
+                boolean enabled = controllerTesterEnabled && hasWindowFocus();
+                decor.requestUnbufferedDispatch(enabled
+                        ? InputDevice.SOURCE_CLASS_JOYSTICK | InputDevice.SOURCE_CLASS_BUTTON
+                        : InputDevice.SOURCE_CLASS_NONE);
+                controllerTesterUnbufferedRequested = enabled;
+            } else {
+                controllerTesterUnbufferedRequested = false;
+            }
+        }
+    }
+
+    @SuppressWarnings("unused") // Queried by the debug report, not on the input path.
+    private String controllerTesterDispatchStatus() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return "unsupported (Android < 11)";
+        return controllerTesterUnbufferedRequested ? "requested (effect not verified)" : "not requested";
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean focused) {
+        super.onWindowFocusChanged(focused);
+        if (controllerTesterEnabled || controllerTesterUnbufferedRequested) {
+            updateControllerTesterDispatch();
+        }
     }
 
     private static boolean hasJoystick(InputDevice device) {
@@ -49,6 +84,7 @@ public final class HestiaActivity extends NativeActivity {
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
         if (controllerTesterEnabled) {
+            long arrival = SystemClock.uptimeMillis();
             int scan = event.getScanCode();
             // Some remotes advertise GAMEPAD along with DPAD. Ordinary TV
             // navigation must remain usable; real controller keys can also
@@ -57,7 +93,8 @@ public final class HestiaActivity extends NativeActivity {
                     || KeyEvent.isGamepadButton(event.getKeyCode())
                     || (scan >= 0x130 && scan <= 0x13f);
             if (nativeControllerTesterKey(event.getDeviceId(), event.getSource(), scan,
-                    event.getKeyCode(), event.getAction(), event.getRepeatCount() > 0, candidate)) {
+                    event.getKeyCode(), event.getAction(), event.getRepeatCount() > 0, candidate,
+                    event.getEventTime(), arrival)) {
                 return true;
             }
         }
@@ -67,20 +104,45 @@ public final class HestiaActivity extends NativeActivity {
     @Override
     public boolean dispatchGenericMotionEvent(MotionEvent event) {
         if (controllerTesterEnabled) {
-            boolean candidate = hasJoystick(event.getDevice())
-                    || event.isFromSource(InputDevice.SOURCE_JOYSTICK);
-            if (nativeControllerTesterMotion(event.getDeviceId(), event.getSource(),
-                    event.getActionMasked(), candidate,
-                    event.getAxisValue(MotionEvent.AXIS_X), event.getAxisValue(MotionEvent.AXIS_Y),
-                    event.getAxisValue(MotionEvent.AXIS_Z), event.getAxisValue(MotionEvent.AXIS_RZ),
-                    event.getAxisValue(MotionEvent.AXIS_RX), event.getAxisValue(MotionEvent.AXIS_RY),
-                    event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_RTRIGGER),
-                    event.getAxisValue(MotionEvent.AXIS_BRAKE), event.getAxisValue(MotionEvent.AXIS_GAS),
-                    event.getAxisValue(MotionEvent.AXIS_HAT_X), event.getAxisValue(MotionEvent.AXIS_HAT_Y))) {
+            long arrival = SystemClock.uptimeMillis();
+            boolean candidate = event.isFromSource(InputDevice.SOURCE_JOYSTICK)
+                    || (hasJoystick(event.getDevice())
+                        && (event.getSource() & InputDevice.SOURCE_CLASS_MASK)
+                            == InputDevice.SOURCE_CLASS_JOYSTICK);
+            if (candidate && event.getActionMasked() == MotionEvent.ACTION_MOVE) {
+                for (int i = 0; i < event.getHistorySize(); i++) {
+                    controllerTesterMotionSample(event, i, arrival, true);
+                }
+            }
+            if (controllerTesterMotionSample(event, -1, arrival, candidate)) {
                 return true;
             }
         }
         return super.dispatchGenericMotionEvent(event);
+    }
+
+    private boolean controllerTesterMotionSample(MotionEvent event, int history,
+            long arrival, boolean candidate) {
+        boolean historical = history >= 0;
+        long time = historical ? event.getHistoricalEventTime(history) : event.getEventTime();
+        return nativeControllerTesterMotion(event.getDeviceId(), event.getSource(),
+                event.getActionMasked(), candidate, historical, time, arrival,
+                controllerTesterAxis(event, MotionEvent.AXIS_X, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_Y, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_Z, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_RZ, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_RX, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_RY, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_LTRIGGER, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_RTRIGGER, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_BRAKE, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_GAS, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_HAT_X, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_HAT_Y, history));
+    }
+
+    private static float controllerTesterAxis(MotionEvent event, int axis, int history) {
+        return history >= 0 ? event.getHistoricalAxisValue(axis, history) : event.getAxisValue(axis);
     }
 
     // Registered by Rust before enabling PiP.
