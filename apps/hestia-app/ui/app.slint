@@ -16,7 +16,7 @@ export component AppWindow inherits Window {
     min-height: 400px;
     // Direct video: the picture is on a surface behind the window, so the
     // window is clear wherever the UI draws nothing.
-    background: root.stream-direct-video && root.screen == 4 ? transparent : root.stream-picture-in-picture ? black : Theme.bg;
+    background: root.stream-direct-video && root.screen == 4 ? transparent : root.stream-picture-in-picture ? black : Theme.backdrop;
     default-font-family: Theme.font;
     default-font-size: Theme.body-size;
     forward-focus: keys;
@@ -25,7 +25,7 @@ export component AppWindow inherits Window {
     init => {
         Theme.window-width = self.width;
         Theme.window-height = self.height;
-        Theme.daylight = root.effective-theme == 1;
+        Theme.selection = root.effective-theme;
     }
     changed width => {
         Theme.window-width = self.width;
@@ -49,7 +49,7 @@ export component AppWindow inherits Window {
     private property <bool> theme-save-failed;
     private property <int> effective-theme: root.screen == 3 ? root.cfg-theme : root.saved-theme;
     changed effective-theme => {
-        Theme.daylight = root.effective-theme == 1;
+        Theme.selection = root.effective-theme;
     }
     callback save-theme(int) -> bool;
 
@@ -786,7 +786,6 @@ export component AppWindow inherits Window {
             direct-video <=> root.cfg-direct-video;
             allow-tearing <=> root.cfg-allow-tearing;
             frame-pacing <=> root.cfg-frame-pacing;
-            show-appearance: root.settings-return == 0;
             theme <=> root.cfg-theme;
             theme-save-failed: root.theme-save-failed;
             show-video-through-loss <=> root.cfg-show-video-through-loss;

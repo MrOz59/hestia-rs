@@ -40,27 +40,154 @@ export global Nav {
     in-out property <bool> keyboard;
 }
 
+struct ThemePalette {
+    bg: color,
+    surface: color,
+    card: color,
+    card-hover: color,
+    border: color,
+    text: color,
+    muted: color,
+    faint: color,
+    accent: color,
+    accent-hover: color,
+    accent-pressed: color,
+    on-accent: color,
+    glow: color,
+    ok: color,
+    warn: color,
+    danger: color,
+    info: color,
+    scrim: color,
+}
+
 export global Theme {
-    // Built-in palettes: Daylight and the original Hearth.
-    in-out property <bool> daylight;
-    out property <color> bg: root.daylight ? #edf2f9 : #110e0c;
-    out property <color> surface: root.daylight ? #f8fafd : #1a1613;
-    out property <color> card: root.daylight ? #ffffff : #231e1a;
-    out property <color> card-hover: root.daylight ? #e5ebf9 : #2e2823;
-    out property <color> border: root.daylight ? #bdc9df : #3b332c;
-    out property <color> text: root.daylight ? #172238 : #f5eee8;
-    out property <color> muted: root.daylight ? #44536d : #ab9f95;
-    out property <color> faint: root.daylight ? #586984 : #71675f;
-    out property <color> accent: root.daylight ? #3b4e9d : #ff7a2e;
-    out property <color> accent-hover: root.daylight ? #4359af : #ff9a57;
-    out property <color> accent-pressed: root.daylight ? #2c3b7d : #e3631d;
-    out property <color> on-accent: root.daylight ? #ffffff : #1f0c02;
-    out property <color> glow: root.daylight ? #415ab74d : #ff7a2e80;
-    out property <color> ok: root.daylight ? #176848 : #67d491;
-    out property <color> warn: root.daylight ? #795000 : #f5b43f;
-    out property <color> danger: root.daylight ? #aa2642 : #ff6868;
-    out property <color> info: root.daylight ? #254d93 : #9ec5ea;
-    out property <color> scrim: root.daylight ? #172238a8 : #0a0807c8;
+    in-out property <int> selection;
+    property <ThemePalette> palette: root.selection == 1 ? root.daylight
+        : root.selection == 2 ? root.midnight
+        : root.selection == 3 ? root.electric
+        : root.selection == 4 ? root.frosted-glass : root.hearth;
+    property <ThemePalette> hearth: {
+        bg: #110e0c,
+        surface: #1a1613,
+        card: #231e1a,
+        card-hover: #2e2823,
+        border: #3b332c,
+        text: #f5eee8,
+        muted: #ab9f95,
+        faint: #71675f,
+        accent: #ff7a2e,
+        accent-hover: #ff9a57,
+        accent-pressed: #e3631d,
+        on-accent: #1f0c02,
+        glow: #ff7a2e80,
+        ok: #67d491,
+        warn: #f5b43f,
+        danger: #ff6868,
+        info: #9ec5ea,
+        scrim: #0a0807c8,
+    };
+    property <ThemePalette> daylight: {
+        bg: #edf2f9,
+        surface: #f8fafd,
+        card: #ffffff,
+        card-hover: #e5ebf9,
+        border: #bdc9df,
+        text: #172238,
+        muted: #44536d,
+        faint: #586984,
+        accent: #3b4e9d,
+        accent-hover: #4359af,
+        accent-pressed: #2c3b7d,
+        on-accent: #ffffff,
+        glow: #415ab74d,
+        ok: #176848,
+        warn: #795000,
+        danger: #aa2642,
+        info: #254d93,
+        scrim: #172238a8,
+    };
+    property <ThemePalette> midnight: {
+        bg: #070709,
+        surface: #101015,
+        card: #17171e,
+        card-hover: #21212b,
+        border: #383846,
+        text: #f0edf7,
+        muted: #c5bfd5,
+        faint: #aba5bf,
+        accent: #c1a2ff,
+        accent-hover: #d2baff,
+        accent-pressed: #ae8be9,
+        on-accent: #21143b,
+        glow: #ac82ff66,
+        ok: #83d8a8,
+        warn: #f1bb79,
+        danger: #ff9eb5,
+        info: #9ec6fa,
+        scrim: #070709d9,
+    };
+    property <ThemePalette> electric: {
+        bg: #0a1427,
+        surface: #101e35,
+        card: #142842,
+        card-hover: #1b3958,
+        border: #38708d,
+        text: #eaf9ff,
+        muted: #becfe2,
+        faint: #a2bad5,
+        accent: #34efff,
+        accent-hover: #81f8ff,
+        accent-pressed: #08c6df,
+        on-accent: #041824,
+        glow: #34efff66,
+        ok: #82ffc9,
+        warn: #ffda70,
+        danger: #ff9bb7,
+        info: #a9d5ff,
+        scrim: #071225dd,
+    };
+    property <ThemePalette> frosted-glass: {
+        bg: #dae8f5,
+        surface: #f8fbfff0,
+        card: #ffffffc8,
+        card-hover: #e9f3ffc9,
+        border: #9eaccb,
+        text: #14263f,
+        muted: #394e6b,
+        faint: #425a76,
+        accent: #31508a,
+        accent-hover: #3c5c95,
+        accent-pressed: #273e70,
+        on-accent: #ffffff,
+        glow: #496cab55,
+        ok: #17664b,
+        warn: #765000,
+        danger: #992542,
+        info: #254d8c,
+        scrim: #192d4ab8,
+    };
+
+    out property <color> bg: root.palette.bg;
+    out property <color> surface: root.palette.surface;
+    out property <color> card: root.palette.card;
+    out property <color> card-hover: root.palette.card-hover;
+    out property <color> border: root.palette.border;
+    out property <color> text: root.palette.text;
+    out property <color> muted: root.palette.muted;
+    out property <color> faint: root.palette.faint;
+    out property <color> accent: root.palette.accent;
+    out property <color> accent-hover: root.palette.accent-hover;
+    out property <color> accent-pressed: root.palette.accent-pressed;
+    out property <color> on-accent: root.palette.on-accent;
+    out property <color> glow: root.palette.glow;
+    out property <color> ok: root.palette.ok;
+    out property <color> warn: root.palette.warn;
+    out property <color> danger: root.palette.danger;
+    out property <color> info: root.palette.info;
+    out property <color> scrim: root.palette.scrim;
+    out property <brush> backdrop: root.selection == 4
+        ? @linear-gradient(145deg, #ccdff5 0%, #f0f5fd 50%, #d8d4ee 100%) : root.bg;
     out property <string> font: "Outfit";
 
     // Session launch (session-launch.slint). Each role follows the palette
@@ -105,11 +232,20 @@ export global Theme {
 export component Icon inherits Path {
     in property <string> name;
     in property <color> tint: Theme.text;
+    // Midnight colors neutral glyphs. A control can supply its own tint.
+    pure function icon-tint() -> color {
+        if (Theme.selection != 2 || root.tint != Theme.text) { return root.tint; }
+        if (root.name == "monitor" || root.name == "refresh" || root.name == "aspect") { return #65dffa; }
+        if (root.name == "gamepad" || root.name == "play" || root.name == "download") { return #74edb0; }
+        if (root.name == "settings" || root.name == "tools" || root.name == "share") { return #cba6ff; }
+        if (root.name == "report" || root.name == "stats") { return #ff91c2; }
+        return root.tint;
+    }
     width: 22px;
     height: 22px;
     viewbox-width: 24;
     viewbox-height: 24;
-    fill: root.tint;
+    fill: root.icon-tint();
     commands: root.name == "back" ? "M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"
         : root.name == "refresh" ? "M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"
         : root.name == "add" ? "M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"
@@ -737,7 +873,7 @@ export component Page inherits Rectangle {
     Rectangle {
         // Above everything the page adds, overlays included.
         z: 1000;
-        background: Theme.bg;
+        background: Theme.backdrop;
         opacity: root.arrived ? 0 : 1;
         visible: self.opacity > 0;
         animate opacity { duration: 240ms; easing: ease-out-quad; }

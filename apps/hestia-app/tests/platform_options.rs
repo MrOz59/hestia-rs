@@ -297,12 +297,17 @@ fn appearance_previews_and_only_persists_on_save() {
 
     ui.set_screen(3);
     settle();
-    tap("Theme");
-    tap("Daylight (light)");
-    assert!(ui.global::<Theme>().get_daylight());
+    for (index, label) in ["Daylight (light)", "Midnight", "Electric", "Frosted Glass"]
+        .into_iter()
+        .enumerate()
+    {
+        tap("Theme");
+        tap(label);
+        assert_eq!(ui.global::<Theme>().get_selection(), index as i32 + 1);
+    }
     assert_eq!(saved.get(), None);
     tap("Back");
-    assert!(!ui.global::<Theme>().get_daylight());
+    assert_eq!(ui.global::<Theme>().get_selection(), 0);
     assert_eq!(ui.get_saved_theme(), 0);
 
     ui.set_screen(3);
@@ -315,7 +320,17 @@ fn appearance_previews_and_only_persists_on_save() {
     }
     assert_eq!(saved.get(), Some(1));
     assert_eq!(ui.get_saved_theme(), 1);
-    assert!(ui.global::<Theme>().get_daylight());
+    assert_eq!(ui.global::<Theme>().get_selection(), 1);
+
+    ui.set_screen(1);
+    settle();
+    tap("Host settings");
+    tap("Theme");
+    tap("Frosted Glass");
+    tap("Save");
+    assert_eq!(ui.get_screen(), 1);
+    assert_eq!(ui.get_saved_theme(), 4);
+    assert_eq!(ui.global::<Theme>().get_selection(), 4);
 }
 
 #[test]

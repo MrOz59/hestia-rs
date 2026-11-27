@@ -29,9 +29,23 @@ pub struct StoredHosts {
 #[serde(rename_all = "kebab-case")]
 pub enum AppearanceTheme {
     Daylight,
+    Midnight,
+    Electric,
+    FrostedGlass,
     #[default]
     #[serde(other)]
     Hearth,
+}
+
+impl AppearanceTheme {
+    /// The order of the theme choices in Settings and the matching Slint palettes.
+    pub const ALL: [Self; 5] = [
+        Self::Hearth,
+        Self::Daylight,
+        Self::Midnight,
+        Self::Electric,
+        Self::FrostedGlass,
+    ];
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -163,11 +177,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let store = Store::open(&dir).unwrap();
         assert_eq!(store.load_theme().unwrap(), AppearanceTheme::Hearth);
-        store.save_theme(AppearanceTheme::Daylight).unwrap();
-        assert_eq!(
-            Store::open(&dir).unwrap().load_theme().unwrap(),
-            AppearanceTheme::Daylight
-        );
+        for theme in AppearanceTheme::ALL {
+            store.save_theme(theme).unwrap();
+            assert_eq!(Store::open(&dir).unwrap().load_theme().unwrap(), theme);
+        }
         fs::write(dir.join("appearance.json"), r#"{"theme":"future-theme"}"#).unwrap();
         assert_eq!(store.load_theme().unwrap(), AppearanceTheme::Hearth);
         fs::remove_dir_all(dir).unwrap();

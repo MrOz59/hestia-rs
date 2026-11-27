@@ -1435,7 +1435,6 @@ export component SettingsPage inherits Page {
     in-out property <bool> hardware-decoding;
     in-out property <bool> gpu-video;
     in-out property <bool> direct-video;
-    in property <bool> show-appearance;
     in-out property <int> theme;
     in property <bool> theme-save-failed;
     in-out property <bool> allow-tearing;
@@ -1484,13 +1483,13 @@ export component SettingsPage inherits Page {
     property <[string]> pacing-names: ["Prefer lowest latency", "Balanced"];
     property <[string]> orientation-names: ["Landscape", "Portrait", "Follow the device"];
     property <[string]> speaker-names: ["Stereo", "5.1 surround", "7.1 surround"];
-    property <[string]> theme-names: ["Hearth (dark)", "Daylight (light)"];
+    property <[string]> theme-names: ["Hearth (dark)", "Daylight (light)", "Midnight", "Electric", "Frosted Glass"];
     property <int> theme-row: 36;
     property <string> custom-text;
     property <string> profile-text;
 
     // Focus: the header's Back (-2) and Save (-3), then the rows in page
-    // order: Theme (36) for device settings, 0…3, Frame pacing (35), 4,
+    // order: Theme (36), 0…3, Frame pacing (35), 4,
     // Metered bitrate (24), 5…7, Direct video (19), 8, Allow tearing (34),
     // Video through losses (28), 9…18,
     // saved profiles (100…), keyboard shortcuts (25…27), 20…23, then
@@ -1498,7 +1497,7 @@ export component SettingsPage inherits Page {
     property <int> nav: -1;
     focus-first => {
         if (root.nav == -1) {
-            root.nav = root.first-row();
+            root.nav = root.theme-row;
         }
     }
     in property <int> refocus;
@@ -1559,12 +1558,9 @@ export component SettingsPage inherits Page {
         return (i != 8 || root.mediacodec || root.gpu-conversion) && (i != 10 || root.android)
             && (i != 18 || root.host-name != "");
     }
-    pure function first-row() -> int {
-        return root.show-appearance ? root.theme-row : 0;
-    }
     pure function step(from: int, dir: int) -> int {
         if (from == root.theme-row) { return dir > 0 ? 0 : root.theme-row; }
-        if (root.show-appearance && from == 0 && dir < 0) { return root.theme-row; }
+        if (from == 0 && dir < 0) { return root.theme-row; }
         if (from == 35) { return dir > 0 ? 4 : 3; }
         if (root.android && ((from == 3 && dir > 0) || (from == 4 && dir < 0))) { return 35; }
         if (from == 24) { return dir > 0 ? 5 : 4; }
@@ -1597,7 +1593,7 @@ export component SettingsPage inherits Page {
             } else if (key == Key.LeftArrow && from == -3) {
                 root.nav = -2;
             } else if (key == Key.DownArrow) {
-                root.nav = root.first-row();
+                root.nav = root.theme-row;
             } else {
                 return false;
             }
@@ -1646,7 +1642,7 @@ export component SettingsPage inherits Page {
         }
         key-pressed(event) => {
             if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
-                root.nav = root.first-row();
+                root.nav = root.theme-row;
                 return accept;
             }
             return reject;
@@ -1700,11 +1696,11 @@ export component SettingsPage inherits Page {
                     padding-bottom: 40px;
                     spacing: 24px;
 
-                    if root.show-appearance: Group {
+                    Group {
                         title: "Appearance";
                         ChoiceRow {
                             label: "Theme";
-                            hint: root.theme-save-failed ? "Could not save the theme. Try again." : "Preview a theme, then Save to keep it";
+                            hint: root.theme-save-failed ? "Could not save the theme. Try again." : "Save to apply the preview on this device";
                             options: root.theme-names;
                             index <=> root.theme;
                             want-focus: root.at(root.theme-row);

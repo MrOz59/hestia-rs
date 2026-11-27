@@ -55,14 +55,14 @@ fn run_window(
     let ui = AppWindow::new()?;
     let appearance_dir = data_dir.clone();
     match Store::open(&appearance_dir).and_then(|store| store.load_theme()) {
-        Ok(theme) => ui.set_saved_theme(i32::from(theme == AppearanceTheme::Daylight)),
+        Ok(theme) => {
+            ui.set_saved_theme(AppearanceTheme::ALL.iter().position(|&item| item == theme).unwrap_or(0) as i32)
+        }
         Err(e) => log::warn!("could not load appearance: {e}"),
     }
     ui.on_save_theme(move |index| {
-        let theme = if index == 1 {
-            AppearanceTheme::Daylight
-        } else {
-            AppearanceTheme::Hearth
+        let Some(&theme) = AppearanceTheme::ALL.get(index as usize) else {
+            return false;
         };
         match Store::open(&appearance_dir).and_then(|store| store.save_theme(theme)) {
             Ok(()) => true,
