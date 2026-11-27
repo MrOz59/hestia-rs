@@ -191,10 +191,10 @@ export global Theme {
     };
     property <ThemePalette> dark-rainbow: {
         bg: #000000,
-        surface: #100b21,
-        card: #170e29,
-        card-hover: #24173d,
-        border: #423060,
+        surface: #0b0612,
+        card: #0a0613,
+        card-hover: #140d20,
+        border: #332148,
         text: #faf4ff,
         muted: #d3c7e4,
         faint: #b7a9cf,
@@ -231,18 +231,23 @@ export global Theme {
     out property <bool> electric-effects: root.selection == 3;
     out property <bool> frost-effects: root.selection == 4;
     out property <bool> rainbow-effects: root.selection == 6;
-    pure callback spectrum-heading(string) -> styled-text;
+    in-out property <int> spectrum-phase: 0;
+    pure callback spectrum-heading(string, int) -> styled-text;
+    out property <color> primary-fill: root.rainbow-effects ? #241334 : root.accent;
+    out property <color> primary-hover: root.rainbow-effects ? #301b46 : root.accent-hover;
+    out property <color> primary-pressed: root.rainbow-effects ? #1c102e : root.accent-pressed;
+    out property <color> primary-ink: root.rainbow-effects ? root.text : root.on-accent;
     out property <brush> backdrop: root.frost-effects
         ? @linear-gradient(145deg, #091c34 0%, #123c51 42%, #102d42 68%, #15253f 100%)
         : root.electric-effects ? @linear-gradient(145deg, #0b0927, #15113b 48%, #08192e) : root.bg;
     out property <brush> panel-face: root.frost-effects
         ? @linear-gradient(160deg, #225479c0, #0e314db3 61%, #182e4dc0)
         : root.electric-effects ? @linear-gradient(130deg, #24205a, root.card 72%)
-        : root.rainbow-effects ? @linear-gradient(145deg, #211039, root.card 47%, #0e142b) : root.card;
+        : root.rainbow-effects ? @linear-gradient(145deg, #110820, root.card 55%, #090c18) : root.card;
     out property <brush> panel-edge: root.frost-effects
         ? @linear-gradient(155deg, #def8ffe0, #83ccde6b 34%, #b5e9fc46 78%, #c4eefe96)
         : root.electric-effects ? @linear-gradient(110deg, #d3fcff, #24d5ff 24%, #af82ff 71%, #38e8ff)
-        : root.rainbow-effects ? @linear-gradient(125deg, #fa75b994, #7dfed585 48%, #927cffb8)
+        : root.rainbow-effects ? @linear-gradient(125deg, #39224d, root.border 48%, #272342)
         : root.border.transparentize(0.5);
     out property <string> font: "Outfit";
 
@@ -290,7 +295,7 @@ export component ThemeHeading inherits VerticalLayout {
     in property <int> weight: 700;
     in property <color> tone: Theme.text;
     if Theme.rainbow-effects: StyledText {
-        text: Theme.spectrum-heading(root.label);
+        text: Theme.spectrum-heading(root.label, Theme.spectrum-phase);
         default-font-size: root.text-size;
         max-lines: 1;
     }
@@ -519,7 +524,7 @@ export component ActionButton inherits Focusable {
     in property <int> kind: 0;
     property <color> fg: !root.enabled
         ? (root.kind == 1 ? Theme.accent.transparentize(0.4) : (root.kind == 2 ? Theme.danger.transparentize(0.5) : Theme.faint))
-        : (root.kind == 1 ? Theme.on-accent : (root.kind == 2 ? Theme.danger : Theme.text));
+        : (root.kind == 1 ? Theme.primary-ink : (root.kind == 2 ? Theme.danger : Theme.text));
     property <bool> lit: root.hovered || root.focused;
 
     accessible-role: button;
@@ -530,15 +535,15 @@ export component ActionButton inherits Focusable {
     horizontal-stretch: 0;
     border-radius: Theme.radius-sm;
     background: !root.enabled
-        ? (root.kind == 1 ? Theme.accent.transparentize(0.82) : (root.kind == 2 ? Theme.danger.transparentize(0.94) : (root.kind == 3 ? Theme.card.transparentize(1) : Theme.card.transparentize(0.45))))
+        ? (root.kind == 1 ? Theme.primary-fill.transparentize(0.82) : (root.kind == 2 ? Theme.danger.transparentize(0.94) : (root.kind == 3 ? Theme.card.transparentize(1) : Theme.card.transparentize(0.45))))
         : root.kind == 1
-            ? (root.pressed ? Theme.accent-pressed : (root.lit ? Theme.accent-hover : Theme.accent))
+            ? (root.pressed ? Theme.primary-pressed : (root.lit ? Theme.primary-hover : Theme.primary-fill))
             : root.kind == 2
                 ? (root.pressed || root.lit ? Theme.danger.transparentize(0.74) : Theme.danger.transparentize(0.88))
                 : root.kind == 3
                     ? (root.pressed ? Theme.card-hover : (root.lit ? Theme.card : Theme.card.transparentize(1)))
                     : (root.pressed ? Theme.border : (root.lit ? Theme.card-hover : Theme.card));
-    border-width: root.focused ? 2px : (root.kind == 0 || root.kind == 2 ? 1px : 0px);
+    border-width: root.focused ? 2px : (root.kind == 0 || root.kind == 2 || (root.kind == 1 && Theme.rainbow-effects) ? 1px : 0px);
     border-color: root.focused
         ? (root.kind == 1 ? Theme.text : Theme.accent)
         : (root.kind == 2 ? Theme.danger.transparentize(root.enabled ? 0.6 : 0.8) : Theme.border.transparentize(root.enabled ? 0 : 0.5));
@@ -578,7 +583,7 @@ export component IconButton inherits Focusable {
     in property <string> label;
     // 1: ember fill; 3: quiet.
     in property <int> kind: 3;
-    in property <color> tint: root.kind == 1 ? Theme.on-accent : Theme.text;
+    in property <color> tint: root.kind == 1 ? Theme.primary-ink : Theme.text;
     property <bool> lit: root.hovered || root.focused;
 
     accessible-role: button;
@@ -588,10 +593,10 @@ export component IconButton inherits Focusable {
     horizontal-stretch: 0;
     border-radius: self.height / 2;
     background: root.kind == 1
-        ? (root.pressed ? Theme.accent-pressed : (root.lit ? Theme.accent-hover : Theme.accent.transparentize(root.enabled ? 0 : 0.8)))
+        ? (root.pressed ? Theme.primary-pressed : (root.lit ? Theme.primary-hover : Theme.primary-fill.transparentize(root.enabled ? 0 : 0.8)))
         : (root.pressed ? Theme.border : (root.lit ? Theme.card-hover : Theme.card.transparentize(1)));
-    border-width: root.focused ? 2px : 0px;
-    border-color: root.kind == 1 ? Theme.text : Theme.accent;
+    border-width: root.focused ? 2px : (root.kind == 1 && Theme.rainbow-effects ? 1px : 0px);
+    border-color: root.kind == 1 ? (root.focused ? Theme.text : Theme.border) : Theme.accent;
     drop-shadow-blur: 18px;
     drop-shadow-color: root.focused ? Theme.glow : transparent;
     transform-scale: root.pressed && root.enabled ? 0.9 : 1;

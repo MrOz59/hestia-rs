@@ -51,6 +51,11 @@ export component AppWindow inherits Window {
     changed effective-theme => {
         Theme.selection = root.effective-theme;
     }
+    Timer {
+        running: Theme.rainbow-effects && root.screen != 4 && root.screen != 7 && !root.launch-preview;
+        interval: 125ms;
+        triggered => { Theme.spectrum-phase = Math.mod(Theme.spectrum-phase + 1, 96); }
+    }
     callback save-theme(int) -> bool;
 
     // Startup (identity generation on first run)
