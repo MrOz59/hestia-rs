@@ -58,6 +58,16 @@ fn network_capabilities<'local>(
     .l()
 }
 
+fn is_vpn(env: &mut JNIEnv<'_>, caps: &JObject<'_>) -> jni::errors::Result<bool> {
+    Ok(!caps.is_null()
+        && (env
+            .call_method(caps, "hasTransport", "(I)Z", &[JValue::Int(TRANSPORT_VPN)])?
+            .z()?
+            || !env
+                .call_method(caps, "hasCapability", "(I)Z", &[JValue::Int(NET_CAPABILITY_NOT_VPN)])?
+                .z()?))
+}
+
 /// Compare the RTSP destination with the network's DNS64 synthesis prefix.
 fn uses_nat64(
     env: &mut JNIEnv<'_>,
@@ -151,12 +161,7 @@ pub(crate) fn configure_stream_network(mut config: StreamConfig) -> StreamConfig
             remote = env
                 .call_method(&caps, "hasTransport", "(I)Z", &[JValue::Int(TRANSPORT_CELLULAR)])?
                 .z()?
-                || env
-                    .call_method(&caps, "hasTransport", "(I)Z", &[JValue::Int(TRANSPORT_VPN)])?
-                    .z()?
-                || !env
-                    .call_method(&caps, "hasCapability", "(I)Z", &[JValue::Int(NET_CAPABILITY_NOT_VPN)])?
-                    .z()?;
+                || is_vpn(env, &caps)?;
         }
         if !remote {
             remote = uses_nat64(env, &cm, &network, &config.session_url)?;
@@ -213,73 +218,77 @@ fn apply_route(ip: std::net::IpAddr) -> Result<(), String> {
         let active = env
             .call_method(&cm, "getActiveNetwork", "()Landroid/net/Network;", &[])?
             .l()?;
-        let all = JObjectArray::from(
-            env.call_method(&cm, "getAllNetworks", "()[Landroid/net/Network;", &[])?
-                .l()?,
-        );
+        let active_caps = network_capabilities(env, &cm, &active)?;
+        let default_is_vpn = is_vpn(env, &active_caps)?;
         let mut infos = Vec::new();
         let mut handles = Vec::new();
-        for i in 0..env.get_array_length(&all)? {
-            let net = env.get_object_array_element(&all, i)?;
-            let caps = env
-                .call_method(
-                    &cm,
-                    "getNetworkCapabilities",
-                    format!("{NETWORK_SIG}Landroid/net/NetworkCapabilities;"),
-                    &[JValue::Object(&net)],
-                )?
-                .l()?;
-            let props = env
-                .call_method(
-                    &cm,
-                    "getLinkProperties",
-                    format!("{NETWORK_SIG}Landroid/net/LinkProperties;"),
-                    &[JValue::Object(&net)],
-                )?
-                .l()?;
-            if caps.is_null() || props.is_null() {
-                continue;
-            }
-            let cellular = env
-                .call_method(&caps, "hasTransport", "(I)Z", &[JValue::Int(TRANSPORT_CELLULAR)])?
-                .z()?;
-            let vpn = env
-                .call_method(&caps, "hasTransport", "(I)Z", &[JValue::Int(TRANSPORT_VPN)])?
-                .z()?;
-            let list = env
-                .call_method(&props, "getLinkAddresses", "()Ljava/util/List;", &[])?
-                .l()?;
-            let mut addresses = Vec::new();
-            for j in 0..env.call_method(&list, "size", "()I", &[])?.i()? {
-                let link = env
-                    .call_method(&list, "get", "(I)Ljava/lang/Object;", &[JValue::Int(j)])?
+        if !default_is_vpn {
+            let all = JObjectArray::from(
+                env.call_method(&cm, "getAllNetworks", "()[Landroid/net/Network;", &[])?
+                    .l()?,
+            );
+            for i in 0..env.get_array_length(&all)? {
+                let net = env.get_object_array_element(&all, i)?;
+                let caps = env
+                    .call_method(
+                        &cm,
+                        "getNetworkCapabilities",
+                        format!("{NETWORK_SIG}Landroid/net/NetworkCapabilities;"),
+                        &[JValue::Object(&net)],
+                    )?
                     .l()?;
-                let inet = env
-                    .call_method(&link, "getAddress", "()Ljava/net/InetAddress;", &[])?
+                let props = env
+                    .call_method(
+                        &cm,
+                        "getLinkProperties",
+                        format!("{NETWORK_SIG}Landroid/net/LinkProperties;"),
+                        &[JValue::Object(&net)],
+                    )?
                     .l()?;
-                let prefix = env.call_method(&link, "getPrefixLength", "()I", &[])?.i()?;
-                let raw = JByteArray::from(env.call_method(&inet, "getAddress", "()[B", &[])?.l()?);
-                if let Some(address) = netroute::ip_from_bytes(&env.convert_byte_array(&raw)?) {
-                    addresses.push((address, prefix.clamp(0, 128) as u8));
+                if caps.is_null() || props.is_null() {
+                    continue;
                 }
-                env.delete_local_ref(raw)?;
-                env.delete_local_ref(inet)?;
-                env.delete_local_ref(link)?;
-            }
-            let is_active = !active.is_null()
-                && env
-                    .call_method(&net, "equals", "(Ljava/lang/Object;)Z", &[JValue::Object(&active)])?
+                let cellular = env
+                    .call_method(&caps, "hasTransport", "(I)Z", &[JValue::Int(TRANSPORT_CELLULAR)])?
                     .z()?;
-            infos.push(NetInfo {
-                local_transport: !cellular && !vpn,
-                active: is_active,
-                addresses,
-            });
-            handles.push(net);
+                let vpn = env
+                    .call_method(&caps, "hasTransport", "(I)Z", &[JValue::Int(TRANSPORT_VPN)])?
+                    .z()?;
+                let list = env
+                    .call_method(&props, "getLinkAddresses", "()Ljava/util/List;", &[])?
+                    .l()?;
+                let mut addresses = Vec::new();
+                for j in 0..env.call_method(&list, "size", "()I", &[])?.i()? {
+                    let link = env
+                        .call_method(&list, "get", "(I)Ljava/lang/Object;", &[JValue::Int(j)])?
+                        .l()?;
+                    let inet = env
+                        .call_method(&link, "getAddress", "()Ljava/net/InetAddress;", &[])?
+                        .l()?;
+                    let prefix = env.call_method(&link, "getPrefixLength", "()I", &[])?.i()?;
+                    let raw = JByteArray::from(env.call_method(&inet, "getAddress", "()[B", &[])?.l()?);
+                    if let Some(address) = netroute::ip_from_bytes(&env.convert_byte_array(&raw)?) {
+                        addresses.push((address, prefix.clamp(0, 128) as u8));
+                    }
+                    env.delete_local_ref(raw)?;
+                    env.delete_local_ref(inet)?;
+                    env.delete_local_ref(link)?;
+                }
+                let is_active = !active.is_null()
+                    && env
+                        .call_method(&net, "equals", "(Ljava/lang/Object;)Z", &[JValue::Object(&active)])?
+                        .z()?;
+                infos.push(NetInfo {
+                    local_transport: !cellular && !vpn,
+                    active: is_active,
+                    addresses,
+                });
+                handles.push(net);
+            }
         }
 
         let null = JObject::null();
-        let choice = netroute::choose(ip, &infos);
+        let choice = netroute::choose(ip, &infos, default_is_vpn);
         let target = choice.map_or(&null, |i| &handles[i]);
         let bound = env
             .call_method(&cm, "getBoundNetworkForProcess", "()Landroid/net/Network;", &[])?
@@ -307,8 +316,15 @@ fn apply_route(ip: std::net::IpAddr) -> Result<(), String> {
                     infos[i].addresses,
                     if ok { "ok" } else { "refused" }
                 ),
-                None => log::info!("routing back through Android's default network for {ip}"),
+                None if ok => log::info!("routing back through Android's default network for {ip}"),
+                None => log::warn!("Android refused to clear the process network binding for {ip}"),
             }
+            if !ok {
+                return Ok(());
+            }
+        }
+        if default_is_vpn && netroute::is_local(ip) {
+            log::debug!("leaving routing for {ip} to Android's default VPN");
         }
         Ok(())
     })
