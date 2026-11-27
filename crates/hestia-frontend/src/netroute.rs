@@ -6,6 +6,7 @@
 //! out, even though the phone is on the host's Wi-Fi. So before connecting
 //! to a local address we look for the Wi-Fi/Ethernet network whose subnet
 //! holds it and, if that isn't the default network, route the app through it.
+//! When the default is a VPN, Android handles routing and split-tunnel rules.
 
 #![cfg_attr(not(target_os = "android"), allow(dead_code))]
 
@@ -69,9 +70,9 @@ pub fn ip_from_bytes(bytes: &[u8]) -> Option<IpAddr> {
 
 /// The network to bind the app to for `target`: `Some(index)` when a local
 /// network that isn't the default one holds it, `None` to follow the
-/// system default (public addresses, VPN-only ranges, or already default).
-pub fn choose(target: IpAddr, networks: &[NetInfo]) -> Option<usize> {
-    if !is_local(target) {
+/// system default (including a VPN whose local subnet overlaps Wi-Fi).
+pub fn choose(target: IpAddr, networks: &[NetInfo], default_is_vpn: bool) -> Option<usize> {
+    if default_is_vpn || !is_local(target) {
         return None;
     }
     let index = networks
@@ -137,15 +138,26 @@ mod tests {
     fn routes_lan_hosts_through_wifi_when_mobile_data_is_default() {
         // Wi-Fi without internet: mobile data is the default network.
         let nets = [mobile(true), wifi(false)];
-        assert_eq!(choose(ip("192.168.1.205"), &nets), Some(1));
+        assert_eq!(choose(ip("192.168.1.205"), &nets, false), Some(1));
         // Public hosts keep the default route.
-        assert_eq!(choose(ip("203.0.113.9"), &nets), None);
+        assert_eq!(choose(ip("203.0.113.9"), &nets, false), None);
         // A LAN address no local network holds (e.g. behind a VPN): default.
-        assert_eq!(choose(ip("10.8.0.1"), &nets), None);
+        assert_eq!(choose(ip("10.8.0.1"), &nets, false), None);
         // Wi-Fi already default: nothing to do.
-        assert_eq!(choose(ip("192.168.1.205"), &[mobile(false), wifi(true)]), None);
+        assert_eq!(choose(ip("192.168.1.205"), &[mobile(false), wifi(true)], false), None);
         // Mobile data's own subnet never wins.
-        assert_eq!(choose(ip("10.120.3.5"), &nets), None);
+        assert_eq!(choose(ip("10.120.3.5"), &nets, false), None);
+    }
+
+    #[test]
+    fn defers_to_default_vpn_even_when_wifi_matches_the_host_subnet() {
+        // Android may omit the VPN from getAllNetworks. A matching Wi-Fi
+        // subnet alone cannot tell the home network from an away network.
+        let nets = [wifi(false)];
+        assert_eq!(choose(ip("192.168.1.102"), &nets, true), None);
+        assert_eq!(choose(ip("fd12::1"), &nets, true), None);
+        assert_eq!(choose(ip("fe80::205"), &nets, true), None);
+        assert_eq!(choose(ip("192.168.1.102"), &nets, false), Some(0));
     }
 
     #[test]
