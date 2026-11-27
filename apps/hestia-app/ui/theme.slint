@@ -231,9 +231,7 @@ export global Theme {
     out property <bool> electric-effects: root.selection == 3;
     out property <bool> frost-effects: root.selection == 4;
     out property <bool> rainbow-effects: root.selection == 6;
-    out property <brush> heading-ink: root.rainbow-effects
-        ? @linear-gradient(90deg, #ff749d 0%, #ffd171 20%, #7afbb8 40%, #72e6ff 60%, #bf9cff 80%, #ff85ef 100%)
-        : root.text;
+    pure callback spectrum-heading(string) -> styled-text;
     out property <brush> backdrop: root.frost-effects
         ? @linear-gradient(145deg, #091c34 0%, #123c51 42%, #102d42 68%, #15253f 100%)
         : root.electric-effects ? @linear-gradient(145deg, #0b0927, #15113b 48%, #08192e) : root.bg;
@@ -284,6 +282,25 @@ export global Theme {
     out property <length> heading-size: root.compact ? 16px : 15px;
     out property <length> body-size: root.compact ? 15px : 14px;
     out property <length> caption-size: root.compact ? 13px : 12px;
+}
+
+export component ThemeHeading inherits VerticalLayout {
+    in property <string> label;
+    in property <length> text-size;
+    in property <int> weight: 700;
+    in property <color> tone: Theme.text;
+    if Theme.rainbow-effects: StyledText {
+        text: Theme.spectrum-heading(root.label);
+        default-font-size: root.text-size;
+        max-lines: 1;
+    }
+    if !Theme.rainbow-effects: Text {
+        text: root.label;
+        color: root.tone;
+        font-size: root.text-size;
+        font-weight: root.weight;
+        overflow: elide;
+    }
 }
 
 export component FrostBackdrop inherits Rectangle {

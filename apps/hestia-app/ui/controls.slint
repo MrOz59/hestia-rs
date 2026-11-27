@@ -3,7 +3,7 @@
 // up / down (D-pad) move between rows, left / right change the value, and
 // Return / the D-pad centre opens or toggles it.
 
-import { Theme, Nav, Icon, Focusable, ActionButton, IconButton, Toggle, TextField, Modal, DialogTitle, DialogText, VoltageTrace } from "theme.slint";
+import { Theme, Nav, Icon, Focusable, ActionButton, IconButton, Toggle, TextField, Modal, DialogTitle, DialogText, ThemeHeading, VoltageTrace } from "theme.slint";
 
 // Title and an optional note, left of a row's control.
 export component RowText inherits VerticalLayout {
@@ -47,11 +47,11 @@ export component Group inherits VerticalLayout {
     in property <string> title;
     in property <bool> energized;
     spacing: 8px;
-    if root.title != "": Text {
-        text: root.title;
-        color: Theme.rainbow-effects ? Theme.heading-ink : Theme.muted;
-        font-size: Theme.body-size;
-        font-weight: 600;
+    if root.title != "": ThemeHeading {
+        label: root.title;
+        tone: Theme.muted;
+        text-size: Theme.body-size;
+        weight: 600;
     }
     Rectangle {
         height: rows.preferred-height;
@@ -680,12 +680,9 @@ export component TopBar inherits Rectangle {
             alignment: center;
             horizontal-stretch: 1;
             padding-left: root.show-back ? 4px : 0px;
-            Text {
-                text: root.title;
-                color: Theme.heading-ink;
-                font-size: Theme.compact ? 23px : (Theme.short ? 25px : 30px);
-                font-weight: 700;
-                overflow: elide;
+            ThemeHeading {
+                label: root.title;
+                text-size: Theme.compact ? 23px : (Theme.short ? 25px : 30px);
             }
             if root.subtitle != "": Text {
                 text: root.subtitle;

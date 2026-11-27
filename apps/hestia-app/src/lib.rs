@@ -9,6 +9,7 @@
 
 #[cfg(target_os = "android")]
 mod android_pip;
+mod appearance;
 #[cfg(not(target_os = "android"))]
 mod desktop_input;
 #[cfg(not(target_os = "android"))]
@@ -25,6 +26,7 @@ use std::sync::Arc;
 use hestia_core::store::{AppearanceTheme, Store};
 use hestia_frontend::Controller;
 use hestia_frontend::presentation::GpuWindow;
+use slint::ComponentHandle;
 
 slint::include_modules!();
 
@@ -53,6 +55,7 @@ fn run_window(
     #[cfg(not(target_os = "android"))]
     desktop_input::install();
     let ui = AppWindow::new()?;
+    ui.global::<Theme>().on_spectrum_heading(appearance::spectrum_heading);
     let appearance_dir = data_dir.clone();
     match Store::open(&appearance_dir).and_then(|store| store.load_theme()) {
         Ok(theme) => {

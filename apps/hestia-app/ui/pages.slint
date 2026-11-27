@@ -4,7 +4,7 @@
 // control reports back through `entered` so Tab and the mouse keep it in
 // step. `refocus` (bumped by the window when a dialog closes) resets it.
 
-import { Theme, Nav, Icon, Focusable, Page, ActionButton, IconButton, Chip, Loader, TextField, Modal, DialogTitle, DialogText, VoltageTrace } from "theme.slint";
+import { Theme, Nav, Icon, Focusable, Page, ActionButton, IconButton, Chip, Loader, TextField, Modal, DialogTitle, DialogText, ThemeHeading, VoltageTrace } from "theme.slint";
 import { Group, SwitchRow, ChoiceRow, SliderRow, ActionRow, InfoRow, FieldRow, ProfileRow, OptionSheet, TopBar, EmptyState } from "controls.slint";
 
 export struct HostCard {
@@ -318,11 +318,9 @@ export component HostsPage inherits Page {
                 VerticalLayout {
                     alignment: center;
                     spacing: 2px;
-                    Text {
-                        text: "Hestia";
-                        color: Theme.heading-ink;
-                        font-size: Theme.display-size;
-                        font-weight: 700;
+                    ThemeHeading {
+                        label: "Hestia";
+                        text-size: Theme.display-size;
                     }
                     HorizontalLayout {
                         spacing: 8px;
