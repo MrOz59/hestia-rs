@@ -7,13 +7,18 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.os.Build;
+import android.os.SystemClock;
 import android.util.Log;
 import android.util.Rational;
+import android.view.InputDevice;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
+import android.view.View;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 
-/** Bridges the platform's PiP lifecycle and theme file picker to Rust. */
+/** Bridges PiP, the theme file picker and debug-only input dispatch to Rust. */
 public final class HestiaActivity extends NativeActivity {
     private static final Rational DEFAULT_ASPECT = new Rational(16, 9);
     private static final int OPEN_THEME_PACK = 941;
@@ -23,6 +28,117 @@ public final class HestiaActivity extends NativeActivity {
     private boolean resumed;
     // Kept through a possible mode-changed(false) callback during dismissal.
     private boolean pipSession;
+
+    // Registered by Rust before enabling the offline tester. The native
+    // queue remains a fallback for events that bypass Activity dispatch.
+    private volatile boolean controllerTesterEnabled;
+    private native boolean nativeControllerTesterKey(int deviceId, int source, int scanCode,
+            int keyCode, int action, boolean repeat, long eventTimeMs, long arrivalMs);
+    private native boolean nativeControllerTesterMotion(int deviceId, int source, int action,
+            boolean historical, long eventTimeMs, long arrivalMs,
+            float x, float y, float z, float rz, float rx, float ry,
+            float lt, float rt, float brake, float gas, float hatX, float hatY);
+
+    private native boolean nativeControllerTesterPointer(int deviceId, int source, int action,
+            int buttons, float x, float y);
+
+    @SuppressWarnings("unused") // Called from Rust through JNI.
+    private void setControllerTesterEnabled(boolean enabled) {
+        controllerTesterEnabled = enabled;
+        runOnUiThread(this::updateControllerTesterDispatch);
+    }
+
+    private volatile boolean controllerTesterUnbufferedRequested;
+
+    private void updateControllerTesterDispatch() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            View decor = getWindow().getDecorView();
+            if (decor.isAttachedToWindow()) {
+                boolean enabled = controllerTesterEnabled && hasWindowFocus();
+                decor.requestUnbufferedDispatch(enabled
+                        ? InputDevice.SOURCE_CLASS_JOYSTICK | InputDevice.SOURCE_CLASS_BUTTON
+                        : InputDevice.SOURCE_CLASS_NONE);
+                controllerTesterUnbufferedRequested = enabled;
+            } else {
+                controllerTesterUnbufferedRequested = false;
+            }
+        }
+    }
+
+    @SuppressWarnings("unused") // Queried by the debug report, not on the input path.
+    private String controllerTesterDispatchStatus() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return "unsupported (Android < 11)";
+        return controllerTesterUnbufferedRequested ? "requested (effect not verified)" : "not requested";
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean focused) {
+        super.onWindowFocusChanged(focused);
+        if (controllerTesterEnabled || controllerTesterUnbufferedRequested) {
+            updateControllerTesterDispatch();
+        }
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (controllerTesterEnabled && nativeControllerTesterKey(event.getDeviceId(), event.getSource(),
+                event.getScanCode(), event.getKeyCode(), event.getAction(), event.getRepeatCount() > 0,
+                event.getEventTime(), SystemClock.uptimeMillis())) return true;
+        return super.dispatchKeyEvent(event);
+    }
+
+    @Override
+    public boolean dispatchGenericMotionEvent(MotionEvent event) {
+        if (controllerTesterEnabled) {
+            if (event.isFromSource(InputDevice.SOURCE_JOYSTICK)
+                    && event.getActionMasked() == MotionEvent.ACTION_MOVE && event.getPointerCount() > 0) {
+                long arrival = SystemClock.uptimeMillis();
+                for (int i = 0; i < event.getHistorySize(); i++) {
+                    controllerTesterMotionSample(event, i, arrival);
+                }
+                if (controllerTesterMotionSample(event, -1, arrival)) return true;
+            } else if (controllerTesterPointer(event)) {
+                return true;
+            }
+        }
+        return super.dispatchGenericMotionEvent(event);
+    }
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        // Android can deliver a touchpad's mouse click here and its hover in generic dispatch.
+        if (controllerTesterEnabled && controllerTesterPointer(event)) return true;
+        return super.dispatchTouchEvent(event);
+    }
+
+    private boolean controllerTesterPointer(MotionEvent event) {
+        return (event.isFromSource(InputDevice.SOURCE_MOUSE) || event.isFromSource(InputDevice.SOURCE_TOUCHPAD))
+                && event.getPointerCount() > 0 && nativeControllerTesterPointer(event.getDeviceId(),
+                    event.getSource(), event.getActionMasked(), event.getButtonState(), event.getX(), event.getY());
+    }
+
+    private boolean controllerTesterMotionSample(MotionEvent event, int history, long arrival) {
+        boolean historical = history >= 0;
+        long time = historical ? event.getHistoricalEventTime(history) : event.getEventTime();
+        return nativeControllerTesterMotion(event.getDeviceId(), event.getSource(),
+                event.getActionMasked(), historical, time, arrival,
+                controllerTesterAxis(event, MotionEvent.AXIS_X, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_Y, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_Z, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_RZ, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_RX, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_RY, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_LTRIGGER, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_RTRIGGER, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_BRAKE, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_GAS, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_HAT_X, history),
+                controllerTesterAxis(event, MotionEvent.AXIS_HAT_Y, history));
+    }
+
+    private static float controllerTesterAxis(MotionEvent event, int axis, int history) {
+        return history >= 0 ? event.getHistoricalAxisValue(axis, history) : event.getAxisValue(axis);
+    }
 
     // Registered by Rust before enabling PiP.
     private native void onNativePictureInPictureChanged(boolean inPip, boolean dismissed);

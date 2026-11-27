@@ -84,7 +84,10 @@ fn run_window(
     controller.start(data_dir);
     let result = ui.run();
     #[cfg(target_os = "android")]
-    controller.stream_disconnect();
+    {
+        hestia_frontend::platform::controller_tester_active(false);
+        controller.stream_disconnect();
+    }
     result
 }
 

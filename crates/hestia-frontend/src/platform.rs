@@ -4,6 +4,8 @@
 #[cfg(target_os = "android")]
 mod android;
 mod clipboard;
+#[cfg(any(target_os = "android", test))]
+mod controller_tester;
 mod display;
 mod gamepads;
 mod input;
@@ -16,6 +18,8 @@ mod reports;
 #[cfg(target_os = "android")]
 pub use android::{set_android_app, video_decoders};
 pub use clipboard::{clipboard_stamp, clipboard_text, set_clipboard_text};
+#[cfg(target_os = "android")]
+pub use controller_tester::{controller_tester_active, controller_tester_report};
 pub use display::{device_summary, native_display, set_direct_video, set_stream_mode};
 #[cfg(target_os = "android")]
 pub(crate) use gamepads::release_android_gamepads;

@@ -152,9 +152,9 @@ pub(super) fn streaming() -> bool {
 /// Part of [`super::android_input_hook`].
 #[cfg(target_os = "android")]
 pub(super) fn android_gamepad_event(event: &android_activity::input::InputEvent<'_>) -> bool {
-    use android_activity::input::{Axis, InputEvent, KeyAction, MotionAction};
+    use android_activity::input::{InputEvent, KeyAction, MotionAction};
 
-    use crate::gamepad::{self, Axes};
+    use crate::gamepad;
 
     if !controllers::active() {
         return false;
@@ -184,24 +184,32 @@ pub(super) fn android_gamepad_event(event: &android_activity::input::InputEvent<
             if source & gamepad::SOURCE_JOYSTICK != gamepad::SOURCE_JOYSTICK || motion.action() != MotionAction::Move {
                 return false;
             }
-            let p = motion.pointer_at_index(0);
-            let axes = Axes {
-                x: p.axis_value(Axis::X),
-                y: p.axis_value(Axis::Y),
-                z: p.axis_value(Axis::Z),
-                rz: p.axis_value(Axis::Rz),
-                rx: p.axis_value(Axis::Rx),
-                ry: p.axis_value(Axis::Ry),
-                ltrigger: p.axis_value(Axis::Ltrigger),
-                rtrigger: p.axis_value(Axis::Rtrigger),
-                brake: p.axis_value(Axis::Brake),
-                gas: p.axis_value(Axis::Gas),
-                hat_x: p.axis_value(Axis::HatX),
-                hat_y: p.axis_value(Axis::HatY),
-            };
+            let axes = android_axes(&motion);
             controllers::dispatch(|controllers| controllers.motion(motion.device_id(), axes));
             true
         }
         _ => false,
+    }
+}
+
+/// Shared sampling: the debug tester must inspect exactly the same axes as streaming.
+#[cfg(target_os = "android")]
+pub(super) fn android_axes(motion: &android_activity::input::MotionEvent<'_>) -> crate::gamepad::Axes {
+    use crate::gamepad::Axes;
+    use android_activity::input::Axis;
+    let p = motion.pointer_at_index(0);
+    Axes {
+        x: p.axis_value(Axis::X),
+        y: p.axis_value(Axis::Y),
+        z: p.axis_value(Axis::Z),
+        rz: p.axis_value(Axis::Rz),
+        rx: p.axis_value(Axis::Rx),
+        ry: p.axis_value(Axis::Ry),
+        ltrigger: p.axis_value(Axis::Ltrigger),
+        rtrigger: p.axis_value(Axis::Rtrigger),
+        brake: p.axis_value(Axis::Brake),
+        gas: p.axis_value(Axis::Gas),
+        hat_x: p.axis_value(Axis::HatX),
+        hat_y: p.axis_value(Axis::HatY),
     }
 }

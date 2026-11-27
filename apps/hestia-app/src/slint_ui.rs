@@ -604,6 +604,26 @@ pub(crate) fn wire(ui: &AppWindow, controller: &Arc<Controller>) {
     ui.on_debug_verbose_log_toggled(move |on| c.set_verbose_log(on));
     let c = controller.clone();
     ui.on_debug_copy_info(move || c.copy_debug_info());
+    #[cfg(target_os = "android")]
+    {
+        use hestia_frontend::platform;
+        ui.on_controller_tester_toggle(platform::controller_tester_active);
+        ui.on_controller_tester_read(|| platform::controller_tester_report().into());
+        ui.on_controller_tester_copy(|report| {
+            log::info!("Controller tester report:\n{report}");
+            match platform::set_clipboard_text(report.as_str()) {
+                Ok(()) => "Controller report copied".into(),
+                Err(e) => format!("Could not copy: {e}").into(),
+            }
+        });
+        ui.on_controller_tester_share(|report| {
+            log::info!("Controller tester report:\n{report}");
+            match platform::export_report("Hestia controller tester", report.as_str(), None) {
+                Ok(()) => "Controller report sent to Android share sheet".into(),
+                Err(e) => format!("Could not share: {e}").into(),
+            }
+        });
+    }
 
     let c = controller.clone();
     ui.on_stream_key(move |text, pressed, repeat, ctrl, alt, shift, meta| {
