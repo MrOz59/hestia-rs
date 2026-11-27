@@ -7,7 +7,7 @@ use hestia_core::stream::input::{GamepadState, buttons};
 
 use crate::gamepad::{self, Axes, Control, Controllers};
 
-const MAX_HISTORY: usize = 96;
+const MAX_HISTORY: usize = 160;
 const MAX_DEVICES: usize = 8;
 const AXIS_NAMES: [&str; 12] = [
     "X", "Y", "Z", "RZ", "RX", "RY", "LTRIGGER", "RTRIGGER", "BRAKE", "GAS", "HAT_X", "HAT_Y",
@@ -23,6 +23,9 @@ fn axis_values(a: Axes) -> [f32; 12] {
 struct Sample {
     mapped: GamepadState,
     axes: Option<([f32; 12], [f32; 12], [f32; 12])>,
+    motion_count: u64,
+    last_motion_source: u32,
+    last_motion_action: u32,
 }
 
 #[derive(Default)]
@@ -105,11 +108,18 @@ impl Tester {
         ));
     }
 
-    fn motion(&mut self, id: i32, axes: Axes) {
-        let mapped = self.mapper.motion(id, axes);
+    fn motion(&mut self, id: i32, source: u32, action: u32, axes: Axes) {
+        let mapped = if source & gamepad::SOURCE_JOYSTICK == gamepad::SOURCE_JOYSTICK && action == 2 {
+            self.mapper.motion(id, axes)
+        } else {
+            None
+        };
         let Some(sample) = self.remember(id, mapped) else {
             return;
         };
+        sample.motion_count += 1;
+        sample.last_motion_source = source;
+        sample.last_motion_action = action;
         let values = axis_values(axes);
         let (current, min, max) = sample.axes.get_or_insert((values, values, values));
         *current = values;
@@ -128,7 +138,7 @@ impl Tester {
             let _ = writeln!(out, "\nLast key: {key}");
         }
         if self.samples.is_empty() {
-            out.push_str("Waiting for controller input…\n");
+            out.push_str("No controller events captured yet. Press a button or move a stick.\n");
         }
         for (id, sample) in &self.samples {
             let s = sample.mapped;
@@ -144,6 +154,11 @@ impl Tester {
                 s.left_stick, s.right_stick, s.left_trigger, s.right_trigger
             );
             if let Some((current, min, max)) = &sample.axes {
+                let _ = writeln!(
+                    out,
+                    "  Motion events: {} | source 0x{:08x} | action {}",
+                    sample.motion_count, sample.last_motion_source, sample.last_motion_action
+                );
                 out.push_str("  Raw axes: current [observed min, max]\n");
                 for i in 0..AXIS_NAMES.len() {
                     let _ = writeln!(
@@ -170,14 +185,28 @@ mod android {
     use std::time::{Duration, Instant};
 
     use android_activity::input::{InputEvent, KeyAction, MotionAction};
+    use jni::objects::JObject;
+    use jni::sys::{jboolean, jfloat, jint};
+    use jni::{JNIEnv, NativeMethod};
 
     use super::*;
+
+    #[derive(Default)]
+    struct Counts {
+        keys: u64,
+        motions: u64,
+        captured_keys: u64,
+        captured_motions: u64,
+    }
 
     #[derive(Default)]
     struct Session {
         tester: Tester,
         devices: String,
         last_inventory: Option<Instant>,
+        activity_status: String,
+        activity: Counts,
+        native: Counts,
     }
 
     static SESSION: Mutex<Option<Session>> = Mutex::new(None);
@@ -187,7 +216,129 @@ mod android {
     }
 
     pub fn controller_tester_active(active: bool) {
-        *session() = active.then(Session::default);
+        if active {
+            *session() = Some(Session::default());
+            let status = match set_activity_capture(true) {
+                Ok(()) => "enabled".to_owned(),
+                Err(error) => format!("unavailable ({error}); native fallback only"),
+            };
+            if let Some(s) = session().as_mut() {
+                s.activity_status = status;
+            }
+        } else {
+            let was_active = session().take().is_some();
+            if was_active {
+                let _ = set_activity_capture(false);
+            }
+        }
+    }
+
+    fn set_activity_capture(active: bool) -> Result<(), String> {
+        use jni::objects::JValue;
+        super::super::android::with_activity(|env, activity| {
+            if active {
+                let class = env.get_object_class(activity)?;
+                let methods = [
+                    NativeMethod {
+                        name: "nativeControllerTesterKey".into(),
+                        sig: "(IIIIIZZ)Z".into(),
+                        fn_ptr: activity_key as *mut std::ffi::c_void,
+                    },
+                    NativeMethod {
+                        name: "nativeControllerTesterMotion".into(),
+                        sig: "(IIIZFFFFFFFFFFFF)Z".into(),
+                        fn_ptr: activity_motion as *mut std::ffi::c_void,
+                    },
+                ];
+                env.register_native_methods(&class, &methods)?;
+                env.delete_local_ref(class)?;
+            }
+            env.call_method(
+                activity,
+                "setControllerTesterEnabled",
+                "(Z)V",
+                &[JValue::Bool(u8::from(active))],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn is_gamepad_key(code: u32, scan: i32) -> bool {
+        (96..=110).contains(&code) || (188..=203).contains(&code) || (0x130..=0x13f).contains(&scan)
+    }
+
+    extern "system" fn activity_key(
+        _env: JNIEnv<'_>,
+        _activity: JObject<'_>,
+        id: jint,
+        source: jint,
+        scan: jint,
+        code: jint,
+        action: jint,
+        repeat: jboolean,
+        candidate: jboolean,
+    ) -> jboolean {
+        if super::super::gamepads::streaming() {
+            return 0;
+        }
+        let mut guard = session();
+        let Some(s) = guard.as_mut() else { return 0 };
+        s.activity.keys += 1;
+        if candidate == 0 || !matches!(action, 0 | 1) {
+            return 0;
+        }
+        s.activity.captured_keys += 1;
+        s.tester.key(id, source as u32, scan, code as u32, action == 0, repeat != 0);
+        1
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    extern "system" fn activity_motion(
+        _env: JNIEnv<'_>,
+        _activity: JObject<'_>,
+        id: jint,
+        source: jint,
+        action: jint,
+        candidate: jboolean,
+        x: jfloat,
+        y: jfloat,
+        z: jfloat,
+        rz: jfloat,
+        rx: jfloat,
+        ry: jfloat,
+        ltrigger: jfloat,
+        rtrigger: jfloat,
+        brake: jfloat,
+        gas: jfloat,
+        hat_x: jfloat,
+        hat_y: jfloat,
+    ) -> jboolean {
+        if super::super::gamepads::streaming() {
+            return 0;
+        }
+        let mut guard = session();
+        let Some(s) = guard.as_mut() else { return 0 };
+        s.activity.motions += 1;
+        if candidate == 0 || action != 2 {
+            return 0;
+        }
+        s.activity.captured_motions += 1;
+        let axes = Axes {
+            x,
+            y,
+            z,
+            rz,
+            rx,
+            ry,
+            ltrigger,
+            rtrigger,
+            brake,
+            gas,
+            hat_x,
+            hat_y,
+        };
+        s.tester.motion(id, source as u32, action as u32, axes);
+        1
     }
 
     fn inventory() -> String {
@@ -234,7 +385,27 @@ mod android {
             s.devices = devices;
             s.last_inventory = Some(Instant::now());
         }
-        s.tester.report(&s.devices)
+        let mut out = format!("Capture: Android Activity {}\n", s.activity_status);
+        for (name, c) in [("Activity", &s.activity), ("Native queue", &s.native)] {
+            let _ = writeln!(
+                out,
+                "{name}: keys {} (captured {}), motions {} (captured {})",
+                c.keys, c.captured_keys, c.motions, c.captured_motions
+            );
+        }
+        let captured = s.activity.captured_keys
+            + s.activity.captured_motions
+            + s.native.captured_keys
+            + s.native.captured_motions;
+        if captured == 0 {
+            out.push_str(concat!(
+                "No gamepad events captured. If these counters stay zero while using the controller, ",
+                "the input path is not delivering events.\n"
+            ));
+        }
+        out.push('\n');
+        out.push_str(&s.tester.report(&s.devices));
+        out
     }
 
     pub(super) fn capture(event: &InputEvent<'_>) -> bool {
@@ -247,16 +418,21 @@ mod android {
                 let source = u32::from(key.source());
                 let code = u32::from(key.key_code());
                 let id = key.device_id();
-                if !gamepad::is_controller_source(source) && !is_controller(id) {
-                    return false; // TV remote, keyboard and touch stay usable.
+                let candidate = is_gamepad_key(code, key.scan_code())
+                    || source & gamepad::SOURCE_JOYSTICK == gamepad::SOURCE_JOYSTICK
+                    || is_controller(id);
+                let mut guard = session();
+                let Some(s) = guard.as_mut() else { return false };
+                s.native.keys += 1;
+                if !candidate {
+                    return false; // TV remote and keyboard stay usable.
                 }
                 let pressed = match key.action() {
                     KeyAction::Down => true,
                     KeyAction::Up => false,
                     _ => return false,
                 };
-                let mut guard = session();
-                let Some(s) = guard.as_mut() else { return false };
+                s.native.captured_keys += 1;
                 s.tester
                     .key(id, source, key.scan_code(), code, pressed, key.repeat_count() > 0);
                 // Even unknown controller buttons must not navigate the settings.
@@ -264,15 +440,20 @@ mod android {
             }
             InputEvent::MotionEvent(motion) => {
                 let source = u32::from(motion.source());
-                if source & gamepad::SOURCE_JOYSTICK != gamepad::SOURCE_JOYSTICK
-                    || motion.action() != MotionAction::Move
-                {
-                    return false;
-                }
+                let candidate = source & gamepad::SOURCE_JOYSTICK == gamepad::SOURCE_JOYSTICK;
                 let mut guard = session();
                 let Some(s) = guard.as_mut() else { return false };
-                s.tester
-                    .motion(motion.device_id(), super::super::gamepads::android_axes(motion));
+                s.native.motions += 1;
+                if !candidate || motion.action() != MotionAction::Move {
+                    return false;
+                }
+                s.native.captured_motions += 1;
+                s.tester.motion(
+                    motion.device_id(),
+                    source,
+                    2,
+                    super::super::gamepads::android_axes(motion),
+                );
                 true
             }
             _ => false,
@@ -312,16 +493,36 @@ mod tests {
         let mut tester = Tester::default();
         tester.motion(
             2,
+            gamepad::SOURCE_JOYSTICK,
+            2,
             Axes {
                 rx: -1.0,
                 ltrigger: 0.5,
                 ..Default::default()
             },
         );
-        tester.motion(2, Axes::default());
+        tester.motion(2, gamepad::SOURCE_JOYSTICK, 2, Axes::default());
         let report = tester.report("");
         assert!(report.contains("RX 0.000 [-1.000, 0.000]"));
         assert!(report.contains("LTRIGGER 0.000 [0.000, 0.500]"));
+    }
+
+    #[test]
+    fn records_unmapped_motion_without_changing_stream_state() {
+        let mut tester = Tester::default();
+        tester.motion(
+            2,
+            gamepad::SOURCE_GAMEPAD,
+            2,
+            Axes {
+                x: 1.0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(tester.samples[&2].mapped.left_stick, (0, 0));
+        let report = tester.report("");
+        assert!(report.contains("X 1.000 [1.000, 1.000]"));
+        assert!(report.contains("Motion events: 1"));
     }
 
     #[test]

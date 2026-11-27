@@ -7,8 +7,11 @@ import android.content.res.Configuration;
 import android.os.Build;
 import android.util.Log;
 import android.util.Rational;
+import android.view.InputDevice;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
 
-/** Owns Android's PiP lifecycle. The session is still owned by Rust. */
+/** Owns Android's PiP lifecycle and debug-only input dispatch. Streaming stays in Rust. */
 public final class HestiaActivity extends NativeActivity {
     private static final Rational DEFAULT_ASPECT = new Rational(16, 9);
     private Rational aspect = DEFAULT_ASPECT;
@@ -16,6 +19,62 @@ public final class HestiaActivity extends NativeActivity {
     private boolean resumed;
     // Kept through a possible mode-changed(false) callback during dismissal.
     private boolean pipSession;
+
+    // Registered by Rust before enabling the offline tester. The native
+    // queue remains a fallback for events that bypass Activity dispatch.
+    private volatile boolean controllerTesterEnabled;
+    private native boolean nativeControllerTesterKey(int deviceId, int source, int scanCode,
+            int keyCode, int action, boolean repeat, boolean candidate);
+    private native boolean nativeControllerTesterMotion(int deviceId, int source, int action,
+            boolean candidate, float x, float y, float z, float rz, float rx, float ry,
+            float lt, float rt, float brake, float gas, float hatX, float hatY);
+
+    @SuppressWarnings("unused") // Called from Rust through JNI.
+    private void setControllerTesterEnabled(boolean enabled) {
+        controllerTesterEnabled = enabled;
+    }
+
+    private static boolean hasJoystick(InputDevice device) {
+        return device != null
+                && (device.getSources() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (controllerTesterEnabled) {
+            int scan = event.getScanCode();
+            // Some remotes advertise GAMEPAD along with DPAD. Ordinary TV
+            // navigation must remain usable; real controller keys can also
+            // arrive with a keyboard source or an unknown Android keycode.
+            boolean candidate = hasJoystick(event.getDevice())
+                    || KeyEvent.isGamepadButton(event.getKeyCode())
+                    || (scan >= 0x130 && scan <= 0x13f);
+            if (nativeControllerTesterKey(event.getDeviceId(), event.getSource(), scan,
+                    event.getKeyCode(), event.getAction(), event.getRepeatCount() > 0, candidate)) {
+                return true;
+            }
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    @Override
+    public boolean dispatchGenericMotionEvent(MotionEvent event) {
+        if (controllerTesterEnabled) {
+            boolean candidate = hasJoystick(event.getDevice())
+                    || event.isFromSource(InputDevice.SOURCE_JOYSTICK);
+            if (nativeControllerTesterMotion(event.getDeviceId(), event.getSource(),
+                    event.getActionMasked(), candidate,
+                    event.getAxisValue(MotionEvent.AXIS_X), event.getAxisValue(MotionEvent.AXIS_Y),
+                    event.getAxisValue(MotionEvent.AXIS_Z), event.getAxisValue(MotionEvent.AXIS_RZ),
+                    event.getAxisValue(MotionEvent.AXIS_RX), event.getAxisValue(MotionEvent.AXIS_RY),
+                    event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_RTRIGGER),
+                    event.getAxisValue(MotionEvent.AXIS_BRAKE), event.getAxisValue(MotionEvent.AXIS_GAS),
+                    event.getAxisValue(MotionEvent.AXIS_HAT_X), event.getAxisValue(MotionEvent.AXIS_HAT_Y))) {
+                return true;
+            }
+        }
+        return super.dispatchGenericMotionEvent(event);
+    }
 
     // Registered by Rust before enabling PiP.
     private native void onNativePictureInPictureChanged(boolean inPip, boolean dismissed);

@@ -106,9 +106,11 @@ public final class HestiaHelper {
             || (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
     }
 
-    /** A D-pad-only key event can still belong to a real controller. */
+    /** Distinguish a joystick-capable controller from a TV remote advertising GAMEPAD. */
     public static boolean controllerTesterIsDevice(int id) {
-        return isGameController(InputDevice.getDevice(id));
+        InputDevice device = InputDevice.getDevice(id);
+        return device != null
+            && (device.getSources() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
     }
 
     /** A regular decoder that can accept the requested stream mode. */
