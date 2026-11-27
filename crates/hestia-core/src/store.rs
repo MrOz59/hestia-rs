@@ -32,6 +32,8 @@ pub enum AppearanceTheme {
     Midnight,
     Electric,
     FrostedGlass,
+    Blue,
+    DarkRainbow,
     #[default]
     #[serde(other)]
     Hearth,
@@ -39,12 +41,14 @@ pub enum AppearanceTheme {
 
 impl AppearanceTheme {
     /// The order of the theme choices in Settings and the matching Slint palettes.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::Hearth,
         Self::Daylight,
         Self::Midnight,
         Self::Electric,
         Self::FrostedGlass,
+        Self::Blue,
+        Self::DarkRainbow,
     ];
 }
 

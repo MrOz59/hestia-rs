@@ -66,7 +66,9 @@ export global Theme {
     property <ThemePalette> palette: root.selection == 1 ? root.daylight
         : root.selection == 2 ? root.midnight
         : root.selection == 3 ? root.electric
-        : root.selection == 4 ? root.frosted-glass : root.hearth;
+        : root.selection == 4 ? root.frosted-glass
+        : root.selection == 5 ? root.blue
+        : root.selection == 6 ? root.dark-rainbow : root.hearth;
     property <ThemePalette> hearth: {
         bg: #110e0c,
         surface: #1a1613,
@@ -128,6 +130,46 @@ export global Theme {
         scrim: #070709d9,
     };
     property <ThemePalette> electric: {
+        bg: #0b0927,
+        surface: #141333,
+        card: #151b3c,
+        card-hover: #213457,
+        border: #5b90cd,
+        text: #eaf9ff,
+        muted: #becfe2,
+        faint: #a2bad5,
+        accent: #34efff,
+        accent-hover: #81f8ff,
+        accent-pressed: #08c6df,
+        on-accent: #041824,
+        glow: #34efff66,
+        ok: #82ffc9,
+        warn: #ffda70,
+        danger: #ff9bb7,
+        info: #a9d5ff,
+        scrim: #071225dd,
+    };
+    property <ThemePalette> frosted-glass: {
+        bg: #102d42,
+        surface: #254a61e8,
+        card: #9bd6ed2b,
+        card-hover: #2d526bcf,
+        border: #91c2d4,
+        text: #f3fbff,
+        muted: #d3ecf7,
+        faint: #c9e2ef,
+        accent: #b7f0ff,
+        accent-hover: #d9f9ff,
+        accent-pressed: #92d4e9,
+        on-accent: #0b283c,
+        glow: #b5e9fc69,
+        ok: #a9f0db,
+        warn: #ffe0a1,
+        danger: #ffd8e4,
+        info: #b7e7ff,
+        scrim: #061421d6,
+    };
+    property <ThemePalette> blue: {
         bg: #0a1427,
         surface: #101e35,
         card: #142842,
@@ -147,25 +189,25 @@ export global Theme {
         info: #a9d5ff,
         scrim: #071225dd,
     };
-    property <ThemePalette> frosted-glass: {
-        bg: #dae8f5,
-        surface: #f8fbfff0,
-        card: #ffffffc8,
-        card-hover: #e9f3ffc9,
-        border: #9eaccb,
-        text: #14263f,
-        muted: #394e6b,
-        faint: #425a76,
-        accent: #31508a,
-        accent-hover: #3c5c95,
-        accent-pressed: #273e70,
-        on-accent: #ffffff,
-        glow: #496cab55,
-        ok: #17664b,
-        warn: #765000,
-        danger: #992542,
-        info: #254d8c,
-        scrim: #192d4ab8,
+    property <ThemePalette> dark-rainbow: {
+        bg: #000000,
+        surface: #100b21,
+        card: #170e29,
+        card-hover: #24173d,
+        border: #423060,
+        text: #faf4ff,
+        muted: #d3c7e4,
+        faint: #b7a9cf,
+        accent: #ea89ff,
+        accent-hover: #f2b0ff,
+        accent-pressed: #cd7dfb,
+        on-accent: #210b34,
+        glow: #db66ff78,
+        ok: #79ffbc,
+        warn: #ffe07c,
+        danger: #ff83af,
+        info: #78e4ff,
+        scrim: #080413d9,
     };
 
     out property <color> bg: root.palette.bg;
@@ -186,8 +228,24 @@ export global Theme {
     out property <color> danger: root.palette.danger;
     out property <color> info: root.palette.info;
     out property <color> scrim: root.palette.scrim;
-    out property <brush> backdrop: root.selection == 4
-        ? @linear-gradient(145deg, #ccdff5 0%, #f0f5fd 50%, #d8d4ee 100%) : root.bg;
+    out property <bool> electric-effects: root.selection == 3;
+    out property <bool> frost-effects: root.selection == 4;
+    out property <bool> rainbow-effects: root.selection == 6;
+    out property <brush> heading-ink: root.rainbow-effects
+        ? @linear-gradient(90deg, #ff749d 0%, #ffd171 20%, #7afbb8 40%, #72e6ff 60%, #bf9cff 80%, #ff85ef 100%)
+        : root.text;
+    out property <brush> backdrop: root.frost-effects
+        ? @linear-gradient(145deg, #091c34 0%, #123c51 42%, #102d42 68%, #15253f 100%)
+        : root.electric-effects ? @linear-gradient(145deg, #0b0927, #15113b 48%, #08192e) : root.bg;
+    out property <brush> panel-face: root.frost-effects
+        ? @linear-gradient(160deg, #225479c0, #0e314db3 61%, #182e4dc0)
+        : root.electric-effects ? @linear-gradient(130deg, #24205a, root.card 72%)
+        : root.rainbow-effects ? @linear-gradient(145deg, #211039, root.card 47%, #0e142b) : root.card;
+    out property <brush> panel-edge: root.frost-effects
+        ? @linear-gradient(155deg, #def8ffe0, #83ccde6b 34%, #b5e9fc46 78%, #c4eefe96)
+        : root.electric-effects ? @linear-gradient(110deg, #d3fcff, #24d5ff 24%, #af82ff 71%, #38e8ff)
+        : root.rainbow-effects ? @linear-gradient(125deg, #fa75b994, #7dfed585 48%, #927cffb8)
+        : root.border.transparentize(0.5);
     out property <string> font: "Outfit";
 
     // Session launch (session-launch.slint). Each role follows the palette
@@ -217,8 +275,8 @@ export global Theme {
     out property <length> gap: root.compact ? 12px : 18px;
     // Touch targets: 48px on phones.
     out property <length> control-height: root.compact ? 48px : 44px;
-    out property <length> radius: 18px;
-    out property <length> radius-sm: 12px;
+    out property <length> radius: root.electric-effects ? 7px : root.frost-effects ? 22px : 18px;
+    out property <length> radius-sm: root.electric-effects ? 6px : root.frost-effects ? 15px : 12px;
 
     // Type scale (Outfit)
     out property <length> display-size: root.compact || root.short ? 26px : 32px;
@@ -226,6 +284,42 @@ export global Theme {
     out property <length> heading-size: root.compact ? 16px : 15px;
     out property <length> body-size: root.compact ? 15px : 14px;
     out property <length> caption-size: root.compact ? 13px : 12px;
+}
+
+export component FrostBackdrop inherits Rectangle {
+    clip: true;
+    Image {
+        width: root.width;
+        height: root.height;
+        source: @image-url("../artwork/frosted-window.jpg");
+        image-fit: cover;
+    }
+    Rectangle {
+        background: @linear-gradient(90deg, #031428ab, #071b315b 60%, #071b3150);
+    }
+}
+
+// Only mounted on a highlighted card or on the Appearance panel. The
+// outline is static, and the small arc moves independently along its edge.
+export component VoltageTrace inherits Rectangle {
+    private property <length> bolt-width: min(164px, root.width * 0.56);
+    for edge in 2: Rectangle {
+        private property <float> phase: mod(animation-tick() + edge * 1100ms, 2800ms) / 2800ms;
+        x: 7px + max(0px, root.width - root.bolt-width - 14px) * (edge == 0 ? self.phase : 1 - self.phase);
+        y: edge == 0 ? -13px : root.height - 13px;
+        width: root.bolt-width;
+        height: 26px;
+        transform-scale-y: edge == 0 ? 1 : -1;
+        background: @radial-gradient(ellipse, #35d8ff9b, #7957ff36 42%, transparent 72%);
+        Path {
+            viewbox-width: 164;
+            viewbox-height: 26;
+            fill: transparent;
+            stroke: @linear-gradient(90deg, #24d7ff00, #66f0ff 30%, #f4ffff 58%, #82e4ff 85%, #6079ff00);
+            stroke-width: 2px;
+            commands: "M0 13 L25 13 L38 10 L51 13 L64 8 L77 15 L88 4 L98 13 L111 13 L123 10 L138 13 L164 13 M64 8 L43 3 L27 5 M88 4 L103 1 L116 3 M77 15 L61 23 L47 21 M111 13 L126 22 L140 19";
+        }
+    }
 }
 
 // Material Icons (Apache License 2.0), 24x24 view box.

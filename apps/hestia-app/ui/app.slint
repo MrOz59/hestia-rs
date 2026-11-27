@@ -1,4 +1,4 @@
-import { Theme, Nav, Icon, ActionButton, Loader, TextField, Modal, DialogTitle, DialogText } from "theme.slint";
+import { Theme, Nav, FrostBackdrop, Icon, ActionButton, Loader, TextField, Modal, DialogTitle, DialogText } from "theme.slint";
 import { HostCard, AppCard, CommandRow, PreflightRow, HostsPage, AppsPage, SessionPage, SettingsPage, ToolsPage, ReportPage } from "pages.slint";
 import { SessionLaunch } from "session-launch.slint";
 import { StreamView, PadControl } from "stream.slint";
@@ -429,6 +429,11 @@ export component AppWindow inherits Window {
     callback form-navigation-changed(bool);
     changed form-navigation => {
         root.form-navigation-changed(self.form-navigation);
+    }
+
+    if Theme.frost-effects && root.screen != 4 && root.screen != 7: FrostBackdrop {
+        width: root.width;
+        height: root.height;
     }
 
     // Every screen lives inside this scope, so keys nobody else handled

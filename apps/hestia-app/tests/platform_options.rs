@@ -297,13 +297,23 @@ fn appearance_previews_and_only_persists_on_save() {
 
     ui.set_screen(3);
     settle();
-    for (index, label) in ["Daylight (light)", "Midnight", "Electric", "Frosted Glass"]
-        .into_iter()
-        .enumerate()
+    for (index, label) in [
+        "Daylight (light)",
+        "Midnight",
+        "Electric",
+        "Frosted Glass",
+        "Blue",
+        "Dark Rainbow",
+    ]
+    .into_iter()
+    .enumerate()
     {
         tap("Theme");
         tap(label);
         assert_eq!(ui.global::<Theme>().get_selection(), index as i32 + 1);
+        assert_eq!(ui.global::<Theme>().get_electric_effects(), label == "Electric");
+        assert_eq!(ui.global::<Theme>().get_frost_effects(), label == "Frosted Glass");
+        assert_eq!(ui.global::<Theme>().get_rainbow_effects(), label == "Dark Rainbow");
     }
     assert_eq!(saved.get(), None);
     tap("Back");
