@@ -61,6 +61,11 @@ struct ThemePalette {
     scrim: color,
 }
 
+export struct VoltagePaths {
+    arc: string,
+    forks: string,
+}
+
 export global Theme {
     in-out property <int> selection;
     property <ThemePalette> palette: root.selection == 1 ? root.daylight
@@ -231,8 +236,11 @@ export global Theme {
     out property <bool> electric-effects: root.selection == 3;
     out property <bool> frost-effects: root.selection == 4;
     out property <bool> rainbow-effects: root.selection == 6;
-    in-out property <int> spectrum-phase: 0;
+    in-out property <bool> effects-motion: true;
+    out property <int> spectrum-phase: root.rainbow-effects && root.effects-motion
+        ? floor(96 * mod(animation-tick(), 6100ms) / 6100ms) : 0;
     pure callback spectrum-heading(string, int) -> styled-text;
+    pure callback voltage-paths(float, float, float, int) -> VoltagePaths;
     out property <color> primary-fill: root.rainbow-effects ? #241334 : root.accent;
     out property <color> primary-hover: root.rainbow-effects ? #301b46 : root.accent-hover;
     out property <color> primary-pressed: root.rainbow-effects ? #1c102e : root.accent-pressed;
@@ -310,12 +318,6 @@ export component ThemeHeading inherits VerticalLayout {
 
 export component FrostBackdrop inherits Rectangle {
     clip: true;
-    private property <int> shimmer-tick;
-    Timer {
-        running: true;
-        interval: 50ms;
-        triggered => { root.shimmer-tick = root.shimmer-tick + 1; }
-    }
     Image {
         width: root.width;
         height: root.height;
@@ -325,40 +327,81 @@ export component FrostBackdrop inherits Rectangle {
     Rectangle {
         background: @linear-gradient(90deg, #031428ab, #071b315b 60%, #071b3150);
     }
-    // Stagger small glints across the ice behind the translucent panels.
-    for i in 20: Rectangle {
-        private property <int> period: 100 + Math.mod(i * 31, 84);
-        private property <float> phase: 1.0 * Math.mod(root.shimmer-tick + i * 37, self.period) / self.period;
-        private property <float> pulse: max(0, 1 - 6 * abs(self.phase - 0.5));
-        width: 7px + Math.mod(i * 7, 12) * 1px;
+}
+
+// Tiny front reflections stay visible over the frosted panels. Stagger
+// their timing and use a soft halo so they read like reflections on ice.
+export component FrostGlints inherits Rectangle {
+    private property <duration> clock: animation-tick();
+    for i in 24: Rectangle {
+        private property <duration> period: 2400ms + mod(i * 487ms, 2200ms);
+        private property <float> phase: mod(root.clock + i * 719ms, self.period) / self.period;
+        private property <float> pulse: max(0, sin(self.phase * 360deg));
+        private property <float> brightness: self.pulse * self.pulse * self.pulse * self.pulse;
+        width: 15px + mod(i * 7, 12) * 1px;
         height: self.width;
-        x: root.width * (Math.mod(11 + i * 37, 97) + 2) / 100 - self.width / 2;
-        y: root.height * (Math.mod(23 + i * 53 + i * i * 7, 97) + 2) / 100 - self.height / 2;
-        opacity: self.pulse * self.pulse * 0.50;
-        background: @radial-gradient(circle, #effcff 0%, #c8edff9c 15%, #adddff30 40%, transparent 70%);
+        x: root.width * (mod(11 + i * 37, 97) + 2) / 100 - self.width / 2;
+        y: root.height * (mod(23 + i * 53 + i * i * 7, 97) + 2) / 100 - self.height / 2;
+        background: @radial-gradient(circle, #c7eeff.with-alpha(0.49 * self.brightness), transparent 68%);
+        Path {
+            width: parent.width * (0.38 + 0.24 * parent.brightness);
+            height: self.width;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            viewbox-width: 20;
+            viewbox-height: 20;
+            fill: #f4fcff.with-alpha(0.82 * parent.brightness);
+            commands: "M10 0 Q11 9 20 10 Q11 11 10 20 Q9 11 0 10 Q9 9 10 0 Z";
+        }
     }
 }
 
-// Only mounted on a highlighted card or on the Appearance panel. The
-// outline is static, and the small arc moves independently along its edge.
+// The strands wind in and out across the outline while following all four edges.
 export component VoltageTrace inherits Rectangle {
-    private property <length> bolt-width: min(164px, root.width * 0.56);
-    for edge in 2: Rectangle {
-        private property <float> phase: mod(animation-tick() + edge * 1100ms, 2800ms) / 2800ms;
-        x: 7px + max(0px, root.width - root.bolt-width - 14px) * (edge == 0 ? self.phase : 1 - self.phase);
-        y: edge == 0 ? -13px : root.height - 13px;
-        width: root.bolt-width;
-        height: 26px;
-        transform-scale-y: edge == 0 ? 1 : -1;
-        background: @radial-gradient(ellipse, #35d8ff9b, #7957ff36 42%, transparent 72%);
-        Path {
-            viewbox-width: 164;
-            viewbox-height: 26;
-            fill: transparent;
-            stroke: @linear-gradient(90deg, #24d7ff00, #66f0ff 30%, #f4ffff 58%, #82e4ff 85%, #6079ff00);
-            stroke-width: 2px;
-            commands: "M0 13 L25 13 L38 10 L51 13 L64 8 L77 15 L88 4 L98 13 L111 13 L123 10 L138 13 L164 13 M64 8 L43 3 L27 5 M88 4 L103 1 L116 3 M77 15 L61 23 L47 21 M111 13 L126 22 L140 19";
-        }
+    in property <length> corner-radius: Theme.radius;
+    in property <length> phase-offset;
+    private property <int> tick: floor(mod(animation-tick(), 900000ms) / 33ms + root.phase-offset / 6px);
+    private property <VoltagePaths> strands: Theme.voltage-paths(root.width / 1px, root.height / 1px, root.corner-radius / 1px, root.tick);
+
+    Path {
+        width: root.width;
+        height: root.height;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        fill: transparent;
+        stroke: #5375ff46;
+        stroke-width: 7px;
+        commands: root.strands.arc;
+    }
+    Path {
+        width: root.width;
+        height: root.height;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        fill: transparent;
+        stroke: @linear-gradient(115deg, #58ddff, #99adff 52%, #60ddfe);
+        stroke-width: 3px;
+        commands: root.strands.arc;
+    }
+    Path {
+        width: root.width;
+        height: root.height;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        fill: transparent;
+        stroke: #ecffff;
+        stroke-width: 1.15px;
+        commands: root.strands.arc;
+    }
+    Path {
+        width: root.width;
+        height: root.height;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        fill: transparent;
+        stroke: @linear-gradient(145deg, #caffff, #777bffba);
+        stroke-width: 1.1px;
+        commands: root.strands.forks;
     }
 }
 

@@ -45,7 +45,6 @@ export component RowBase inherits Focusable {
 // A titled block of rows.
 export component Group inherits VerticalLayout {
     in property <string> title;
-    in property <bool> energized;
     spacing: 8px;
     if root.title != "": ThemeHeading {
         label: root.title;
@@ -64,7 +63,9 @@ export component Group inherits VerticalLayout {
             spacing: 2px;
             @children
         }
-        if Theme.electric-effects && root.energized: VoltageTrace { }
+        if Theme.electric-effects && Theme.effects-motion: VoltageTrace {
+            phase-offset: root.y;
+        }
     }
 }
 
@@ -117,6 +118,7 @@ export component SwitchRow inherits RowBase {
 // One value out of a list: left / right step through it, Return or a tap
 // opens the whole list (`open`).
 export component ChoiceRow inherits RowBase {
+    in property <length> value-min-width;
     in property <string> label;
     in property <string> hint;
     in property <[string]> options;
@@ -168,6 +170,7 @@ export component ChoiceRow inherits RowBase {
                 }
             }
             Text {
+                min-width: min(root.value-min-width, self.max-width);
                 max-width: root.width * 0.42;
                 text: root.options[root.index];
                 color: Theme.text;

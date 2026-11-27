@@ -73,7 +73,7 @@ component HostTile inherits Focusable {
     transform-scale: root.pressed ? 0.98 : (root.focused ? 1.03 : 1);
     animate transform-scale { duration: 240ms; easing: ease-out-back; }
 
-    if Theme.electric-effects && (root.focused || root.hovered): VoltageTrace { }
+    if Theme.electric-effects && Theme.effects-motion && (root.focused || root.hovered): VoltageTrace { }
 
     VerticalLayout {
         padding: Theme.compact ? 16px : 18px;
@@ -655,7 +655,9 @@ component AppTile inherits Focusable {
             : root.app.running ? Theme.accent.transparentize(0.25) : root.hovered ? Theme.faint : #ffffff14;
         animate border-color { duration: 120ms; }
     }
-    if Theme.electric-effects && root.lit: VoltageTrace { }
+    if Theme.electric-effects && Theme.effects-motion && root.lit: VoltageTrace {
+        corner-radius: root.tile-radius;
+    }
 }
 
 // The app running on the host, with Resume and Quit.
@@ -1706,9 +1708,9 @@ export component SettingsPage inherits Page {
 
                     Group {
                         title: "Appearance";
-                        energized: true;
                         ChoiceRow {
                             label: "Theme";
+                            value-min-width: 108px;
                             hint: root.theme-save-failed ? "Could not save the theme. Try again." : "Save to apply the preview on this device";
                             options: root.theme-names;
                             index <=> root.theme;

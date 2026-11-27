@@ -56,6 +56,7 @@ fn run_window(
     desktop_input::install();
     let ui = AppWindow::new()?;
     ui.global::<Theme>().on_spectrum_heading(appearance::spectrum_heading);
+    ui.global::<Theme>().on_voltage_paths(appearance::voltage_paths);
     let appearance_dir = data_dir.clone();
     match Store::open(&appearance_dir).and_then(|store| store.load_theme()) {
         Ok(theme) => {

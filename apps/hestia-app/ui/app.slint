@@ -1,4 +1,4 @@
-import { Theme, Nav, FrostBackdrop, Icon, ActionButton, Loader, TextField, Modal, DialogTitle, DialogText } from "theme.slint";
+import { Theme, Nav, FrostBackdrop, FrostGlints, Icon, ActionButton, Loader, TextField, Modal, DialogTitle, DialogText } from "theme.slint";
 import { HostCard, AppCard, CommandRow, PreflightRow, HostsPage, AppsPage, SessionPage, SettingsPage, ToolsPage, ReportPage } from "pages.slint";
 import { SessionLaunch } from "session-launch.slint";
 import { StreamView, PadControl } from "stream.slint";
@@ -6,7 +6,7 @@ import { StreamView, PadControl } from "stream.slint";
 export { HostCard, AppCard, CommandRow, PreflightRow } from "pages.slint";
 export { PadControl } from "stream.slint";
 // Themes set the palette's run-time roles (the launch's, for now) from Rust.
-export { Theme } from "theme.slint";
+export { Theme, VoltagePaths } from "theme.slint";
 
 export component AppWindow inherits Window {
     title: "Hestia";
@@ -26,6 +26,7 @@ export component AppWindow inherits Window {
         Theme.window-width = self.width;
         Theme.window-height = self.height;
         Theme.selection = root.effective-theme;
+        Theme.effects-motion = root.effects-motion;
     }
     changed width => {
         Theme.window-width = self.width;
@@ -51,10 +52,9 @@ export component AppWindow inherits Window {
     changed effective-theme => {
         Theme.selection = root.effective-theme;
     }
-    Timer {
-        running: Theme.rainbow-effects && root.screen != 4 && root.screen != 7 && !root.launch-preview;
-        interval: 125ms;
-        triggered => { Theme.spectrum-phase = Math.mod(Theme.spectrum-phase + 1, 96); }
+    private property <bool> effects-motion: root.screen != 4 && root.screen != 7 && !root.launch-preview;
+    changed effects-motion => {
+        Theme.effects-motion = root.effects-motion;
     }
     callback save-theme(int) -> bool;
 
@@ -436,7 +436,7 @@ export component AppWindow inherits Window {
         root.form-navigation-changed(self.form-navigation);
     }
 
-    if Theme.frost-effects && root.screen != 4 && root.screen != 7 && !root.launch-preview: FrostBackdrop {
+    if Theme.frost-effects && root.effects-motion: FrostBackdrop {
         width: root.width;
         height: root.height;
     }
@@ -861,6 +861,8 @@ export component AppWindow inherits Window {
                 }
             }
         }
+
+        if Theme.frost-effects && root.effects-motion: FrostGlints { }
 
         if root.screen == 3 && root.launch-preview: SessionLaunch {
             width: 100%;
