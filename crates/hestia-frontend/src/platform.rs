@@ -4,10 +4,10 @@
 #[cfg(target_os = "android")]
 mod android;
 mod clipboard;
-mod display;
-mod gamepads;
 #[cfg(any(target_os = "android", test))]
 mod controller_tester;
+mod display;
+mod gamepads;
 mod input;
 mod keyboard;
 #[cfg(target_os = "android")]
@@ -18,6 +18,8 @@ mod reports;
 #[cfg(target_os = "android")]
 pub use android::{set_android_app, video_decoders};
 pub use clipboard::{clipboard_stamp, clipboard_text, set_clipboard_text};
+#[cfg(target_os = "android")]
+pub use controller_tester::{controller_tester_active, controller_tester_report};
 pub use display::{device_summary, native_display, set_direct_video, set_stream_mode};
 #[cfg(target_os = "android")]
 pub(crate) use gamepads::release_android_gamepads;
@@ -27,8 +29,6 @@ pub use gamepads::{
 };
 #[cfg(target_os = "android")]
 pub use input::android_input_hook;
-#[cfg(target_os = "android")]
-pub use controller_tester::{controller_tester_active, controller_tester_report};
 pub use input::{has_pointer_capture, set_key_sink, set_pointer_sink};
 pub use keyboard::{has_physical_keyboard, has_soft_keyboard, set_ime_sink, set_keyboard_visible};
 #[cfg(target_os = "android")]

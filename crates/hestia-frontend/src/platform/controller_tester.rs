@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 
-use hestia_core::stream::input::{buttons, GamepadState};
+use hestia_core::stream::input::{GamepadState, buttons};
+
 use crate::gamepad::{self, Axes, Control, Controllers};
 
 const MAX_HISTORY: usize = 96;
@@ -31,15 +32,31 @@ struct Tester {
 
 fn button_names(mask: u32) -> String {
     let names = [
-        (buttons::A, "A"), (buttons::B, "B"), (buttons::X, "X"), (buttons::Y, "Y"),
-        (buttons::LB, "LB"), (buttons::RB, "RB"), (buttons::BACK, "Back"),
-        (buttons::PLAY, "Start"), (buttons::SPECIAL, "Guide"),
-        (buttons::LS_CLICK, "LS"), (buttons::RS_CLICK, "RS"),
-        (buttons::UP, "Up"), (buttons::DOWN, "Down"),
-        (buttons::LEFT, "Left"), (buttons::RIGHT, "Right"),
+        (buttons::A, "A"),
+        (buttons::B, "B"),
+        (buttons::X, "X"),
+        (buttons::Y, "Y"),
+        (buttons::LB, "LB"),
+        (buttons::RB, "RB"),
+        (buttons::BACK, "Back"),
+        (buttons::PLAY, "Start"),
+        (buttons::SPECIAL, "Guide"),
+        (buttons::LS_CLICK, "LS"),
+        (buttons::RS_CLICK, "RS"),
+        (buttons::UP, "Up"),
+        (buttons::DOWN, "Down"),
+        (buttons::LEFT, "Left"),
+        (buttons::RIGHT, "Right"),
     ];
-    let active: Vec<_> = names.into_iter().filter_map(|(bit, name)| (mask & bit != 0).then_some(name)).collect();
-    if active.is_empty() { "none".into() } else { active.join(" + ") }
+    let active: Vec<_> = names
+        .into_iter()
+        .filter_map(|(bit, name)| (mask & bit != 0).then_some(name))
+        .collect();
+    if active.is_empty() {
+        "none".into()
+    } else {
+        active.join(" + ")
+    }
 }
 
 impl Tester {
@@ -76,7 +93,11 @@ impl Tester {
             self.keys.pop_front();
         }
         let action = if pressed { "DOWN" } else { "UP" };
-        let source_note = if gamepad::is_controller_source(source) { "" } else { " [source rejected by stream]" };
+        let source_note = if gamepad::is_controller_source(source) {
+            ""
+        } else {
+            " [source rejected by stream]"
+        };
         self.keys.push_back(format!(
             "id {id} {action} scan {scan} key {code} src 0x{source:08x} => {mapped}{source_note}"
         ));
@@ -96,13 +117,23 @@ impl Tester {
 
     fn report(&self, devices: &str) -> String {
         let mut out = String::from("Hestia controller tester — current mapping (no corrections)\n\n");
+        for line in devices.lines().filter(|line| !line.starts_with("  ")) {
+            let _ = writeln!(out, "{line}");
+        }
+        if let Some(key) = self.keys.back() {
+            let _ = writeln!(out, "\nLast key: {key}");
+        }
         if self.samples.is_empty() {
             out.push_str("Waiting for controller input…\n");
         }
         for (id, sample) in &self.samples {
             let s = sample.mapped;
             let _ = writeln!(out, "Device {id}: buttons {} (0x{:08x})", button_names(s.buttons), s.buttons);
-            let _ = writeln!(out, "  LS {:?}  RS {:?}  LT {}  RT {}", s.left_stick, s.right_stick, s.left_trigger, s.right_trigger);
+            let _ = writeln!(
+                out,
+                "  LS {:?}  RS {:?}  LT {}  RT {}",
+                s.left_stick, s.right_stick, s.left_trigger, s.right_trigger
+            );
             if let Some((current, min, max)) = &sample.axes {
                 out.push_str("  Raw axes: current [observed min, max]\n");
                 for i in 0..AXIS_NAMES.len() {
@@ -124,7 +155,9 @@ impl Tester {
 mod android {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
+
     use android_activity::input::{InputEvent, KeyAction, MotionAction};
+
     use super::*;
 
     #[derive(Default)]
@@ -148,29 +181,37 @@ mod android {
         use jni::objects::JString;
         let mut text = String::new();
         let result = super::super::android::with_helper(|env, _, helper| {
-            let value = env.call_static_method(helper, "controllerTesterDevices", "()Ljava/lang/String;", &[])?.l()?;
+            let value = env
+                .call_static_method(helper, "controllerTesterDevices", "()Ljava/lang/String;", &[])?
+                .l()?;
             let value = JString::from(value);
             text = env.get_string(&value)?.into();
             env.delete_local_ref(value)?;
             Ok(())
         });
-        if let Err(error) = result { format!("Could not enumerate input devices: {error}") } else { text }
+        if let Err(error) = result {
+            format!("Could not enumerate input devices: {error}")
+        } else {
+            text
+        }
     }
 
     fn is_controller(id: i32) -> bool {
         use jni::objects::JValue;
         let mut found = false;
         let _ = super::super::android::with_helper(|env, _, helper| {
-            found = env.call_static_method(helper, "controllerTesterIsDevice", "(I)Z", &[JValue::Int(id)])?.z()?;
+            found = env
+                .call_static_method(helper, "controllerTesterIsDevice", "(I)Z", &[JValue::Int(id)])?
+                .z()?;
             Ok(())
         });
         found
     }
 
     pub fn controller_tester_report() -> String {
-        let refresh = session().as_ref().is_some_and(|s| {
-            s.last_inventory.is_none_or(|last| last.elapsed() >= Duration::from_secs(1))
-        });
+        let refresh = session()
+            .as_ref()
+            .is_some_and(|s| s.last_inventory.is_none_or(|last| last.elapsed() >= Duration::from_secs(1)));
         // Do not hold the state lock across JNI.
         let devices = refresh.then(inventory);
         let mut guard = session();
@@ -202,18 +243,21 @@ mod android {
                 };
                 let mut guard = session();
                 let Some(s) = guard.as_mut() else { return false };
-                s.tester.key(id, source, key.scan_code(), code, pressed, key.repeat_count() > 0);
+                s.tester
+                    .key(id, source, key.scan_code(), code, pressed, key.repeat_count() > 0);
                 // Even unknown controller buttons must not navigate the settings.
                 true
             }
             InputEvent::MotionEvent(motion) => {
                 let source = u32::from(motion.source());
-                if source & gamepad::SOURCE_JOYSTICK != gamepad::SOURCE_JOYSTICK || motion.action() != MotionAction::Move {
+                if source & gamepad::SOURCE_JOYSTICK != gamepad::SOURCE_JOYSTICK || motion.action() != MotionAction::Move
+                {
                     return false;
                 }
                 let mut guard = session();
                 let Some(s) = guard.as_mut() else { return false };
-                s.tester.motion(motion.device_id(), super::super::gamepads::android_axes(motion));
+                s.tester
+                    .motion(motion.device_id(), super::super::gamepads::android_axes(motion));
                 true
             }
             _ => false,
@@ -251,7 +295,14 @@ mod tests {
     #[test]
     fn records_axis_extrema_after_release() {
         let mut tester = Tester::default();
-        tester.motion(2, Axes { rx: -1.0, ltrigger: 0.5, ..Default::default() });
+        tester.motion(
+            2,
+            Axes {
+                rx: -1.0,
+                ltrigger: 0.5,
+                ..Default::default()
+            },
+        );
         tester.motion(2, Axes::default());
         let report = tester.report("");
         assert!(report.contains("RX 0.000 [-1.000, 0.000]"));

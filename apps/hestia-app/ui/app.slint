@@ -287,6 +287,7 @@ export component AppWindow inherits Window {
     callback controller-tester-toggle(bool);
     callback controller-tester-read() -> string;
     callback controller-tester-copy(string) -> string;
+    callback controller-tester-share(string) -> string;
     changed controller-tester => {
         root.controller-tester-toggle(root.controller-tester);
         root.controller-tester-copy-status = "";
@@ -864,9 +865,25 @@ export component AppWindow inherits Window {
             height: 100%;
             background: Theme.bg;
             property <int> tester-nav: 0;
+            function scroll-report(k: string) -> bool {
+                if (k == Key.DownArrow) {
+                    report-scroll.content-y = Math.max(Math.min(0px, report-scroll.height - report-scroll.content-height), report-scroll.content-y - 100px);
+                    return true;
+                }
+                if (k == Key.UpArrow) {
+                    report-scroll.content-y = Math.min(0px, report-scroll.content-y + 100px);
+                    return true;
+                }
+                return false;
+            }
             VerticalLayout {
                 padding: Theme.page-padding;
                 spacing: 8px;
+                Text {
+                    text: "Controller tester";
+                    color: Theme.text;
+                    font-size: Theme.body-size;
+                }
                 HorizontalLayout {
                     spacing: 8px;
                     ActionButton {
@@ -876,15 +893,8 @@ export component AppWindow inherits Window {
                         clicked => { root.controller-tester = false; }
                         nav(k) => {
                             if (k == Key.RightArrow) { tester-page.tester-nav = 1; return true; }
-                            return false;
+                            return tester-page.scroll-report(k);
                         }
-                    }
-                    Text {
-                        text: "Controller tester";
-                        color: Theme.text;
-                        font-size: Theme.body-size;
-                        horizontal-stretch: 1;
-                        vertical-alignment: center;
                     }
                     ActionButton {
                         text: "Copy report";
@@ -892,11 +902,25 @@ export component AppWindow inherits Window {
                         entered => { tester-page.tester-nav = 1; }
                         nav(k) => {
                             if (k == Key.LeftArrow) { tester-page.tester-nav = 0; return true; }
-                            return false;
+                            if (k == Key.RightArrow) { tester-page.tester-nav = 2; return true; }
+                            return tester-page.scroll-report(k);
                         }
                         clicked => {
                             root.controller-tester-text = root.controller-tester-read();
                             root.controller-tester-copy-status = root.controller-tester-copy(root.controller-tester-text);
+                        }
+                    }
+                    ActionButton {
+                        text: "Share";
+                        want-focus: tester-page.tester-nav == 2;
+                        entered => { tester-page.tester-nav = 2; }
+                        nav(k) => {
+                            if (k == Key.LeftArrow) { tester-page.tester-nav = 1; return true; }
+                            return tester-page.scroll-report(k);
+                        }
+                        clicked => {
+                            root.controller-tester-text = root.controller-tester-read();
+                            root.controller-tester-copy-status = root.controller-tester-share(root.controller-tester-text);
                         }
                     }
                 }
@@ -909,10 +933,14 @@ export component AppWindow inherits Window {
                     text: root.controller-tester-copy-status;
                     color: Theme.muted;
                 }
-                Flickable {
+                report-scroll := Flickable {
                     vertical-stretch: 1;
                     content-width: self.width;
                     content-height: report-text.preferred-height;
+                    property <length> min-content-y: Math.min(0px, self.height - self.content-height);
+                    changed min-content-y => {
+                        self.content-y = Math.max(self.content-y, self.min-content-y);
+                    }
                     report-text := Text {
                         width: parent.width;
                         text: root.controller-tester-text;
