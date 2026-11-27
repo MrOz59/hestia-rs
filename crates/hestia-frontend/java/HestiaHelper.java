@@ -26,6 +26,8 @@ import android.os.Vibrator;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.InputDevice;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -42,6 +44,8 @@ import android.view.inputmethod.InputMethodManager;
 import android.widget.FrameLayout;
 import java.util.LinkedHashSet;
 import java.util.Set;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 /**
  * Hestia RS's Android glue that needs the UI thread or a Java class:
@@ -63,66 +67,71 @@ public final class HestiaHelper {
     /** The direct video surface appeared, or went away (null). */
     static native void nativeVideoSurface(Surface surface);
 
-    /** Debug only: enumerate controllers without requiring a stream or Bluetooth permission. */
-    public static String controllerTesterDevices() {
-        StringBuilder out = new StringBuilder();
+    // Inventory and hotplug lookups supply the same capabilities to both capture paths.
+    public static String controllerTesterDevices() throws JSONException {
+        JSONObject devices = new JSONObject();
         for (int id : InputDevice.getDeviceIds()) {
-            InputDevice device = InputDevice.getDevice(id);
-            if (!isGameController(device)) continue;
-            int vendor = device.getVendorId();
-            int product = device.getProductId();
-            String family = "Unknown / generic";
-            if (vendor == 0x054c) {
-                if (product == 0x05c4 || product == 0x09cc || product == 0x0ba0) {
-                    family = "Sony DualShock 4";
-                } else if (product == 0x0ce6 || product == 0x0df2) {
-                    family = "Sony DualSense";
-                } else {
-                    family = "Sony controller";
-                }
-            } else if (vendor == 0x045e) {
-                family = "Microsoft controller";
-            } else if (device.getName().toLowerCase(java.util.Locale.ROOT).contains("dualshock")) {
-                family = "Possible DualShock (name only)";
-            }
-            out.append(String.format(java.util.Locale.ROOT,
-                "ID %d: %s | %s | VID:PID %04x:%04x | sources 0x%08x\n",
-                id, device.getName(), family, vendor, product, device.getSources()));
-            if (Build.VERSION.SDK_INT >= 29) {
-                out.append("  external: ").append(device.isExternal()).append('\n');
-            }
-            int[] keys = {19, 20, 21, 22, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105,
-                          106, 107, 108, 109, 110, 188, 189, 190, 191, 192, 193, 194, 195,
-                          196, 197, 198, 199, 200, 201, 202, 203};
-            boolean[] present = device.hasKeys(keys);
-            out.append("  supported keys:");
-            for (int i = 0; i < keys.length; i++) {
-                if (present[i]) out.append(' ').append(android.view.KeyEvent.keyCodeToString(keys[i]));
-            }
-            out.append('\n');
-            for (InputDevice.MotionRange range : device.getMotionRanges()) {
-                if ((range.getSource() & InputDevice.SOURCE_JOYSTICK) != InputDevice.SOURCE_JOYSTICK) continue;
-                out.append(String.format(java.util.Locale.ROOT,
-                    "  %s min %.3f max %.3f flat %.3f fuzz %.3f resolution %.3f\n",
-                    android.view.MotionEvent.axisToString(range.getAxis()),
-                    range.getMin(), range.getMax(), range.getFlat(), range.getFuzz(), range.getResolution()));
-            }
+            devices.put(Integer.toString(id), controllerTesterProfile(id));
         }
-        return out.length() == 0 ? "No game controllers detected." : out.toString();
+        return devices.toString();
     }
 
-    private static boolean isGameController(InputDevice device) {
-        if (device == null || device.isVirtual()) return false;
-        int sources = device.getSources();
-        return (sources & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
-            || (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
+    public static String controllerTesterDevice(int id) throws JSONException {
+        return controllerTesterProfile(id).toString();
     }
 
-    /** Distinguish a joystick-capable controller from a TV remote advertising GAMEPAD. */
-    public static boolean controllerTesterIsDevice(int id) {
+    private static Object controllerTesterProfile(int id) throws JSONException {
         InputDevice device = InputDevice.getDevice(id);
-        return device != null
-            && (device.getSources() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
+        if (device == null || device.isVirtual() || !(device.supportsSource(InputDevice.SOURCE_GAMEPAD)
+                || device.supportsSource(InputDevice.SOURCE_JOYSTICK))) return JSONObject.NULL;
+
+        int vendor = device.getVendorId();
+        int product = device.getProductId();
+        String family = "Unknown / generic";
+        if (vendor == 0x054c) {
+            if (product == 0x05c4 || product == 0x09cc || product == 0x0ba0) {
+                family = "Sony DualShock 4";
+            } else if (product == 0x0ce6 || product == 0x0df2) {
+                family = "Sony DualSense";
+            } else {
+                family = "Sony controller";
+            }
+        } else if (vendor == 0x045e) {
+            family = "Microsoft controller";
+        } else if (device.getName().toLowerCase(java.util.Locale.ROOT).contains("dualshock")) {
+            family = "Possible DualShock (name only)";
+        }
+        String label = String.format(java.util.Locale.ROOT, "%s | %s | VID:PID %04x:%04x | sources 0x%08x",
+                device.getName(), family, vendor, product, device.getSources());
+        StringBuilder details = new StringBuilder();
+        if (Build.VERSION.SDK_INT >= 29) {
+            details.append("  external: ").append(device.isExternal()).append('\n');
+        }
+        int[] keys = {19, 20, 21, 22, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105,
+                      106, 107, 108, 109, 110, 188, 189, 190, 191, 192, 193, 194, 195,
+                      196, 197, 198, 199, 200, 201, 202, 203};
+        boolean[] present = device.hasKeys(keys);
+        int padButtons = 0;
+        details.append("  supported keys:");
+        for (int i = 0; i < keys.length; i++) {
+            if (!present[i]) continue;
+            if (KeyEvent.isGamepadButton(keys[i])) padButtons++;
+            details.append(' ').append(KeyEvent.keyCodeToString(keys[i]));
+        }
+        details.append('\n');
+        boolean joystickAxes = false;
+        for (InputDevice.MotionRange range : device.getMotionRanges()) {
+            if (!range.isFromSource(InputDevice.SOURCE_JOYSTICK)) continue;
+            joystickAxes |= range.getMax() > range.getMin();
+            details.append(String.format(java.util.Locale.ROOT,
+                    "  %s min %.3f max %.3f flat %.3f fuzz %.3f resolution %.3f\n",
+                    MotionEvent.axisToString(range.getAxis()), range.getMin(), range.getMax(),
+                    range.getFlat(), range.getFuzz(), range.getResolution()));
+        }
+        return new JSONObject().put("label", label).put("details", details.toString())
+                .put("sources", device.getSources()).put("pad_buttons", padButtons)
+                .put("joystick_axes", joystickAxes)
+                .put("alphabetic", device.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC);
     }
 
     /** A regular decoder that can accept the requested stream mode. */

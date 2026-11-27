@@ -33,11 +33,14 @@ public final class HestiaActivity extends NativeActivity {
     // queue remains a fallback for events that bypass Activity dispatch.
     private volatile boolean controllerTesterEnabled;
     private native boolean nativeControllerTesterKey(int deviceId, int source, int scanCode,
-            int keyCode, int action, boolean repeat, boolean candidate, long eventTimeMs, long arrivalMs);
+            int keyCode, int action, boolean repeat, long eventTimeMs, long arrivalMs);
     private native boolean nativeControllerTesterMotion(int deviceId, int source, int action,
-            boolean candidate, boolean historical, long eventTimeMs, long arrivalMs,
+            boolean historical, long eventTimeMs, long arrivalMs,
             float x, float y, float z, float rz, float rx, float ry,
             float lt, float rt, float brake, float gas, float hatX, float hatY);
+
+    private native boolean nativeControllerTesterPointer(int deviceId, int source, int action,
+            int buttons, float x, float y);
 
     @SuppressWarnings("unused") // Called from Rust through JNI.
     private void setControllerTesterEnabled(boolean enabled) {
@@ -76,57 +79,49 @@ public final class HestiaActivity extends NativeActivity {
         }
     }
 
-    private static boolean hasJoystick(InputDevice device) {
-        return device != null
-                && (device.getSources() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
-    }
-
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
-        if (controllerTesterEnabled) {
-            long arrival = SystemClock.uptimeMillis();
-            int scan = event.getScanCode();
-            // Some remotes advertise GAMEPAD along with DPAD. Ordinary TV
-            // navigation must remain usable; real controller keys can also
-            // arrive with a keyboard source or an unknown Android keycode.
-            boolean candidate = hasJoystick(event.getDevice())
-                    || KeyEvent.isGamepadButton(event.getKeyCode())
-                    || (scan >= 0x130 && scan <= 0x13f);
-            if (nativeControllerTesterKey(event.getDeviceId(), event.getSource(), scan,
-                    event.getKeyCode(), event.getAction(), event.getRepeatCount() > 0, candidate,
-                    event.getEventTime(), arrival)) {
-                return true;
-            }
-        }
+        if (controllerTesterEnabled && nativeControllerTesterKey(event.getDeviceId(), event.getSource(),
+                event.getScanCode(), event.getKeyCode(), event.getAction(), event.getRepeatCount() > 0,
+                event.getEventTime(), SystemClock.uptimeMillis())) return true;
         return super.dispatchKeyEvent(event);
     }
 
     @Override
     public boolean dispatchGenericMotionEvent(MotionEvent event) {
         if (controllerTesterEnabled) {
-            long arrival = SystemClock.uptimeMillis();
-            boolean candidate = event.isFromSource(InputDevice.SOURCE_JOYSTICK)
-                    || (hasJoystick(event.getDevice())
-                        && (event.getSource() & InputDevice.SOURCE_CLASS_MASK)
-                            == InputDevice.SOURCE_CLASS_JOYSTICK);
-            if (candidate && event.getActionMasked() == MotionEvent.ACTION_MOVE) {
+            if (event.isFromSource(InputDevice.SOURCE_JOYSTICK)
+                    && event.getActionMasked() == MotionEvent.ACTION_MOVE && event.getPointerCount() > 0) {
+                long arrival = SystemClock.uptimeMillis();
                 for (int i = 0; i < event.getHistorySize(); i++) {
-                    controllerTesterMotionSample(event, i, arrival, true);
+                    controllerTesterMotionSample(event, i, arrival);
                 }
-            }
-            if (controllerTesterMotionSample(event, -1, arrival, candidate)) {
+                if (controllerTesterMotionSample(event, -1, arrival)) return true;
+            } else if (controllerTesterPointer(event)) {
                 return true;
             }
         }
         return super.dispatchGenericMotionEvent(event);
     }
 
-    private boolean controllerTesterMotionSample(MotionEvent event, int history,
-            long arrival, boolean candidate) {
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        // Android can deliver a touchpad's mouse click here and its hover in generic dispatch.
+        if (controllerTesterEnabled && controllerTesterPointer(event)) return true;
+        return super.dispatchTouchEvent(event);
+    }
+
+    private boolean controllerTesterPointer(MotionEvent event) {
+        return (event.isFromSource(InputDevice.SOURCE_MOUSE) || event.isFromSource(InputDevice.SOURCE_TOUCHPAD))
+                && event.getPointerCount() > 0 && nativeControllerTesterPointer(event.getDeviceId(),
+                    event.getSource(), event.getActionMasked(), event.getButtonState(), event.getX(), event.getY());
+    }
+
+    private boolean controllerTesterMotionSample(MotionEvent event, int history, long arrival) {
         boolean historical = history >= 0;
         long time = historical ? event.getHistoricalEventTime(history) : event.getEventTime();
         return nativeControllerTesterMotion(event.getDeviceId(), event.getSource(),
-                event.getActionMasked(), candidate, historical, time, arrival,
+                event.getActionMasked(), historical, time, arrival,
                 controllerTesterAxis(event, MotionEvent.AXIS_X, history),
                 controllerTesterAxis(event, MotionEvent.AXIS_Y, history),
                 controllerTesterAxis(event, MotionEvent.AXIS_Z, history),

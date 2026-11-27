@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 
+use serde::Deserialize;
+
 use hestia_core::stream::input::{GamepadState, buttons};
 
 use crate::gamepad::{self, Axes, Control, Controllers};
@@ -14,6 +16,53 @@ const NS_PER_MS: f64 = 1_000_000.0;
 const AXIS_NAMES: [&str; 12] = [
     "X", "Y", "Z", "RZ", "RX", "RY", "LTRIGGER", "RTRIGGER", "BRAKE", "GAS", "HAT_X", "HAT_Y",
 ];
+
+const SOURCE_KEYBOARD: u32 = 0x0000_0101;
+const SOURCE_MOUSE: u32 = 0x0000_2002;
+const SOURCE_TOUCHPAD: u32 = 0x0010_0008;
+
+#[derive(Deserialize)]
+struct Device {
+    label: String,
+    details: String,
+    sources: u32,
+    joystick_axes: bool,
+    pad_buttons: u32,
+    alphabetic: bool,
+}
+
+// Android also sets GAMEPAD on keyboards, remotes and OEM input helpers with
+// a single gamepad key. Digital pads may lack sticks and handhelds can be internal.
+impl Device {
+    fn is_controller(&self) -> bool {
+        (self.sources & gamepad::SOURCE_JOYSTICK == gamepad::SOURCE_JOYSTICK && self.joystick_axes)
+            || (self.sources & gamepad::SOURCE_GAMEPAD == gamepad::SOURCE_GAMEPAD
+                && !self.alphabetic
+                && self.pad_buttons >= 2)
+    }
+
+    fn accepts_key(&self, source: u32, code: u32, scan: i32) -> bool {
+        if gamepad::is_controller_source(source) && !self.alphabetic {
+            return true;
+        }
+        // Some controller buttons arrive as keyboard or d-pad events. Allow
+        // those signatures only after validating the originating device.
+        (gamepad::is_controller_source(source)
+            || source == SOURCE_KEYBOARD
+            || source & gamepad::SOURCE_DPAD == gamepad::SOURCE_DPAD)
+            && (matches!(code, 19..=23 | 96..=110 | 188..=203)
+                || (0x130..=0x13f).contains(&scan)
+                || (!self.alphabetic && code == 0 && scan > 0))
+    }
+
+    fn accepts_pointer(&self, source: u32) -> bool {
+        self.sources & SOURCE_TOUCHPAD == SOURCE_TOUCHPAD
+            && (source & SOURCE_MOUSE == SOURCE_MOUSE || source & SOURCE_TOUCHPAD == SOURCE_TOUCHPAD)
+    }
+}
+
+// Null entries are known non-controller devices and need no further JNI lookup.
+type Inventory = BTreeMap<i32, Option<Device>>;
 
 fn axis_values(a: Axes) -> [f32; 12] {
     [
@@ -119,7 +168,19 @@ impl Timing {
 }
 
 #[derive(Clone, Default)]
+struct Touchpad {
+    events: u64,
+    action: u32,
+    buttons: u32,
+    seen_buttons: u32,
+    x: f32,
+    y: f32,
+}
+
+#[derive(Clone, Default)]
 struct Sample {
+    label: String,
+    touchpad: Touchpad,
     mapped: GamepadState,
     axes: Option<([f32; 12], [f32; 12], [f32; 12])>,
     motion_count: u64,
@@ -165,6 +226,22 @@ fn button_names(mask: u32) -> String {
 }
 
 impl Tester {
+    fn accepts(&mut self, devices: &Inventory, id: i32, event_matches: impl FnOnce(&Device) -> bool) -> bool {
+        let Some(Some(device)) = devices.get(&id) else {
+            return false;
+        };
+        if !device.is_controller() || !event_matches(device) {
+            return false;
+        }
+        let Some(sample) = self.remember(id, None) else {
+            return false;
+        };
+        if sample.label.is_empty() {
+            sample.label.clone_from(&device.label);
+        }
+        true
+    }
+
     fn remember(&mut self, id: i32, state: Option<GamepadState>) -> Option<&mut Sample> {
         if !self.samples.contains_key(&id) && self.samples.len() >= MAX_DEVICES {
             return None;
@@ -229,6 +306,18 @@ impl Tester {
         }
     }
 
+    fn pointer(&mut self, id: i32, action: u32, buttons: u32, x: f32, y: f32) {
+        if let Some(sample) = self.remember(id, None) {
+            let p = &mut sample.touchpad;
+            p.events += 1;
+            p.action = action;
+            p.buttons = buttons;
+            p.seen_buttons |= buttons;
+            p.x = x;
+            p.y = y;
+        }
+    }
+
     // The sample source is independent from the GameStream preview. Historical
     // data contributes to raw extrema and timing, not the current mapper state.
     fn historical_motion(&mut self, id: i32, axes: Axes) {
@@ -252,22 +341,43 @@ impl Tester {
         }
     }
 
-    fn report(&self, devices: &str) -> String {
-        let mut out = String::from("Hestia controller tester — current mapping (no corrections)\n\n");
-        for line in devices.lines().filter(|line| !line.starts_with("  ")) {
-            let _ = writeln!(out, "{line}");
+    fn report(&self, devices: &Inventory) -> String {
+        let mut out = String::from("Hestia controller tester — current mapping\n\n");
+        let connected: Vec<_> = devices
+            .iter()
+            .filter_map(|(id, profile)| profile.as_ref().filter(|d| d.is_controller()).map(|d| (id, d)))
+            .collect();
+        if connected.is_empty() {
+            out.push_str("No physical game controllers detected. Connect a gamepad to begin.\n");
+        }
+        for (id, d) in &connected {
+            let _ = writeln!(out, "Connected ID {id}: {}", d.label);
         }
         if let Some(key) = self.keys.back() {
             let _ = writeln!(out, "\nLast key: {key}");
         }
-        if self.samples.is_empty() {
+        if self.samples.is_empty() && !connected.is_empty() {
             out.push_str("No controller events captured yet. Press a button or move a stick.\n");
         }
         for (id, sample) in &self.samples {
+            let status = if connected.iter().any(|(current, _)| *current == id) {
+                ""
+            } else {
+                " (disconnected)"
+            };
+            let _ = writeln!(out, "\nDevice {id}{status}: {}", sample.label);
+            let p = &sample.touchpad;
+            if p.events > 0 {
+                let _ = writeln!(
+                    out,
+                    "  Touchpad pointer: {} events | x {:.1} y {:.1} | action {} | buttons 0x{:x} (seen 0x{:x})",
+                    p.events, p.x, p.y, p.action, p.buttons, p.seen_buttons
+                );
+            }
             let s = sample.mapped;
             let _ = writeln!(
                 out,
-                "Device {id}: buttons {} (0x{:08x})",
+                "  Gamepad buttons {} (0x{:08x})",
                 button_names(s.buttons),
                 s.buttons
             );
@@ -305,8 +415,10 @@ impl Tester {
         for event in self.keys.iter().rev() {
             let _ = writeln!(out, "{event}");
         }
-        out.push_str("\nAndroid input devices and advertised axis ranges\n");
-        out.push_str(devices);
+        for (id, d) in connected {
+            let _ = writeln!(out, "\nID {id}: {}", d.label);
+            out.push_str(&d.details);
+        }
         out
     }
 }
@@ -327,15 +439,15 @@ mod android {
     struct Counts {
         keys: u64,
         motions: u64,
-        captured_keys: u64,
-        captured_motions: u64,
+        pointers: u64,
         historical: u64,
     }
 
     #[derive(Default)]
     struct Session {
         tester: Tester,
-        devices: String,
+        devices: Inventory,
+        inventory_error: Option<String>,
         last_inventory: Option<Instant>,
         activity_status: String,
         dispatch_status: String,
@@ -375,13 +487,18 @@ mod android {
                 let methods = [
                     NativeMethod {
                         name: "nativeControllerTesterKey".into(),
-                        sig: "(IIIIIZZJJ)Z".into(),
+                        sig: "(IIIIIZJJ)Z".into(),
                         fn_ptr: activity_key as *mut std::ffi::c_void,
                     },
                     NativeMethod {
                         name: "nativeControllerTesterMotion".into(),
-                        sig: "(IIIZZJJFFFFFFFFFFFF)Z".into(),
+                        sig: "(IIIZJJFFFFFFFFFFFF)Z".into(),
                         fn_ptr: activity_motion as *mut std::ffi::c_void,
+                    },
+                    NativeMethod {
+                        name: "nativeControllerTesterPointer".into(),
+                        sig: "(IIIIFF)Z".into(),
+                        fn_ptr: activity_pointer as *mut std::ffi::c_void,
                     },
                 ];
                 env.register_native_methods(&class, &methods)?;
@@ -426,8 +543,24 @@ mod android {
         if result.is_err() { "unavailable".into() } else { status }
     }
 
-    fn is_gamepad_key(code: u32, scan: i32) -> bool {
-        (96..=110).contains(&code) || (188..=203).contains(&code) || (0x130..=0x13f).contains(&scan)
+    extern "system" fn activity_pointer(
+        _env: JNIEnv<'_>,
+        _activity: JObject<'_>,
+        id: jint,
+        source: jint,
+        action: jint,
+        buttons: jint,
+        x: jfloat,
+        y: jfloat,
+    ) -> jboolean {
+        u8::from(controller_event(
+            id,
+            |d| d.accepts_pointer(source as u32),
+            |s| {
+                s.activity.pointers += 1;
+                s.tester.pointer(id, action as u32, buttons as u32, x, y);
+            },
+        ))
     }
 
     extern "system" fn activity_key(
@@ -439,32 +572,30 @@ mod android {
         code: jint,
         action: jint,
         repeat: jboolean,
-        candidate: jboolean,
         event_ms: jlong,
         arrival_ms: jlong,
     ) -> jboolean {
         let start = Instant::now();
-        if super::super::gamepads::streaming() {
+        if !matches!(action, 0 | 1) {
             return 0;
         }
-        let mut guard = session();
-        let Some(s) = guard.as_mut() else { return 0 };
-        s.activity.keys += 1;
-        if candidate == 0 || !matches!(action, 0 | 1) {
-            return 0;
-        }
-        s.activity.captured_keys += 1;
-        s.tester
-            .key(id, source as u32, scan, code as u32, action == 0, repeat != 0);
-        s.tester.timing(
+        u8::from(controller_event(
             id,
-            0,
-            event_ms * 1_000_000,
-            arrival_ms * 1_000_000,
-            false,
-            elapsed_ns(start),
-        );
-        1
+            |d| d.accepts_key(source as u32, code as u32, scan),
+            |s| {
+                s.activity.keys += 1;
+                s.tester
+                    .key(id, source as u32, scan, code as u32, action == 0, repeat != 0);
+                s.tester.timing(
+                    id,
+                    0,
+                    event_ms * 1_000_000,
+                    arrival_ms * 1_000_000,
+                    false,
+                    elapsed_ns(start),
+                );
+            },
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -474,7 +605,6 @@ mod android {
         id: jint,
         source: jint,
         action: jint,
-        candidate: jboolean,
         historical: jboolean,
         event_ms: jlong,
         arrival_ms: jlong,
@@ -492,78 +622,88 @@ mod android {
         hat_y: jfloat,
     ) -> jboolean {
         let start = Instant::now();
-        if super::super::gamepads::streaming() {
+        if action != 2 || source as u32 & gamepad::SOURCE_JOYSTICK != gamepad::SOURCE_JOYSTICK {
             return 0;
+        }
+        u8::from(controller_event(
+            id,
+            |d| d.joystick_axes,
+            |s| {
+                let axes = Axes {
+                    x,
+                    y,
+                    z,
+                    rz,
+                    rx,
+                    ry,
+                    ltrigger,
+                    rtrigger,
+                    brake,
+                    gas,
+                    hat_x,
+                    hat_y,
+                };
+                if historical != 0 {
+                    s.activity.historical += 1;
+                    s.tester.historical_motion(id, axes);
+                } else {
+                    s.activity.motions += 1;
+                    s.tester.motion(id, source as u32, action as u32, axes);
+                }
+                s.tester.timing(
+                    id,
+                    1,
+                    event_ms * 1_000_000,
+                    arrival_ms * 1_000_000,
+                    historical != 0,
+                    elapsed_ns(start),
+                );
+            },
+        ))
+    }
+
+    fn profiles<T: serde::de::DeserializeOwned>(id: Option<i32>) -> Result<T, String> {
+        use jni::objects::{JString, JValue};
+        let mut json = String::new();
+        super::super::android::with_helper(|env, _, helper| {
+            let value = match id {
+                Some(id) => env.call_static_method(
+                    helper,
+                    "controllerTesterDevice",
+                    "(I)Ljava/lang/String;",
+                    &[JValue::Int(id)],
+                )?,
+                None => env.call_static_method(helper, "controllerTesterDevices", "()Ljava/lang/String;", &[])?,
+            }
+            .l()?;
+            let value = env.auto_local(JString::from(value));
+            json = env.get_string(&value)?.into();
+            Ok(())
+        })?;
+        serde_json::from_str(&json).map_err(|e| e.to_string())
+    }
+
+    // A newly connected controller can deliver its first button before the
+    // next inventory refresh. Resolve it once, outside the session lock.
+    fn controller_event(id: i32, accepts: impl FnOnce(&Device) -> bool, record: impl FnOnce(&mut Session)) -> bool {
+        if id < 0 || super::super::gamepads::streaming() {
+            return false;
         }
         let mut guard = session();
-        let Some(s) = guard.as_mut() else { return 0 };
-        if historical == 0 {
-            s.activity.motions += 1;
+        let Some(s) = guard.as_ref() else { return false };
+        if !s.devices.contains_key(&id) {
+            drop(guard);
+            let Ok(profile) = profiles(Some(id)) else { return false };
+            guard = session();
+            let Some(s) = guard.as_mut() else { return false };
+            s.devices.entry(id).or_insert(profile);
         }
-        if candidate == 0 || action != 2 {
-            return 0;
+        let Some(s) = guard.as_mut() else { return false };
+        if !s.tester.accepts(&s.devices, id, accepts) {
+            return false;
         }
-        let axes = Axes {
-            x,
-            y,
-            z,
-            rz,
-            rx,
-            ry,
-            ltrigger,
-            rtrigger,
-            brake,
-            gas,
-            hat_x,
-            hat_y,
-        };
-        if historical != 0 {
-            s.activity.historical += 1;
-            s.tester.historical_motion(id, axes);
-        } else {
-            s.activity.captured_motions += 1;
-            s.tester.motion(id, source as u32, action as u32, axes);
-        }
-        s.tester.timing(
-            id,
-            1,
-            event_ms * 1_000_000,
-            arrival_ms * 1_000_000,
-            historical != 0,
-            elapsed_ns(start),
-        );
-        1
-    }
-
-    fn inventory() -> String {
-        use jni::objects::JString;
-        let mut text = String::new();
-        let result = super::super::android::with_helper(|env, _, helper| {
-            let value = env
-                .call_static_method(helper, "controllerTesterDevices", "()Ljava/lang/String;", &[])?
-                .l()?;
-            let value = JString::from(value);
-            text = env.get_string(&value)?.into();
-            env.delete_local_ref(value)?;
-            Ok(())
-        });
-        if let Err(error) = result {
-            format!("Could not enumerate input devices: {error}")
-        } else {
-            text
-        }
-    }
-
-    fn is_controller(id: i32) -> bool {
-        use jni::objects::JValue;
-        let mut found = false;
-        let _ = super::super::android::with_helper(|env, _, helper| {
-            found = env
-                .call_static_method(helper, "controllerTesterIsDevice", "(I)Z", &[JValue::Int(id)])?
-                .z()?;
-            Ok(())
-        });
-        found
+        record(s);
+        true
     }
 
     pub fn controller_tester_report() -> String {
@@ -572,19 +712,27 @@ mod android {
                 .is_none_or(|last| last.elapsed() >= Duration::from_secs(1))
         });
         // Do not hold the state lock across JNI.
-        let devices = refresh.then(inventory);
+        let devices = refresh.then(|| profiles(None));
         let dispatch = refresh.then(dispatch_status);
         let mut guard = session();
         let Some(s) = guard.as_mut() else { return String::new() };
         if let Some(devices) = devices {
-            s.devices = devices;
+            match devices {
+                Ok(devices) => {
+                    s.devices = devices;
+                    s.inventory_error = None;
+                }
+                Err(error) => s.inventory_error = Some(error),
+            }
             s.last_inventory = Some(Instant::now());
         }
         if let Some(dispatch) = dispatch {
             s.dispatch_status = dispatch;
         }
-        let mut out = format!(
-            "Capture: Android Activity {}\nUnbuffered dispatch: {}\n",
+        let mut out = s.tester.report(&s.devices);
+        let _ = writeln!(
+            out,
+            "\nCapture: Android Activity {}\nUnbuffered dispatch: {}",
             s.activity_status, s.dispatch_status
         );
         out.push_str(concat!(
@@ -595,20 +743,13 @@ mod android {
         for (name, c) in [("Activity", &s.activity), ("Native queue", &s.native)] {
             let _ = writeln!(
                 out,
-                "{name}: keys {} (captured {}), motions {} (captured {}), historical samples {}",
-                c.keys, c.captured_keys, c.motions, c.captured_motions, c.historical
+                "{name} captured: {} keys, {} joystick motions, {} historical samples, {} touchpad events",
+                c.keys, c.motions, c.historical, c.pointers
             );
         }
-        let captured =
-            s.activity.captured_keys + s.activity.captured_motions + s.native.captured_keys + s.native.captured_motions;
-        if captured == 0 {
-            out.push_str(concat!(
-                "No gamepad events captured. If these counters stay zero while using the controller, ",
-                "the input path is not delivering events.\n"
-            ));
+        if let Some(error) = &s.inventory_error {
+            let _ = writeln!(out, "Could not refresh controller inventory: {error}");
         }
-        out.push('\n');
-        out.push_str(&s.tester.report(&s.devices));
         out
     }
 
@@ -624,73 +765,91 @@ mod android {
                 let source = u32::from(key.source());
                 let code = u32::from(key.key_code());
                 let id = key.device_id();
-                let candidate = is_gamepad_key(code, key.scan_code())
-                    || source & gamepad::SOURCE_JOYSTICK == gamepad::SOURCE_JOYSTICK
-                    || is_controller(id);
-                let mut guard = session();
-                let Some(s) = guard.as_mut() else { return false };
-                s.native.keys += 1;
-                if !candidate {
-                    return false; // TV remote and keyboard stay usable.
-                }
                 let pressed = match key.action() {
                     KeyAction::Down => true,
                     KeyAction::Up => false,
                     _ => return false,
                 };
-                s.native.captured_keys += 1;
-                s.tester
-                    .key(id, source, key.scan_code(), code, pressed, key.repeat_count() > 0);
-                s.tester
-                    .timing(id, 2, key.event_time(), arrival, false, elapsed_ns(start));
-                // Even unknown controller buttons must not navigate the settings.
-                true
+                controller_event(
+                    id,
+                    |d| d.accepts_key(source, code, key.scan_code()),
+                    |s| {
+                        s.native.keys += 1;
+                        s.tester
+                            .key(id, source, key.scan_code(), code, pressed, key.repeat_count() > 0);
+                        s.tester
+                            .timing(id, 2, key.event_time(), arrival, false, elapsed_ns(start));
+                    },
+                )
             }
             InputEvent::MotionEvent(motion) => {
                 let start = Instant::now();
                 let arrival = monotonic_ns();
                 let source = u32::from(motion.source());
-                let candidate = source & gamepad::SOURCE_JOYSTICK == gamepad::SOURCE_JOYSTICK;
-                let mut guard = session();
-                let Some(s) = guard.as_mut() else { return false };
-                s.native.motions += 1;
-                if !candidate || motion.action() != MotionAction::Move {
+                let id = motion.device_id();
+                if motion.pointer_count() == 0 {
                     return false;
                 }
-                s.native.captured_motions += 1;
-                let id = motion.device_id();
-                let pointer = motion.pointer_at_index(0);
-                for historical in pointer.history() {
-                    use android_activity::input::Axis;
-                    let start = Instant::now();
-                    let axes = Axes {
-                        x: historical.axis_value(Axis::X),
-                        y: historical.axis_value(Axis::Y),
-                        z: historical.axis_value(Axis::Z),
-                        rz: historical.axis_value(Axis::Rz),
-                        rx: historical.axis_value(Axis::Rx),
-                        ry: historical.axis_value(Axis::Ry),
-                        ltrigger: historical.axis_value(Axis::Ltrigger),
-                        rtrigger: historical.axis_value(Axis::Rtrigger),
-                        brake: historical.axis_value(Axis::Brake),
-                        gas: historical.axis_value(Axis::Gas),
-                        hat_x: historical.axis_value(Axis::HatX),
-                        hat_y: historical.axis_value(Axis::HatY),
-                    };
-                    s.native.historical += 1;
-                    s.tester.historical_motion(id, axes);
-                    s.tester
-                        .timing(id, 3, historical.event_time(), arrival, true, elapsed_ns(start));
+                if source & SOURCE_MOUSE == SOURCE_MOUSE || source & SOURCE_TOUCHPAD == SOURCE_TOUCHPAD {
+                    return controller_event(
+                        id,
+                        |d| d.accepts_pointer(source),
+                        |s| {
+                            let pointer = motion.pointer_at_index(0);
+                            s.native.pointers += 1;
+                            s.tester.pointer(
+                                id,
+                                motion.action().into(),
+                                motion.button_state().0,
+                                pointer.x(),
+                                pointer.y(),
+                            );
+                        },
+                    );
                 }
-                s.tester.motion(
-                    motion.device_id(),
-                    source,
-                    2,
-                    super::super::gamepads::android_axes(motion),
-                );
-                s.tester
-                    .timing(id, 3, motion.event_time(), arrival, false, elapsed_ns(start));
-                true
+                if source & gamepad::SOURCE_JOYSTICK != gamepad::SOURCE_JOYSTICK
+                    || motion.action() != MotionAction::Move
+                {
+                    return false;
+                }
+                controller_event(
+                    id,
+                    |d| d.joystick_axes,
+                    |s| {
+                        s.native.motions += 1;
+                        let pointer = motion.pointer_at_index(0);
+                        for historical in pointer.history() {
+                            use android_activity::input::Axis;
+                            let start = Instant::now();
+                            let axes = Axes {
+                                x: historical.axis_value(Axis::X),
+                                y: historical.axis_value(Axis::Y),
+                                z: historical.axis_value(Axis::Z),
+                                rz: historical.axis_value(Axis::Rz),
+                                rx: historical.axis_value(Axis::Rx),
+                                ry: historical.axis_value(Axis::Ry),
+                                ltrigger: historical.axis_value(Axis::Ltrigger),
+                                rtrigger: historical.axis_value(Axis::Rtrigger),
+                                brake: historical.axis_value(Axis::Brake),
+                                gas: historical.axis_value(Axis::Gas),
+                                hat_x: historical.axis_value(Axis::HatX),
+                                hat_y: historical.axis_value(Axis::HatY),
+                            };
+                            s.native.historical += 1;
+                            s.tester.historical_motion(id, axes);
+                            s.tester
+                                .timing(id, 3, historical.event_time(), arrival, true, elapsed_ns(start));
+                        }
+                        s.tester.motion(
+                            motion.device_id(),
+                            source,
+                            2,
+                            super::super::gamepads::android_axes(motion),
+                        );
+                        s.tester
+                            .timing(id, 3, motion.event_time(), arrival, false, elapsed_ns(start));
+                    },
+                )
             }
             _ => false,
         }
@@ -707,6 +866,91 @@ pub(super) fn capture(event: &android_activity::input::InputEvent<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn profile(name: &str, sources: u32, joystick_axes: bool, pad_buttons: u32, alphabetic: bool) -> Option<Device> {
+        Some(Device {
+            label: name.into(),
+            details: String::new(),
+            sources,
+            joystick_axes,
+            pad_buttons,
+            alphabetic,
+        })
+    }
+
+    #[test]
+    fn only_verified_controllers_enter_inventory_and_capture() {
+        // IDs and capabilities of the two identifiable entries in the Xiaomi report.
+        let mut devices = Inventory::from([
+            (3, profile("uinput-xiaomi", 0x501, false, 1, false)),
+            (
+                13,
+                profile(
+                    "Wireless Controller Touchpad | Sony DualShock 4",
+                    0x0510251b,
+                    true,
+                    13,
+                    false,
+                ),
+            ),
+            (14, profile("Physical keyboard", 0x501, false, 3, true)),
+            (15, profile("TV remote", gamepad::SOURCE_DPAD, false, 0, false)),
+            (16, profile("Phone touchscreen", 0x1002, false, 0, false)),
+            (-1, None), // Android virtual keyboard
+        ]);
+        let mut tester = Tester::default();
+        for id in [-1, 3, 12, 14, 15, 16] {
+            // Even a convincing button code, scan or joystick event cannot create a controller.
+            assert!(!tester.accepts(&devices, id, |d| d.accepts_key(0x501, 96, 304)));
+            assert!(!tester.accepts(&devices, id, |d| d.joystick_axes));
+        }
+        assert!(tester.samples.is_empty());
+        assert!(tester.accepts(&devices, 13, |d| d.accepts_key(0x501, 104, 312)));
+        assert!(tester.accepts(&devices, 13, |d| d.accepts_key(SOURCE_KEYBOARD, 0, 306)));
+        assert!(tester.accepts(&devices, 13, |d| d.accepts_key(SOURCE_KEYBOARD, 0, 704)));
+        assert!(tester.accepts(&devices, 13, |d| d.accepts_key(gamepad::SOURCE_DPAD, 19, 0)));
+        assert!(!tester.accepts(&devices, 13, |d| d.accepts_key(SOURCE_KEYBOARD, 29, 30)));
+        tester.key(13, 0x501, 312, 104, true, false);
+        let report = tester.report(&devices);
+        for ignored in ["uinput-xiaomi", "Physical keyboard", "TV remote", "Phone touchscreen"] {
+            assert!(!report.contains(ignored));
+        }
+        assert!(report.contains("id 13 DOWN scan 312 key 104"));
+        devices.remove(&13);
+        let report = tester.report(&devices);
+        assert!(report.contains("No physical game controllers detected"));
+        assert!(report.contains("Device 13 (disconnected): Wireless Controller Touchpad | Sony DualShock 4"));
+    }
+
+    #[test]
+    fn accepts_digital_pads_and_only_the_verified_controllers_touchpad() {
+        let devices = Inventory::from([
+            (1, profile("Digital pad", gamepad::SOURCE_GAMEPAD, false, 2, false)),
+            (2, profile("Mouse", SOURCE_MOUSE, false, 0, false)),
+            (
+                3,
+                profile("Laptop touchpad", SOURCE_MOUSE | SOURCE_TOUCHPAD, false, 0, false),
+            ),
+            (13, profile("DS4", 0x0510251b, true, 13, false)),
+        ]);
+        let mut tester = Tester::default();
+        assert!(tester.accepts(&devices, 1, |d| d.accepts_key(gamepad::SOURCE_GAMEPAD, 96, 304)));
+        for id in [1, 2, 3] {
+            assert!(!tester.accepts(&devices, id, |d| d.accepts_pointer(SOURCE_MOUSE)));
+        }
+        assert!(!tester.accepts(&devices, 13, |d| d.accepts_pointer(0x1002)));
+        assert!(tester.accepts(&devices, 13, |d| d.accepts_pointer(SOURCE_TOUCHPAD)));
+        assert!(tester.accepts(&devices, 13, |d| d.accepts_pointer(SOURCE_MOUSE)));
+        tester.pointer(13, 0, 1, 8.0, 10.0);
+        tester.pointer(13, 1, 0, 16.0, 20.0);
+        let sample = &tester.samples[&13];
+        assert_eq!(sample.touchpad.events, 2);
+        assert_eq!(sample.touchpad.seen_buttons, 1);
+        assert!(sample.axes.is_none());
+        assert_eq!(sample.motion_count, 0);
+        assert_eq!(sample.mapped.buttons, 0);
+        assert!(tester.keys.is_empty());
+    }
 
     #[test]
     fn timing_uses_bounded_windows_and_excludes_idle_and_reordered_intervals() {
@@ -738,7 +982,7 @@ mod tests {
             },
         );
         tester.motion(2, gamepad::SOURCE_JOYSTICK, 2, Axes::default());
-        let report = tester.report("");
+        let report = tester.report(&Inventory::new());
         assert!(report.contains("X 0.000 [0.000, 1.000]"));
         assert_eq!(tester.samples[&2].mapped.left_stick, (0, 0));
     }
@@ -750,12 +994,11 @@ mod tests {
         assert_eq!(tester.samples[&7].mapped.buttons, buttons::BACK);
         tester.key(7, gamepad::SOURCE_GAMEPAD, 308, 109, false, false);
         tester.key(7, gamepad::SOURCE_GAMEPAD, 306, 0, true, false);
-        let report = tester.report("Sony DualShock 4");
+        let report = tester.report(&Inventory::new());
         assert!(report.contains("scan 308 key 109"));
         assert!(report.contains("=> Back"));
         assert!(report.contains("scan 306 key 0"));
         assert!(report.contains("=> unmapped"));
-        assert!(report.contains("Sony DualShock 4"));
         assert_eq!(tester.samples[&7].mapped.buttons, 0);
     }
 
@@ -773,7 +1016,7 @@ mod tests {
             },
         );
         tester.motion(2, gamepad::SOURCE_JOYSTICK, 2, Axes::default());
-        let report = tester.report("");
+        let report = tester.report(&Inventory::new());
         assert!(report.contains("RX 0.000 [-1.000, 0.000]"));
         assert!(report.contains("LTRIGGER 0.000 [0.000, 0.500]"));
     }
@@ -791,7 +1034,7 @@ mod tests {
             },
         );
         assert_eq!(tester.samples[&2].mapped.left_stick, (0, 0));
-        let report = tester.report("");
+        let report = tester.report(&Inventory::new());
         assert!(report.contains("X 1.000 [1.000, 1.000]"));
         assert!(report.contains("Motion events: 1"));
     }
@@ -801,7 +1044,7 @@ mod tests {
         let mut tester = Tester::default();
         tester.key(7, gamepad::SOURCE_DPAD, 304, 96, true, false);
         assert_eq!(tester.samples[&7].mapped.buttons, 0);
-        assert!(tester.report("").contains("source rejected by stream"));
+        assert!(tester.report(&Inventory::new()).contains("source rejected by stream"));
         for _ in 0..MAX_HISTORY + 10 {
             tester.key(7, gamepad::SOURCE_GAMEPAD, 304, 96, true, false);
         }
