@@ -199,6 +199,8 @@ pub struct AnnounceParams {
     pub audio_encryption: bool,
     pub streaming_remotely: bool,
     pub ipv6: bool,
+    pub hdt_feedback: bool,
+    pub hdt_rate_advice: bool,
     /// Address as written in the `o=` line.
     pub host_address: String,
     pub video_port: u16,
@@ -216,6 +218,12 @@ pub fn build_announce(p: &AnnounceParams) -> String {
         "x-ml-general.featureFlags",
         (ML_FF_FEC_STATUS | ML_FF_SESSION_ID_V1).to_string(),
     );
+    if p.hdt_feedback {
+        a(crate::hdt::ATTRIBUTE, "1".into());
+        if p.hdt_rate_advice {
+            a(crate::hdt::RATE_ATTRIBUTE, "1".into());
+        }
+    }
     a("x-ss-general.encryptionEnabled", p.encryption_enabled.to_string());
     a(
         "x-ss-video[0].chromaSamplingType",
@@ -436,6 +444,8 @@ a=fmtp:97 surround-params=88001234567\n";
             encryption_enabled: SS_ENC_CONTROL_V2,
             audio_encryption: false,
             streaming_remotely: false,
+            hdt_feedback: false,
+            hdt_rate_advice: false,
             ipv6: false,
             host_address: "192.168.0.10".into(),
             video_port: 47998,

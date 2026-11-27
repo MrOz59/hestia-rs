@@ -204,6 +204,24 @@ impl ControlStream {
         self.send(PT_FRAME_FEC_STATUS, &status.0, CHANNEL_GENERIC, Delivery::Unsequenced)
     }
 
+    pub(crate) fn report_hdt(&self, payload: &[u8; 64]) -> io::Result<()> {
+        self.send(
+            crate::hdt::MESSAGE_TYPE,
+            payload,
+            CHANNEL_GENERIC,
+            Delivery::Unsequenced,
+        )
+    }
+
+    pub(crate) fn report_hdt_rate(&self, elapsed_ms: u64, kbps: u32) -> io::Result<()> {
+        self.send(
+            crate::hdt::RATE_TYPE,
+            &crate::hdt::encode_rate(elapsed_ms, kbps),
+            CHANNEL_GENERIC,
+            Delivery::Unsequenced,
+        )
+    }
+
     pub fn round_trip(&self) -> (u32, u32) {
         self.lock().enet.round_trip()
     }

@@ -86,14 +86,25 @@ impl Controller {
     /// Settings → Debug → Hide debug options: everything back off.
     pub fn hide_debug_options(self: &Shared) {
         self.state().debug_taps = Taps::default();
+        self.state().hdt_feedback = false;
         logcapture::set_verbose(false);
         info!("debug options hidden");
         self.save_debug_options(DebugOptions::default());
         self.ui(|ui| {
             ui.set_debug_options(false);
+            ui.set_debug_hdt_feedback(false);
             ui.set_debug_verbose_log(false);
         });
         self.toast("Debug options hidden");
+    }
+
+    pub fn set_hdt_feedback(self: &Shared, on: bool) {
+        let enabled = {
+            let mut state = self.state();
+            state.hdt_feedback = on && state.debug.unlocked;
+            state.hdt_feedback
+        };
+        self.ui(move |ui| ui.set_debug_hdt_feedback(enabled));
     }
 
     /// Settings → Debug → Verbose log.

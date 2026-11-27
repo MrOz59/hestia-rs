@@ -150,6 +150,9 @@ impl View for SlintView<'_> {
     fn set_debug_options(&self, on: bool) {
         self.0.set_debug_options(on);
     }
+    fn set_debug_hdt_feedback(&self, on: bool) {
+        self.0.set_debug_hdt_feedback(on);
+    }
     fn set_debug_verbose_log(&self, on: bool) {
         self.0.set_debug_verbose_log(on);
     }
@@ -602,6 +605,8 @@ pub(crate) fn wire(ui: &AppWindow, controller: &Arc<Controller>) {
     ui.on_debug_hide(move || c.hide_debug_options());
     let c = controller.clone();
     ui.on_debug_verbose_log_toggled(move |on| c.set_verbose_log(on));
+    let c = controller.clone();
+    ui.on_debug_hdt_feedback_toggled(move |on| c.set_hdt_feedback(on));
     let c = controller.clone();
     ui.on_debug_copy_info(move || c.copy_debug_info());
 

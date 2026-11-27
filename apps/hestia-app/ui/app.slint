@@ -275,10 +275,12 @@ export component AppWindow inherits Window {
     // Settings → Debug, shown once About has been tapped seven times.
     in property <bool> debug-options;
     in property <bool> debug-verbose-log;
+    in property <bool> debug-hdt-feedback;
     in property <string> debug-info;
     callback debug-tap();
     callback debug-hide();
     callback debug-verbose-log-toggled(bool);
+    callback debug-hdt-feedback-toggled(bool);
     callback debug-copy-info();
     // Settings → Debug → Launch screen preview: the launch page with no
     // stream behind it, stepping through the launch stages, until Back.
@@ -807,6 +809,8 @@ export component AppWindow inherits Window {
             debug-options: root.debug-options;
             debug-verbose-log: root.debug-verbose-log;
             debug-info: root.debug-info;
+            debug-hdt-feedback: root.debug-hdt-feedback;
+            debug-hdt-feedback-toggled(on) => { root.debug-hdt-feedback-toggled(on); }
             previewing: root.launch-preview;
             about-tapped => {
                 root.debug-tap();

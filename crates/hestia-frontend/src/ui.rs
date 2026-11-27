@@ -209,6 +209,7 @@ pub trait View {
 
     // Settings → Debug (About, tapped seven times) ----------------------
     fn set_debug_options(&self, on: bool);
+    fn set_debug_hdt_feedback(&self, on: bool);
     fn set_debug_verbose_log(&self, on: bool);
     /// This device, display and decoders, a line each.
     fn set_debug_info(&self, text: String);

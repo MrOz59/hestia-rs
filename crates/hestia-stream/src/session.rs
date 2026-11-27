@@ -63,6 +63,7 @@ impl StreamSession {
             audio_channels: config.audio_channels,
             audio_channel_mask: config.audio_channel_mask,
             streaming_remotely: config.streaming_remotely,
+            hdt_feedback: config.hdt_feedback,
         })
         .map_err(|e| StreamError::Rtsp(fail(StreamStage::Rtsp, e.to_string())))?;
 
@@ -162,11 +163,16 @@ impl StreamSession {
             let stop = stop.clone();
             let listener = listener.clone();
             let counters = video.counters.clone();
+            let mut advisor = (config.hdt_feedback && config.bitrate_kbps > 0)
+                .then(|| crate::hdt::RateAdvisor::new(config.bitrate_kbps));
+            let send_rate_advice = negotiated.hdt_rate_advice;
+            let hdt_active = negotiated.hdt_feedback == crate::hdt::FeedbackMode::Active;
             std::thread::Builder::new()
                 .name("hestia-session".into())
                 .spawn(move || {
                     let mut last_loss_sent = None;
-                    let mut last_stats = Instant::now();
+                    let started = Instant::now();
+                    let mut last_stats = started;
                     while !stop.load(Ordering::Relaxed) {
                         let wait = STATS_INTERVAL.saturating_sub(last_stats.elapsed());
                         let event = events.recv_timeout(wait);
@@ -247,11 +253,12 @@ impl StreamSession {
                         if last_stats.elapsed() >= STATS_INTERVAL {
                             last_stats = Instant::now();
                             // The video loop times keyframe requests from it.
-                            if let Some((rtt, variance)) = control.measured_round_trip() {
+                            let measured = control.measured_round_trip();
+                            if let Some((rtt, variance)) = measured {
                                 round_trip.set(rtt, variance);
                             }
                             let (rtt, rtt_var) = control.round_trip();
-                            listener.on_event(StreamEvent::Stats(StreamStats {
+                            let stats = StreamStats {
                                 frames: counters.frames.load(Ordering::Relaxed),
                                 packets: counters.packets.load(Ordering::Relaxed),
                                 bytes: counters.bytes.load(Ordering::Relaxed),
@@ -263,7 +270,31 @@ impl StreamSession {
                                 rtt_variance_ms: rtt_var,
                                 host_latency_us: counters.host_latency_us.load(Ordering::Relaxed),
                                 host_latency_frames: counters.host_latency_frames.load(Ordering::Relaxed),
-                            }));
+                            };
+                            let elapsed = last_stats.duration_since(started);
+                            if let Some(advisor) = &mut advisor {
+                                if let Some(kbps) = advisor.observe(elapsed, &stats, measured) {
+                                    listener.on_event(StreamEvent::HdtRateAdvice { kbps });
+                                }
+                                if send_rate_advice
+                                    && let Err(e) =
+                                        control.report_hdt_rate(elapsed.as_millis() as u64, advisor.target())
+                                {
+                                    log::debug!("HDT rate advice send failed: {e}");
+                                }
+                            }
+                            if hdt_active {
+                                let sample = crate::hdt::encode(
+                                    elapsed.as_millis() as u64,
+                                    &stats,
+                                    counters.late_packets.load(Ordering::Relaxed),
+                                    measured,
+                                );
+                                if let Err(e) = control.report_hdt(&sample) {
+                                    log::debug!("HDT feedback send failed: {e}");
+                                }
+                            }
+                            listener.on_event(StreamEvent::Stats(stats));
                         }
                     }
                 })
@@ -392,6 +423,114 @@ mod tests {
             remote_input_key_id: 7,
             streaming_remotely: false,
             show_video_through_loss: false,
+            hdt_feedback: false,
+        }
+    }
+
+    #[test]
+    fn hdt_feedback_over_encrypted_control_requires_both_peers() {
+        use crate::hdt::{FeedbackMode, MESSAGE_TYPE, RATE_TYPE};
+        const FEEDBACK: &str = "a=x-hermes-hdt.feedback:1\r\n";
+        const BOTH: &str = "a=x-hermes-hdt.feedback:1\r\na=x-hermes-hdt.rateAdvice:1\r\n";
+        const RATE_ONLY: &str = "a=x-hermes-hdt.rateAdvice:1\r\n";
+
+        for (opt_in, offer, mode, send_advice) in [
+            (true, BOTH, FeedbackMode::Active, true),
+            (true, FEEDBACK, FeedbackMode::Active, false),
+            (false, BOTH, FeedbackMode::Off, false),
+            (true, "", FeedbackMode::Unsupported, false),
+            (true, RATE_ONLY, FeedbackMode::Unsupported, false),
+        ] {
+            let key = [0xa4; 16];
+            let frames = vec![frame(0, 5500), frame(1, 5500)];
+            let host = MockHost::with_hdt(key, frames.clone(), 1392, offer);
+            let mut config = test_config(&host, key);
+            config.hdt_feedback = opt_in;
+            let received = Arc::new(Mutex::new(Vec::new()));
+            let events = Arc::new(Events(Mutex::new(Vec::new())));
+            let session = StreamSession::start(
+                config,
+                Box::new(Collect(received.clone())),
+                Box::new(NoAudio),
+                events.clone(),
+            )
+            .unwrap();
+            assert_eq!(session.negotiated().hdt_feedback, mode);
+            let active = mode == FeedbackMode::Active;
+            let announce = host.announce.lock().unwrap().clone().unwrap();
+            assert_eq!(
+                announce.lines().any(|l| l.trim() == "a=x-hermes-hdt.feedback:1"),
+                active
+            );
+
+            assert_eq!(session.negotiated().hdt_rate_advice, send_advice);
+            assert_eq!(
+                announce.lines().any(|l| l.trim() == "a=x-hermes-hdt.rateAdvice:1"),
+                send_advice
+            );
+
+            // Wait for actual stats ticks on all paths, including the
+            // negative cases where a premature assertion could hide a send.
+            let until = Instant::now() + Duration::from_secs(5);
+            loop {
+                let ticks = events
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|e| matches!(e, StreamEvent::Stats(_)))
+                    .count();
+                let reports = host
+                    .control_messages
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(ty, _)| *ty == MESSAGE_TYPE)
+                    .count();
+                if ticks >= 2 && (!active || reports >= 2) {
+                    break;
+                }
+                assert!(Instant::now() < until, "missing feedback/stats ticks for {mode:?}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            session.stop();
+            let received = received.lock().unwrap();
+            assert_eq!(received.len(), frames.len());
+            for (sample, original) in received.iter().zip(&frames) {
+                assert_eq!(&sample.data, original);
+            }
+            let messages = host.control_messages.lock().unwrap();
+            assert_eq!(
+                events
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|e| matches!(e, StreamEvent::HdtRateAdvice { kbps: 10_000 })),
+                opt_in
+            );
+            let hints: Vec<_> = messages.iter().filter(|(ty, _)| *ty == RATE_TYPE).collect();
+            assert_eq!(!hints.is_empty(), send_advice);
+            for (_, hint) in hints {
+                assert_eq!(hint.len(), 16);
+                assert_eq!(&hint[..4], b"HDA1");
+                assert_eq!(&hint[12..], &10_000u32.to_be_bytes());
+                assert!(u64::from_be_bytes(hint[4..12].try_into().unwrap()) >= 1000);
+            }
+            let mut last_timestamp = 0;
+            let mut count = 0;
+            for (_, payload) in messages.iter().filter(|(ty, _)| *ty == MESSAGE_TYPE) {
+                assert_eq!(payload.len(), 64);
+                assert_eq!(&payload[..4], b"HDT1");
+                let field = |at: usize| u64::from_be_bytes(payload[at..at + 8].try_into().unwrap());
+                assert!(field(4) >= last_timestamp + 1000);
+                last_timestamp = field(4);
+                assert_eq!(field(28), 2, "forwarded both frames");
+                assert_eq!(field(36), 2, "recovered the missing shards");
+                assert_eq!(field(44), 0, "no unrecoverable frames");
+                count += 1;
+            }
+            assert_eq!(count > 0, active);
         }
     }
 

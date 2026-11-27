@@ -38,15 +38,27 @@ impl MockHost {
     /// Starts the host; it streams `frames` (Annex B) after the client's
     /// START B and a video ping, then terminates the session gracefully.
     pub fn start(key: [u8; 16], frames: Vec<Vec<u8>>, packet_size: usize) -> Self {
-        Self::spawn(key, frames, packet_size, true)
+        Self::spawn(key, frames, packet_size, true, "")
     }
 
     /// Stops sending video after the given frames while audio and ENet continue.
     pub fn stall_video(key: [u8; 16], frames: Vec<Vec<u8>>, packet_size: usize) -> Self {
-        Self::spawn(key, frames, packet_size, false)
+        Self::spawn(key, frames, packet_size, false, "")
     }
 
-    fn spawn(key: [u8; 16], frames: Vec<Vec<u8>>, packet_size: usize, terminate_after_video: bool) -> Self {
+    /// Offers HDT, delivers each FEC block out of order and leaves the control
+    /// channel running so the client can report on the received frames.
+    pub fn with_hdt(key: [u8; 16], frames: Vec<Vec<u8>>, packet_size: usize, sdp: &'static str) -> Self {
+        Self::spawn(key, frames, packet_size, false, sdp)
+    }
+
+    fn spawn(
+        key: [u8; 16],
+        frames: Vec<Vec<u8>>,
+        packet_size: usize,
+        terminate_after_video: bool,
+        hdt_sdp: &'static str,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let announce = Arc::new(Mutex::new(None));
         let control_messages = Arc::new(Mutex::new(Vec::new()));
@@ -100,7 +112,9 @@ impl MockHost {
                     match method.as_str() {
                         "DESCRIBE" => {
                             let body = "a=x-ss-general.featureFlags:3\na=x-ss-general.encryptionSupported:5\na=x-ss-general.encryptionRequested:1\na=fmtp:97 surround-params=21101\n";
-                            resp = resp.with_body("application/sdp", body.as_bytes().to_vec());
+                            let mut body = body.as_bytes().to_vec();
+                            body.extend_from_slice(hdt_sdp.as_bytes());
+                            resp = resp.with_body("application/sdp", body);
                         }
                         "SETUP" => {
                             let port = if target.contains("audio") {
@@ -265,8 +279,11 @@ impl MockHost {
                 };
                 let mut seq = 0u16;
                 for (i, frame) in frames.iter().enumerate() {
-                    let packets = crate::video::packetize(i as u32 + 1, frame, packet_size, 20, seq, i == 0);
+                    let mut packets = crate::video::packetize(i as u32 + 1, frame, packet_size, 20, seq, i == 0);
                     seq = seq.wrapping_add(packets.len() as u16);
+                    if !hdt_sdp.is_empty() && packets.len() >= 4 {
+                        packets.swap(0, 2);
+                    }
                     for (n, p) in packets.iter().enumerate() {
                         // Lose one data packet per frame; FEC must cover it.
                         if n == 1 {

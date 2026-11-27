@@ -23,6 +23,7 @@ pub mod audio;
 pub mod control;
 pub mod enet;
 pub mod fec;
+pub mod hdt;
 pub mod input;
 #[cfg(test)]
 mod mock_host;
@@ -64,6 +65,8 @@ pub struct StreamConfig {
     pub remote_input_key: [u8; 16],
     pub remote_input_key_id: u32,
     pub streaming_remotely: bool,
+    /// Request HDT/1 receiver feedback when offered by the host.
+    pub hdt_feedback: bool,
     /// Experimental: keep decoding delta frames after a lost frame while
     /// the keyframe is on its way (artifacts) instead of freezing.
     pub show_video_through_loss: bool,
@@ -108,6 +111,10 @@ pub enum StreamEvent {
     FirstFrame,
     /// Roughly once a second.
     Stats(StreamStats),
+    /// Initial or changed diagnostic estimate, independent of host acceptance.
+    HdtRateAdvice {
+        kbps: u32,
+    },
     Rumble {
         gamepad: u8,
         low: u16,
