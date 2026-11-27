@@ -436,7 +436,7 @@ export component AppWindow inherits Window {
         root.form-navigation-changed(self.form-navigation);
     }
 
-    if Theme.frost-effects && root.screen != 4 && root.screen != 7: FrostBackdrop {
+    if Theme.frost-effects && root.screen != 4 && root.screen != 7 && !root.launch-preview: FrostBackdrop {
         width: root.width;
         height: root.height;
     }

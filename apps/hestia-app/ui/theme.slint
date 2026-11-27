@@ -310,6 +310,12 @@ export component ThemeHeading inherits VerticalLayout {
 
 export component FrostBackdrop inherits Rectangle {
     clip: true;
+    private property <int> shimmer-tick;
+    Timer {
+        running: true;
+        interval: 50ms;
+        triggered => { root.shimmer-tick = root.shimmer-tick + 1; }
+    }
     Image {
         width: root.width;
         height: root.height;
@@ -318,6 +324,18 @@ export component FrostBackdrop inherits Rectangle {
     }
     Rectangle {
         background: @linear-gradient(90deg, #031428ab, #071b315b 60%, #071b3150);
+    }
+    // Stagger small glints across the ice behind the translucent panels.
+    for i in 20: Rectangle {
+        private property <int> period: 100 + Math.mod(i * 31, 84);
+        private property <float> phase: 1.0 * Math.mod(root.shimmer-tick + i * 37, self.period) / self.period;
+        private property <float> pulse: max(0, 1 - 6 * abs(self.phase - 0.5));
+        width: 7px + Math.mod(i * 7, 12) * 1px;
+        height: self.width;
+        x: root.width * (Math.mod(11 + i * 37, 97) + 2) / 100 - self.width / 2;
+        y: root.height * (Math.mod(23 + i * 53 + i * i * 7, 97) + 2) / 100 - self.height / 2;
+        opacity: self.pulse * self.pulse * 0.50;
+        background: @radial-gradient(circle, #effcff 0%, #c8edff9c 15%, #adddff30 40%, transparent 70%);
     }
 }
 
