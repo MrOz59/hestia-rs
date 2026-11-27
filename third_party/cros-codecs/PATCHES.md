@@ -33,6 +33,15 @@ A `low_delay` field in `H264DecoderState` / `H265DecoderState` holds the mode
 with a `Hestia RS` comment. Interlaced streams are not supported in low-delay
 mode (the second field of a pair would be finished on its own).
 
+## H.265 entry points beyond 32
+
+`SliceHeader::entry_point_offset_minus1` is a `[u32; 32]`, but a slice can
+have up to `PicHeightInCtbsY - 1` entry points with wavefront parallel
+processing (more with tiles): x265's default 32x32 CTBs and WPP give 33 at
+1080p, and the parser indexed past the array (a panic). `codec/h265/parser.rs`
+now parses every offset and keeps the first 32. No decoder reads them (VA-API
+takes only `num_entry_point_offsets`).
+
 ## cros-libva with libva 2.23
 
 libva 2.23 added fields to `VAEncPictureParameterBufferVP9`, and no
