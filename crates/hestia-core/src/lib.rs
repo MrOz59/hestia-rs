@@ -10,6 +10,7 @@
 //! All methods are blocking and thread-safe; call them from worker threads.
 
 pub mod address;
+pub mod appearance;
 pub mod diagnosis;
 pub mod hostaddr;
 pub mod logcapture;

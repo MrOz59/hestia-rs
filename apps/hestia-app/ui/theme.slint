@@ -66,8 +66,22 @@ export struct VoltagePaths {
     forks: string,
 }
 
+export struct PaletteOverride {
+    supplied: bool,
+    color: color,
+}
+
+export struct ThemeStyle {
+    base: int,
+    colors: [PaletteOverride],
+}
+
 export global Theme {
     in-out property <int> selection;
+    in-out property <[PaletteOverride]> overrides;
+    pure function role(index: int, fallback: color) -> color {
+        return index < root.overrides.length && root.overrides[index].supplied ? root.overrides[index].color : fallback;
+    }
     property <ThemePalette> palette: root.selection == 1 ? root.daylight
         : root.selection == 2 ? root.midnight
         : root.selection == 3 ? root.electric
@@ -215,24 +229,24 @@ export global Theme {
         scrim: #080413d9,
     };
 
-    out property <color> bg: root.palette.bg;
-    out property <color> surface: root.palette.surface;
-    out property <color> card: root.palette.card;
-    out property <color> card-hover: root.palette.card-hover;
-    out property <color> border: root.palette.border;
-    out property <color> text: root.palette.text;
-    out property <color> muted: root.palette.muted;
-    out property <color> faint: root.palette.faint;
-    out property <color> accent: root.palette.accent;
-    out property <color> accent-hover: root.palette.accent-hover;
-    out property <color> accent-pressed: root.palette.accent-pressed;
-    out property <color> on-accent: root.palette.on-accent;
-    out property <color> glow: root.palette.glow;
-    out property <color> ok: root.palette.ok;
-    out property <color> warn: root.palette.warn;
-    out property <color> danger: root.palette.danger;
-    out property <color> info: root.palette.info;
-    out property <color> scrim: root.palette.scrim;
+    out property <color> bg: root.role(0, root.palette.bg);
+    out property <color> surface: root.role(1, root.palette.surface);
+    out property <color> card: root.role(2, root.palette.card);
+    out property <color> card-hover: root.role(3, root.palette.card-hover);
+    out property <color> border: root.role(4, root.palette.border);
+    out property <color> text: root.role(5, root.palette.text);
+    out property <color> muted: root.role(6, root.palette.muted);
+    out property <color> faint: root.role(7, root.palette.faint);
+    out property <color> accent: root.role(8, root.palette.accent);
+    out property <color> accent-hover: root.role(9, root.palette.accent-hover);
+    out property <color> accent-pressed: root.role(10, root.palette.accent-pressed);
+    out property <color> on-accent: root.role(11, root.palette.on-accent);
+    out property <color> glow: root.role(12, root.palette.glow);
+    out property <color> ok: root.role(13, root.palette.ok);
+    out property <color> warn: root.role(14, root.palette.warn);
+    out property <color> danger: root.role(15, root.palette.danger);
+    out property <color> info: root.role(16, root.palette.info);
+    out property <color> scrim: root.role(17, root.palette.scrim);
     out property <bool> electric-effects: root.selection == 3;
     out property <bool> frost-effects: root.selection == 4;
     out property <bool> rainbow-effects: root.selection == 6;
@@ -245,14 +259,16 @@ export global Theme {
     out property <color> primary-hover: root.rainbow-effects ? #301b46 : root.accent-hover;
     out property <color> primary-pressed: root.rainbow-effects ? #1c102e : root.accent-pressed;
     out property <color> primary-ink: root.rainbow-effects ? root.text : root.on-accent;
-    out property <brush> backdrop: root.frost-effects
+    out property <brush> backdrop: root.bg != root.palette.bg ? root.bg : root.frost-effects
         ? @linear-gradient(145deg, #091c34 0%, #123c51 42%, #102d42 68%, #15253f 100%)
         : root.electric-effects ? @linear-gradient(145deg, #0b0927, #15113b 48%, #08192e) : root.bg;
-    out property <brush> panel-face: root.frost-effects
+    out property <brush> panel-face: root.card != root.palette.card && root.frost-effects
+        ? @linear-gradient(160deg, root.card.brighter(0.15), root.card 61%, root.card.darker(0.18))
+        : root.frost-effects
         ? @linear-gradient(160deg, #225479c0, #0e314db3 61%, #182e4dc0)
         : root.electric-effects ? @linear-gradient(130deg, #24205a, root.card 72%)
         : root.rainbow-effects ? @linear-gradient(145deg, #110820, root.card 55%, #090c18) : root.card;
-    out property <brush> panel-edge: root.frost-effects
+    out property <brush> panel-edge: root.border != root.palette.border ? root.border : root.frost-effects
         ? @linear-gradient(155deg, #def8ffe0, #83ccde6b 34%, #b5e9fc46 78%, #c4eefe96)
         : root.electric-effects ? @linear-gradient(110deg, #d3fcff, #24d5ff 24%, #af82ff 71%, #38e8ff)
         : root.rainbow-effects ? @linear-gradient(125deg, #39224d, root.border 48%, #272342)

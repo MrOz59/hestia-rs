@@ -17,13 +17,13 @@ mod gl_video;
 #[cfg(target_os = "android")]
 mod gpu_render;
 mod slint_ui;
+mod theme_file;
 #[cfg(target_os = "linux")]
 mod wl_surface;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use hestia_core::store::{AppearanceTheme, Store};
 use hestia_frontend::Controller;
 use hestia_frontend::presentation::GpuWindow;
 use slint::ComponentHandle;
@@ -55,27 +55,11 @@ fn run_window(
     #[cfg(not(target_os = "android"))]
     desktop_input::install();
     let ui = AppWindow::new()?;
-    ui.global::<Theme>().on_spectrum_heading(appearance::spectrum_heading);
-    ui.global::<Theme>().on_voltage_paths(appearance::voltage_paths);
-    let appearance_dir = data_dir.clone();
-    match Store::open(&appearance_dir).and_then(|store| store.load_theme()) {
-        Ok(theme) => {
-            ui.set_saved_theme(AppearanceTheme::ALL.iter().position(|&item| item == theme).unwrap_or(0) as i32)
-        }
-        Err(e) => log::warn!("could not load appearance: {e}"),
-    }
-    ui.on_save_theme(move |index| {
-        let Some(&theme) = AppearanceTheme::ALL.get(index as usize) else {
-            return false;
-        };
-        match Store::open(&appearance_dir).and_then(|store| store.save_theme(theme)) {
-            Ok(()) => true,
-            Err(e) => {
-                log::warn!("could not save appearance: {e}");
-                false
-            }
-        }
-    });
+    #[cfg(target_os = "android")]
+    let picker = theme_file::Picker::new(app);
+    #[cfg(not(target_os = "android"))]
+    let picker = theme_file::Picker::new();
+    appearance::install(&ui, data_dir.clone(), picker);
     ui.set_is_android(cfg!(target_os = "android"));
     #[cfg(target_os = "android")]
     ui.set_has_touch_input(!matches!(

@@ -10,6 +10,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::HostRecord;
+use crate::appearance::Appearance;
 use crate::settings::StreamSettings;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,12 +51,10 @@ impl AppearanceTheme {
         Self::Blue,
         Self::DarkRainbow,
     ];
-}
 
-#[derive(Default, Serialize, Deserialize)]
-#[serde(default)]
-struct Appearance {
-    theme: AppearanceTheme,
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|&theme| theme == self).unwrap_or(0)
+    }
 }
 
 /// Settings → Debug, unlocked by tapping About seven times. Device-wide,
@@ -132,11 +131,22 @@ impl Store {
     }
 
     pub fn load_theme(&self) -> io::Result<AppearanceTheme> {
-        Ok(self.read::<Appearance>("appearance.json")?.unwrap_or_default().theme)
+        Ok(self.load_appearance()?.theme)
     }
 
     pub fn save_theme(&self, theme: AppearanceTheme) -> io::Result<()> {
-        self.write("appearance.json", &Appearance { theme })
+        let mut appearance = self.load_appearance()?;
+        appearance.theme = theme;
+        appearance.active_pack = None;
+        self.save_appearance(&appearance)
+    }
+
+    pub fn load_appearance(&self) -> io::Result<Appearance> {
+        Ok(self.read("appearance.json")?.unwrap_or_default())
+    }
+
+    pub fn save_appearance(&self, appearance: &Appearance) -> io::Result<()> {
+        self.write("appearance.json", appearance)
     }
 
     pub fn load_debug_options(&self) -> io::Result<DebugOptions> {

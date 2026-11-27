@@ -1,8 +1,186 @@
 use std::fmt::Write;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
-use slint::{SharedString, StyledText};
+use hestia_core::appearance::{Appearance, LaunchStyle, PaletteRole, ThemePack, read_theme_pack};
+use hestia_core::store::{AppearanceTheme, Store};
+use slint::{Color, ComponentHandle, Model, ModelRc, SharedString, StyledText, VecModel};
 
-use crate::VoltagePaths;
+use crate::{AppWindow, PaletteOverride, Theme, ThemeStyle, VoltagePaths, theme_file};
+
+#[derive(Default)]
+struct Catalogue {
+    saved: Appearance,
+    preview: Option<ThemePack>,
+    reading_file: bool,
+}
+
+impl Catalogue {
+    fn active_index(&self) -> usize {
+        self.saved
+            .active_pack
+            .as_ref()
+            .and_then(|id| self.saved.packs.iter().position(|pack| &pack.id == id))
+            .map_or(self.saved.theme.index(), |i| AppearanceTheme::ALL.len() + i)
+    }
+
+    fn update_options(&self, ui: &AppWindow) {
+        let mut names: Vec<SharedString> = ui.get_builtin_theme_names().iter().collect();
+        let mut styles: Vec<ThemeStyle> = AppearanceTheme::ALL
+            .into_iter()
+            .map(|base| ThemeStyle {
+                base: base.index() as i32,
+                ..Default::default()
+            })
+            .collect();
+        for (i, pack) in self.saved.packs.iter().chain(self.preview.iter()).enumerate() {
+            let is_update_preview =
+                i == self.saved.packs.len() && self.saved.packs.iter().any(|saved| saved.id == pack.id);
+            names.push(if is_update_preview {
+                format!("{} (preview)", pack.name).into()
+            } else {
+                pack.name.as_str().into()
+            });
+            let colors = PaletteRole::ALL
+                .into_iter()
+                .map(|role| {
+                    pack.color(role)
+                        .map_or_else(PaletteOverride::default, |[red, green, blue, alpha]| PaletteOverride {
+                            supplied: true,
+                            color: Color::from_argb_u8(alpha, red, green, blue),
+                        })
+                })
+                .collect();
+            styles.push(ThemeStyle {
+                base: pack.base.index() as i32,
+                colors: model(colors),
+            });
+        }
+        let mut menu = names.clone();
+        menu.push("Load Theme Pack from File".into());
+        ui.set_theme_names(model(names));
+        ui.set_theme_menu(model(menu));
+        ui.set_theme_styles(model(styles));
+    }
+
+    fn save(&mut self, index: usize, style: LaunchStyle, store: &Store) -> std::io::Result<i32> {
+        let mut saved = self.saved.clone();
+        saved.launch_style = style;
+        if let Some(base) = AppearanceTheme::ALL.get(index) {
+            saved.theme = *base;
+            saved.active_pack = None;
+        } else {
+            let pack_index = index - AppearanceTheme::ALL.len();
+            let pack = if pack_index == saved.packs.len() {
+                self.preview.as_ref()
+            } else {
+                saved.packs.get(pack_index)
+            }
+            .ok_or_else(|| std::io::Error::other("theme selection no longer exists"))?
+            .clone();
+            saved.theme = pack.base;
+            saved.active_pack = Some(pack.id.clone());
+            if let Some(existing) = saved.packs.iter_mut().find(|existing| existing.id == pack.id) {
+                *existing = pack;
+            } else {
+                saved.packs.push(pack);
+            }
+        }
+        store.save_appearance(&saved)?;
+        self.saved = saved;
+        self.preview = None;
+        Ok(self.active_index() as i32)
+    }
+}
+
+fn model<T: Clone + 'static>(items: Vec<T>) -> ModelRc<T> {
+    ModelRc::from(Rc::new(VecModel::from(items)))
+}
+
+pub(crate) fn install(ui: &AppWindow, data_dir: PathBuf, picker: theme_file::Picker) {
+    ui.global::<Theme>().on_spectrum_heading(spectrum_heading);
+    ui.global::<Theme>().on_voltage_paths(voltage_paths);
+    let saved = Store::open(&data_dir)
+        .and_then(|store| store.load_appearance())
+        .unwrap_or_else(|error| {
+            log::warn!("could not load appearance: {error}");
+            Appearance::default()
+        });
+    let mut state = Catalogue {
+        saved,
+        ..Default::default()
+    };
+    state.saved.packs.retain(|pack| pack.validate().is_ok());
+    state.update_options(ui);
+    ui.set_saved_theme(state.active_index() as i32);
+    ui.set_saved_launch_style(state.saved.launch_style.index() as i32);
+    let state = Arc::new(Mutex::new(state));
+
+    let window = ui.as_weak();
+    let catalogue = state.clone();
+    ui.on_save_theme(move |index, launch| {
+        let Some(&style) = LaunchStyle::ALL.get(launch as usize) else {
+            return -1;
+        };
+        let Some(window) = window.upgrade() else { return -1 };
+        let mut catalogue = catalogue.lock().unwrap();
+        match Store::open(&data_dir).and_then(|store| catalogue.save(index as usize, style, &store)) {
+            Ok(index) => {
+                catalogue.update_options(&window);
+                index
+            }
+            Err(error) => {
+                log::warn!("could not save appearance: {error}");
+                -1
+            }
+        }
+    });
+
+    let window = ui.as_weak();
+    let catalogue = state.clone();
+    ui.on_discard_theme_preview(move || {
+        let mut catalogue = catalogue.lock().unwrap();
+        if catalogue.preview.take().is_some()
+            && let Some(window) = window.upgrade()
+        {
+            catalogue.update_options(&window);
+        }
+    });
+
+    let window = ui.as_weak();
+    ui.on_import_theme(move |session| {
+        {
+            let mut catalogue = state.lock().unwrap();
+            if catalogue.reading_file {
+                return;
+            }
+            catalogue.reading_file = true;
+        }
+        let state = state.clone();
+        let window = window.clone();
+        picker.open(Box::new(move |result| {
+            let result = result.and_then(|file| file.map(|bytes| read_theme_pack(&bytes)).transpose());
+            let _ = window.upgrade_in_event_loop(move |ui| {
+                let mut catalogue = state.lock().unwrap();
+                catalogue.reading_file = false;
+                if ui.get_screen() != 3 || ui.get_appearance_session() != session {
+                    return;
+                }
+                match result {
+                    Ok(Some(pack)) => {
+                        catalogue.preview = Some(pack);
+                        catalogue.update_options(&ui);
+                        ui.invoke_preview_theme((AppearanceTheme::ALL.len() + catalogue.saved.packs.len()) as i32);
+                        ui.set_theme_import_message("Theme pack preview. Save to keep it.".into());
+                    }
+                    Ok(None) => {}
+                    Err(error) => ui.set_theme_import_message(error.into()),
+                }
+            });
+        }));
+    });
+}
 
 pub(crate) fn voltage_paths(width: f32, height: f32, radius: f32, tick: i32) -> VoltagePaths {
     let radius = radius.min(width / 4.0).min(height / 4.0);
@@ -88,6 +266,7 @@ pub(crate) fn spectrum_heading(title: SharedString, phase: i32) -> StyledText {
     ];
     const CYCLE: usize = 96;
     let phase = phase.rem_euclid(CYCLE as i32) as usize;
+    let breath = 0.90 + 0.10 * (phase as f32 * 2.0 * std::f32::consts::TAU / CYCLE as f32).cos();
     let steps = title.chars().count().saturating_sub(1).max(1);
     let mut markup = String::from("**");
     for (i, letter) in title.chars().enumerate() {
@@ -95,7 +274,10 @@ pub(crate) fn spectrum_heading(title: SharedString, phase: i32) -> StyledText {
         let position = (offset + CYCLE - phase) % CYCLE * (COLORS.len() - 1);
         let stop = position / CYCLE;
         let mix = position % CYCLE;
-        let [r, g, b] = [0, 1, 2].map(|k| (COLORS[stop][k] * (CYCLE - mix) + COLORS[stop + 1][k] * mix) / CYCLE);
+        let [r, g, b] = [0, 1, 2].map(|k| {
+            let value = (COLORS[stop][k] * (CYCLE - mix) + COLORS[stop + 1][k] * mix) as f32 / CYCLE as f32;
+            (value * breath).round() as u8
+        });
         // Numeric entities keep title characters separate from the markup.
         let _ = write!(
             markup,
@@ -105,4 +287,44 @@ pub(crate) fn spectrum_heading(title: SharedString, phase: i32) -> StyledText {
     }
     markup.push_str("**");
     StyledText::from_markdown(&markup).unwrap_or_else(|_| StyledText::from_plain_text(&title))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saving_a_pack_keeps_it_for_other_selections_and_replaces_the_same_id() {
+        let dir = std::env::temp_dir().join(format!("hestia-theme-catalogue-{}", std::process::id()));
+        let store = Store::open(&dir).unwrap();
+        let starter = read_theme_pack(include_bytes!("../../../tools/theme-packs/harbor.zip")).unwrap();
+        let imported = AppearanceTheme::ALL.len();
+        let mut catalogue = Catalogue {
+            preview: Some(starter.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            catalogue.save(imported, LaunchStyle::Orbit, &store).unwrap(),
+            imported as i32
+        );
+        let saved = store.load_appearance().unwrap();
+        assert_eq!(saved.packs.len(), 1);
+        assert_eq!(saved.active_pack.as_deref(), Some(starter.id.as_str()));
+        assert_eq!(saved.launch_style, LaunchStyle::Orbit);
+        assert_eq!(catalogue.save(1, LaunchStyle::Still, &store).unwrap(), 1);
+        assert_eq!(store.load_appearance().unwrap().packs.len(), 1);
+
+        let mut revision = starter;
+        revision.name = "Harbor revision".into();
+        catalogue.preview = Some(revision);
+        assert_eq!(
+            catalogue.save(imported + 1, LaunchStyle::Flame, &store).unwrap(),
+            imported as i32
+        );
+        let saved = Store::open(&dir).unwrap().load_appearance().unwrap();
+        assert_eq!(saved.packs.len(), 1);
+        assert_eq!(saved.packs[0].name, "Harbor revision");
+        assert_eq!(saved.launch_style, LaunchStyle::Flame);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

@@ -1446,6 +1446,11 @@ export component SettingsPage inherits Page {
     in-out property <bool> gpu-video;
     in-out property <bool> direct-video;
     in-out property <int> theme;
+    in property <[string]> theme-names;
+    in property <[string]> theme-menu;
+    in property <string> theme-import-message;
+    callback import-theme();
+    in-out property <int> launch-style;
     in property <bool> theme-save-failed;
     in-out property <bool> allow-tearing;
     in-out property <int> frame-pacing;
@@ -1493,17 +1498,19 @@ export component SettingsPage inherits Page {
     property <[string]> pacing-names: ["Prefer lowest latency", "Balanced"];
     property <[string]> orientation-names: ["Landscape", "Portrait", "Follow the device"];
     property <[string]> speaker-names: ["Stereo", "5.1 surround", "7.1 surround"];
-    property <[string]> theme-names: ["Hearth (dark)", "Daylight (light)", "Midnight", "Electric", "Frosted Glass", "Blue", "Dark Rainbow"];
+    property <[string]> launch-styles: ["Flame", "Pulse", "Orbit", "Still"];
     property <int> theme-row: 36;
+    property <int> launch-row: 37;
+    property <int> preview-row: 38;
     property <string> custom-text;
     property <string> profile-text;
 
     // Focus: the header's Back (-2) and Save (-3), then the rows in page
-    // order: Theme (36), 0…3, Frame pacing (35), 4,
+    // order: Theme (36), loading screen (37, 38), 0…3, Frame pacing (35), 4,
     // Metered bitrate (24), 5…7, Direct video (19), 8, Allow tearing (34),
     // Video through losses (28), 9…18,
     // saved profiles (100…), keyboard shortcuts (25…27), 20…23, then
-    // Debug (29…33) once unlocked.
+    // Debug (31…33) once unlocked.
     property <int> nav: -1;
     focus-first => {
         if (root.nav == -1) {
@@ -1525,7 +1532,7 @@ export component SettingsPage inherits Page {
     property <int> profile-count: root.profile-names.length;
     // The shortcut rows, shown with a physical keyboard only.
     property <int> shortcut-count: root.physical-keyboard ? 3 : 0;
-    property <int> debug-count: root.debug-options ? 5 : 0;
+    property <int> debug-count: root.debug-options ? 3 : 0;
     changed debug-options => {
         if (!root.debug-options && root.nav >= 29 && root.nav <= 33) {
             root.nav = 23;
@@ -1535,7 +1542,7 @@ export component SettingsPage inherits Page {
     changed previewing => {
         if (!root.previewing) {
             if (Nav.keyboard) {
-                root.nav = 29;
+                root.nav = root.preview-row;
             } else {
                 home-scope.focus();
             }
@@ -1553,7 +1560,7 @@ export component SettingsPage inherits Page {
     pure function pos(i: int) -> int {
         return i < 19 ? i
             : i >= 100 ? 19 + (i - 100)
-            : i >= 29 ? 23 + root.profile-count + root.shortcut-count + (i - 29)
+            : i >= 31 ? 23 + root.profile-count + root.shortcut-count + (i - 31)
             : i >= 25 ? 19 + root.profile-count + (i - 25)
             : 19 + root.profile-count + root.shortcut-count + (i - 20);
     }
@@ -1562,15 +1569,17 @@ export component SettingsPage inherits Page {
             : p < 19 + root.profile-count ? 100 + (p - 19)
             : p < 19 + root.profile-count + root.shortcut-count ? 25 + (p - 19 - root.profile-count)
             : p < 23 + root.profile-count + root.shortcut-count ? 20 + (p - 19 - root.profile-count - root.shortcut-count)
-            : 29 + (p - 23 - root.profile-count - root.shortcut-count);
+            : 31 + (p - 23 - root.profile-count - root.shortcut-count);
     }
     pure function valid(i: int) -> bool {
         return (i != 8 || root.mediacodec || root.gpu-conversion) && (i != 10 || root.android)
             && (i != 18 || root.host-name != "");
     }
     pure function step(from: int, dir: int) -> int {
-        if (from == root.theme-row) { return dir > 0 ? 0 : root.theme-row; }
-        if (from == 0 && dir < 0) { return root.theme-row; }
+        if (from == root.theme-row) { return dir > 0 ? root.launch-row : root.theme-row; }
+        if (from == root.launch-row) { return dir > 0 ? root.preview-row : root.theme-row; }
+        if (from == root.preview-row) { return dir > 0 ? 0 : root.launch-row; }
+        if (from == 0 && dir < 0) { return root.preview-row; }
         if (from == 35) { return dir > 0 ? 4 : 3; }
         if (root.android && ((from == 3 && dir > 0) || (from == 4 && dir < 0))) { return 35; }
         if (from == 24) { return dir > 0 ? 5 : 4; }
@@ -1640,7 +1649,13 @@ export component SettingsPage inherits Page {
         } else if (id == 35) {
             root.frame-pacing = i;
         } else if (id == root.theme-row) {
-            root.theme = i;
+            if (i == root.theme-names.length) {
+                root.import-theme();
+            } else {
+                root.theme = i;
+            }
+        } else if (id == root.launch-row) {
+            root.launch-style = i;
         }
     }
 
@@ -1723,6 +1738,41 @@ export component SettingsPage inherits Page {
                             }
                             open => {
                                 root.sheet = root.theme-row;
+                            }
+                        }
+                        if root.theme-import-message != "": Rectangle {
+                            height: note.preferred-height + 12px;
+                            note := Text {
+                                x: 16px;
+                                width: parent.width - 32px;
+                                text: root.theme-import-message;
+                                color: Theme.muted;
+                                font-size: Theme.caption-size;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    Group {
+                        title: "Loading screen";
+                        ChoiceRow {
+                            label: "Animation";
+                            options: root.launch-styles;
+                            index <=> root.launch-style;
+                            want-focus: root.at(root.launch-row);
+                            nav(k) => { return root.move(root.launch-row, k); }
+                            entered => { root.nav = root.launch-row; }
+                            open => { root.sheet = root.launch-row; }
+                        }
+                        ActionRow {
+                            label: "Preview loading screen";
+                            icon: "play";
+                            want-focus: root.at(root.preview-row);
+                            nav(k) => { return root.move(root.preview-row, k); }
+                            entered => { root.nav = root.preview-row; }
+                            clicked => {
+                                root.nav = -1;
+                                root.preview-launch();
                             }
                         }
                     }
@@ -2260,39 +2310,6 @@ export component SettingsPage inherits Page {
 
                     if root.debug-options: Group {
                         title: "Debug";
-                        ActionRow {
-                            label: "Launch screen preview";
-                            hint: "The launch animation with no stream behind it, until Back";
-                            icon: "play";
-                            want-focus: root.at(29);
-                            nav(k) => {
-                                return root.move(29, k);
-                            }
-                            entered => {
-                                root.nav = 29;
-                            }
-                            clicked => {
-                                // Off the row while the preview holds the
-                                // focus, so coming back focuses it again.
-                                root.nav = -1;
-                                root.preview-launch();
-                            }
-                        }
-                        SwitchRow {
-                            label: "Launch animation";
-                            hint: "Off holds the launch screen still, until the app restarts";
-                            checked: Theme.launch-motion;
-                            want-focus: root.at(30);
-                            nav(k) => {
-                                return root.move(30, k);
-                            }
-                            entered => {
-                                root.nav = 30;
-                            }
-                            toggled(on) => {
-                                Theme.launch-motion = on;
-                            }
-                        }
                         SwitchRow {
                             label: "Verbose log";
                             hint: "Debug lines from every library in the app log and stream reports";
@@ -2356,7 +2373,6 @@ export component SettingsPage inherits Page {
                                 root.nav = 33;
                             }
                             clicked => {
-                                Theme.launch-motion = true;
                                 root.debug-hide();
                             }
                         }
@@ -2369,13 +2385,13 @@ export component SettingsPage inherits Page {
     if root.sheet >= 0: OptionSheet {
         width: 100%;
         height: 100%;
-        title: root.sheet == root.theme-row ? "Theme"
+        title: root.sheet == root.theme-row ? "Theme" : root.sheet == root.launch-row ? "Loading screen animation"
             : root.sheet == 0 ? "Preset" : root.sheet == 1 ? "Resolution" : root.sheet == 3 ? "Frame rate"
             : root.sheet == 5 ? "Codec" : root.sheet == 9 ? "Picture" : root.sheet == 10 ? "Orientation" : root.sheet == 35 ? "Video frame pacing" : "Speakers";
-        options: root.sheet == root.theme-row ? root.theme-names
+        options: root.sheet == root.theme-row ? root.theme-menu : root.sheet == root.launch-row ? root.launch-styles
             : root.sheet == 0 ? root.preset-names : root.sheet == 1 ? root.resolution-options : root.sheet == 3 ? root.fps-options
             : root.sheet == 5 ? root.codec-names : root.sheet == 9 ? root.scale-names : root.sheet == 10 ? root.orientation-names : root.sheet == 35 ? root.pacing-names : root.speaker-names;
-        current: root.sheet == root.theme-row ? root.theme
+        current: root.sheet == root.theme-row ? root.theme : root.sheet == root.launch-row ? root.launch-style
             : root.sheet == 0 ? root.preset : root.sheet == 1 ? root.resolution : root.sheet == 3 ? root.fps
             : root.sheet == 5 ? root.codec : root.sheet == 9 ? root.video-scale : root.sheet == 10 ? root.orientation : root.sheet == 35 ? root.frame-pacing : root.audio;
         picked(i) => {
