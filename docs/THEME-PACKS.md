@@ -2,7 +2,7 @@
 
 ## Install a pack
 
-1. Download a starter ZIP below or choose a pack someone shared. Keep the ZIP intact.
+1. Download a starter ZIP or choose a pack someone shared. Keep the ZIP intact. [Theme downloads](THEME-DOWNLOADS.md)
 2. In Hestia RS, open **Settings → Appearance → Theme → Load Theme Pack from File** and select the ZIP.
 3. Preview the result and tap **Save** to add it to the theme list and use it on this device. **Back** discards the preview. If you import a new revision with the same pack ID, Save replaces that entry.
 
@@ -10,26 +10,11 @@
 
 ## Make and share a pack
 
-1. Download and extract the Theme Builder. Open `theme-builder.html` in a browser. The builder works offline. [Download Theme Builder](../tools/theme-packs/theme-builder.zip)
+1. Download and extract the Theme Builder. Open `theme-builder.html` in a browser. The builder works offline. [Download Theme Builder](../tools/theme-packs/theme-builder.zip?raw=true)
 2. Pick a starting palette, give your theme a name, and edit the colors. Use the swatches or enter hex values. The preview updates as you edit.
 3. Select **Download ZIP** and share the file as-is. Use **Open ZIP or JSON** to check an existing pack and keep editing it. Keep the same pack ID when publishing a new version.
 
-## Starter ZIPs
-
-Each ZIP has a complete palette you can edit by hand or use as a reference.
-
-| Starter | Appearance | Download |
-| --- | --- | --- |
-| Hearth | Warm charcoal and ember orange | [hearth.zip](../tools/theme-packs/hearth.zip) |
-| Daylight | Cool white and indigo | [daylight.zip](../tools/theme-packs/daylight.zip) |
-| Midnight | Near-black with violet accents | [midnight.zip](../tools/theme-packs/midnight.zip) |
-| Electric | Violet-navy panels with branching cyan arcs that wind around the edges | [electric.zip](../tools/theme-packs/electric.zip) |
-| Frosted Glass | Translucent winter-blue panes over gently shimmering ice | [frosted-glass.zip](../tools/theme-packs/frosted-glass.zip) |
-| Blue | Classic navy panels and cyan controls | [blue.zip](../tools/theme-packs/blue.zip) |
-| Dark Rainbow | Jet black, deep violet panels and a rainbow that moves and pulses across headings | [dark-rainbow.zip](../tools/theme-packs/dark-rainbow.zip) |
-| Harbor | Dark teal and mint | [harbor.zip](../tools/theme-packs/harbor.zip) |
-
-The seven built-ins can be used as the manifest's `base`. Harbor is a complete palette built on Hearth. ZIPs carry palette values, including translucent panels. The corresponding built-in themes draw the ice, voltage, and spectrum effects.
+Each built-in theme has a starter ZIP with a full palette. Harbor is a sample pack built on Hearth. ZIPs carry palette values, including translucent panels. The corresponding built-in themes draw the ice, voltage, and spectrum effects.
 
 ## Edit a manifest directly
 

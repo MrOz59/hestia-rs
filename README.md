@@ -36,6 +36,8 @@ Every push to `main` that passes CI replaces the **`nightly`** pre-release
 | `ui-screenshots.zip` | the screens, rendered headless (phone and desktop) |
 | `SHA256SUMS` | checksums |
 
+[Download theme packs](docs/THEME-DOWNLOADS.md)
+
 On Linux, run `chmod +x Hestia-RS-x86_64.AppImage` once, then launch
 `./Hestia-RS-x86_64.AppImage` to open the GUI. If FUSE is unavailable, use
 `./Hestia-RS-x86_64.AppImage --appimage-extract-and-run`.
