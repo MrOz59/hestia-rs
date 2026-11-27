@@ -1,6 +1,6 @@
 #![cfg(debug_assertions)]
 
-use hestia_app::AppWindow;
+use hestia_app::{AppWindow, Theme};
 use i_slint_backend_testing::ElementHandle;
 use slint::ComponentHandle;
 
@@ -264,6 +264,58 @@ fn settings_follow_the_decoder_and_platform() {
     row(&ui, "GPU colour conversion", false);
     ui.set_is_android(false);
     row(&ui, "GPU colour conversion", true); // Also used by Linux software decode.
+}
+
+#[test]
+fn appearance_previews_and_only_persists_on_save() {
+    use slint::platform::{Key, PointerEventButton, WindowEvent};
+    use std::{cell::Cell, rc::Rc, time::Duration};
+
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_starting(false);
+    ui.show().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1180.0, 900.0));
+
+    let saved = Rc::new(Cell::new(None));
+    let saved_from_ui = saved.clone();
+    ui.on_save_theme(move |index| {
+        saved_from_ui.set(Some(index));
+        true
+    });
+    let settle = || {
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(400));
+        slint::platform::update_timers_and_animations();
+    };
+    let tap = |label: &str| {
+        ElementHandle::find_by_accessible_label(&ui, label)
+            .next()
+            .unwrap_or_else(|| panic!("missing {label}"))
+            .mock_single_click(PointerEventButton::Left);
+        settle();
+    };
+
+    ui.set_screen(3);
+    settle();
+    tap("Theme");
+    tap("Daylight (light)");
+    assert!(ui.global::<Theme>().get_daylight());
+    assert_eq!(saved.get(), None);
+    tap("Back");
+    assert!(!ui.global::<Theme>().get_daylight());
+    assert_eq!(ui.get_saved_theme(), 0);
+
+    ui.set_screen(3);
+    settle();
+    for key in [Key::DownArrow, Key::RightArrow, Key::UpArrow, Key::Return] {
+        ui.window().dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+        ui.window()
+            .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+        settle();
+    }
+    assert_eq!(saved.get(), Some(1));
+    assert_eq!(ui.get_saved_theme(), 1);
+    assert!(ui.global::<Theme>().get_daylight());
 }
 
 #[test]

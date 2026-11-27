@@ -25,6 +25,7 @@ export component AppWindow inherits Window {
     init => {
         Theme.window-width = self.width;
         Theme.window-height = self.height;
+        Theme.daylight = root.effective-theme == 1;
     }
     changed width => {
         Theme.window-width = self.width;
@@ -43,6 +44,14 @@ export component AppWindow inherits Window {
     // 0 = hosts, 1 = apps, 2 = session (launching / errors), 3 = settings, 4 = stream, 5 = host tools,
     // 6 = stream report, 7 = animated session launch
     in-out property <int> screen: 0;
+    in-out property <int> saved-theme: 0;
+    private property <int> cfg-theme: 0;
+    private property <bool> theme-save-failed;
+    private property <int> effective-theme: root.screen == 3 ? root.cfg-theme : root.saved-theme;
+    changed effective-theme => {
+        Theme.daylight = root.effective-theme == 1;
+    }
+    callback save-theme(int) -> bool;
 
     // Startup (identity generation on first run)
     in property <bool> starting: true;
@@ -166,7 +175,10 @@ export component AppWindow inherits Window {
         if root.screen != 4 {
             root.retain-launch = root.screen == 7;
         }
-        if root.screen != 3 {
+        if root.screen == 3 {
+            root.cfg-theme = root.saved-theme;
+            root.theme-save-failed = false;
+        } else {
             root.launch-preview = false;
         }
         if root.is-android {
@@ -774,6 +786,9 @@ export component AppWindow inherits Window {
             direct-video <=> root.cfg-direct-video;
             allow-tearing <=> root.cfg-allow-tearing;
             frame-pacing <=> root.cfg-frame-pacing;
+            show-appearance: root.settings-return == 0;
+            theme <=> root.cfg-theme;
+            theme-save-failed: root.theme-save-failed;
             show-video-through-loss <=> root.cfg-show-video-through-loss;
             android: root.is-android;
             physical-keyboard: root.cfg-physical-keyboard;
@@ -828,8 +843,13 @@ export component AppWindow inherits Window {
                 root.screen = root.settings-return;
             }
             save => {
-                root.save-settings();
-                root.screen = root.settings-return;
+                if root.cfg-theme != root.saved-theme && !root.save-theme(root.cfg-theme) {
+                    root.theme-save-failed = true;
+                } else {
+                    root.saved-theme = root.cfg-theme;
+                    root.save-settings();
+                    root.screen = root.settings-return;
+                }
             }
         }
 

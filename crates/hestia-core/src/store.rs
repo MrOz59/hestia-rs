@@ -25,6 +25,21 @@ pub struct StoredHosts {
     pub hosts: Vec<HostRecord>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppearanceTheme {
+    Daylight,
+    #[default]
+    #[serde(other)]
+    Hearth,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct Appearance {
+    theme: AppearanceTheme,
+}
+
 /// Settings → Debug, unlocked by tapping About seven times. Device-wide,
 /// never part of a host's settings.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +113,14 @@ impl Store {
         self.write("settings.json", settings)
     }
 
+    pub fn load_theme(&self) -> io::Result<AppearanceTheme> {
+        Ok(self.read::<Appearance>("appearance.json")?.unwrap_or_default().theme)
+    }
+
+    pub fn save_theme(&self, theme: AppearanceTheme) -> io::Result<()> {
+        self.write("appearance.json", &Appearance { theme })
+    }
+
     pub fn load_debug_options(&self) -> io::Result<DebugOptions> {
         Ok(self.read("debug.json")?.unwrap_or_default())
     }
@@ -133,6 +156,22 @@ fn restrict_permissions(_path: &Path) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_defaults_to_hearth_and_survives_reopening_the_store() {
+        let dir = std::env::temp_dir().join(format!("hestia-appearance-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        assert_eq!(store.load_theme().unwrap(), AppearanceTheme::Hearth);
+        store.save_theme(AppearanceTheme::Daylight).unwrap();
+        assert_eq!(
+            Store::open(&dir).unwrap().load_theme().unwrap(),
+            AppearanceTheme::Daylight
+        );
+        fs::write(dir.join("appearance.json"), r#"{"theme":"future-theme"}"#).unwrap();
+        assert_eq!(store.load_theme().unwrap(), AppearanceTheme::Hearth);
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn debug_options_default_off_and_round_trip() {
