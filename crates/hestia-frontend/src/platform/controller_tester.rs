@@ -100,7 +100,10 @@ impl Timing {
         let _ = writeln!(out, "  {label} Android event age: {}", self.age.summary());
         let _ = writeln!(out, "  {label} diagnostic processing: {}", self.processing.summary());
         if intervals {
-            let rate = self.intervals.rate().map_or_else(|| "n/a".into(), |hz| format!("{hz:.1} Hz"));
+            let rate = self
+                .intervals
+                .rate()
+                .map_or_else(|| "n/a".into(), |hz| format!("{hz:.1} Hz"));
             let _ = writeln!(out, "  {label} observed motion rate: {rate}");
             let _ = writeln!(out, "  {label} intervals: {}", self.intervals.summary());
             let _ = writeln!(
@@ -241,15 +244,7 @@ impl Tester {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn timing(
-        &mut self,
-        id: i32,
-        lane: usize,
-        event_ns: i64,
-        arrival_ns: i64,
-        historical: bool,
-        processing_ns: u64,
-    ) {
+    fn timing(&mut self, id: i32, lane: usize, event_ns: i64, arrival_ns: i64, historical: bool, processing_ns: u64) {
         if let Some(sample) = self.remember(id, None) {
             let timing = &mut sample.timing[lane];
             timing.record(event_ns, arrival_ns, historical, lane % 2 == 1);
@@ -428,11 +423,7 @@ mod android {
             env.delete_local_ref(value)?;
             Ok(())
         });
-        if result.is_err() {
-            "unavailable".into()
-        } else {
-            status
-        }
+        if result.is_err() { "unavailable".into() } else { status }
     }
 
     fn is_gamepad_key(code: u32, scan: i32) -> bool {
@@ -465,7 +456,14 @@ mod android {
         s.activity.captured_keys += 1;
         s.tester
             .key(id, source as u32, scan, code as u32, action == 0, repeat != 0);
-        s.tester.timing(id, 0, event_ms * 1_000_000, arrival_ms * 1_000_000, false, elapsed_ns(start));
+        s.tester.timing(
+            id,
+            0,
+            event_ms * 1_000_000,
+            arrival_ms * 1_000_000,
+            false,
+            elapsed_ns(start),
+        );
         1
     }
 
@@ -643,7 +641,8 @@ mod android {
                 s.native.captured_keys += 1;
                 s.tester
                     .key(id, source, key.scan_code(), code, pressed, key.repeat_count() > 0);
-                s.tester.timing(id, 2, key.event_time(), arrival, false, elapsed_ns(start));
+                s.tester
+                    .timing(id, 2, key.event_time(), arrival, false, elapsed_ns(start));
                 // Even unknown controller buttons must not navigate the settings.
                 true
             }
@@ -689,7 +688,8 @@ mod android {
                     2,
                     super::super::gamepads::android_axes(motion),
                 );
-                s.tester.timing(id, 3, motion.event_time(), arrival, false, elapsed_ns(start));
+                s.tester
+                    .timing(id, 3, motion.event_time(), arrival, false, elapsed_ns(start));
                 true
             }
             _ => false,
