@@ -14,7 +14,9 @@ const AXIS_NAMES: [&str; 12] = [
 ];
 
 fn axis_values(a: Axes) -> [f32; 12] {
-    [a.x, a.y, a.z, a.rz, a.rx, a.ry, a.ltrigger, a.rtrigger, a.brake, a.gas, a.hat_x, a.hat_y]
+    [
+        a.x, a.y, a.z, a.rz, a.rx, a.ry, a.ltrigger, a.rtrigger, a.brake, a.gas, a.hat_x, a.hat_y,
+    ]
 }
 
 #[derive(Default)]
@@ -105,7 +107,9 @@ impl Tester {
 
     fn motion(&mut self, id: i32, axes: Axes) {
         let mapped = self.mapper.motion(id, axes);
-        let Some(sample) = self.remember(id, mapped) else { return };
+        let Some(sample) = self.remember(id, mapped) else {
+            return;
+        };
         let values = axis_values(axes);
         let (current, min, max) = sample.axes.get_or_insert((values, values, values));
         *current = values;
@@ -128,7 +132,12 @@ impl Tester {
         }
         for (id, sample) in &self.samples {
             let s = sample.mapped;
-            let _ = writeln!(out, "Device {id}: buttons {} (0x{:08x})", button_names(s.buttons), s.buttons);
+            let _ = writeln!(
+                out,
+                "Device {id}: buttons {} (0x{:08x})",
+                button_names(s.buttons),
+                s.buttons
+            );
             let _ = writeln!(
                 out,
                 "  LS {:?}  RS {:?}  LT {}  RT {}",
@@ -137,7 +146,11 @@ impl Tester {
             if let Some((current, min, max)) = &sample.axes {
                 out.push_str("  Raw axes: current [observed min, max]\n");
                 for i in 0..AXIS_NAMES.len() {
-                    let _ = writeln!(out, "  {} {:.3} [{:.3}, {:.3}]", AXIS_NAMES[i], current[i], min[i], max[i]);
+                    let _ = writeln!(
+                        out,
+                        "  {} {:.3} [{:.3}, {:.3}]",
+                        AXIS_NAMES[i], current[i], min[i], max[i]
+                    );
                 }
             }
         }
@@ -209,9 +222,10 @@ mod android {
     }
 
     pub fn controller_tester_report() -> String {
-        let refresh = session()
-            .as_ref()
-            .is_some_and(|s| s.last_inventory.is_none_or(|last| last.elapsed() >= Duration::from_secs(1)));
+        let refresh = session().as_ref().is_some_and(|s| {
+            s.last_inventory
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(1))
+        });
         // Do not hold the state lock across JNI.
         let devices = refresh.then(inventory);
         let mut guard = session();
@@ -250,7 +264,8 @@ mod android {
             }
             InputEvent::MotionEvent(motion) => {
                 let source = u32::from(motion.source());
-                if source & gamepad::SOURCE_JOYSTICK != gamepad::SOURCE_JOYSTICK || motion.action() != MotionAction::Move
+                if source & gamepad::SOURCE_JOYSTICK != gamepad::SOURCE_JOYSTICK
+                    || motion.action() != MotionAction::Move
                 {
                     return false;
                 }

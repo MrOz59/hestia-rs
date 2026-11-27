@@ -195,8 +195,8 @@ pub(super) fn android_gamepad_event(event: &android_activity::input::InputEvent<
 /// Shared sampling: the debug tester must inspect exactly the same axes as streaming.
 #[cfg(target_os = "android")]
 pub(super) fn android_axes(motion: &android_activity::input::MotionEvent<'_>) -> crate::gamepad::Axes {
-    use android_activity::input::Axis;
     use crate::gamepad::Axes;
+    use android_activity::input::Axis;
     let p = motion.pointer_at_index(0);
     Axes {
         x: p.axis_value(Axis::X),
