@@ -52,6 +52,9 @@ fn raw_pointer(pointer: RawPointer) -> bool {
 pub fn android_input_hook(event: &android_activity::input::InputEvent<'_>) -> bool {
     use android_activity::input::InputEvent;
 
+    if super::controller_tester::capture(event) {
+        return true;
+    }
     if super::gamepads::android_gamepad_event(event) {
         return true;
     }

@@ -1474,6 +1474,7 @@ export component SettingsPage inherits Page {
     callback debug-verbose-log-toggled(bool);
     callback debug-copy-info;
     callback debug-hide;
+    callback open-controller-tester;
 
     property <[string]> preset-names: ["Custom", "Fast", "Balanced", "Quality", "Battery saver"];
     in property <[string]> codec-names;
@@ -1510,9 +1511,9 @@ export component SettingsPage inherits Page {
     property <int> profile-count: root.profile-names.length;
     // The shortcut rows, shown with a physical keyboard only.
     property <int> shortcut-count: root.physical-keyboard ? 3 : 0;
-    property <int> debug-count: root.debug-options ? 5 : 0;
+    property <int> debug-count: root.debug-options ? (root.android ? 6 : 5) : 0;
     changed debug-options => {
-        if (!root.debug-options && root.nav >= 29 && root.nav <= 33) {
+        if (!root.debug-options && ((root.nav >= 29 && root.nav <= 33) || root.nav == 36)) {
             root.nav = 23;
         }
     }
@@ -1538,6 +1539,7 @@ export component SettingsPage inherits Page {
     pure function pos(i: int) -> int {
         return i < 19 ? i
             : i >= 100 ? 19 + (i - 100)
+            : i == 36 ? 28 + root.profile-count + root.shortcut-count
             : i >= 29 ? 23 + root.profile-count + root.shortcut-count + (i - 29)
             : i >= 25 ? 19 + root.profile-count + (i - 25)
             : 19 + root.profile-count + root.shortcut-count + (i - 20);
@@ -1547,6 +1549,7 @@ export component SettingsPage inherits Page {
             : p < 19 + root.profile-count ? 100 + (p - 19)
             : p < 19 + root.profile-count + root.shortcut-count ? 25 + (p - 19 - root.profile-count)
             : p < 23 + root.profile-count + root.shortcut-count ? 20 + (p - 19 - root.profile-count - root.shortcut-count)
+            : p == 28 + root.profile-count + root.shortcut-count ? 36
             : 29 + (p - 23 - root.profile-count - root.shortcut-count);
     }
     pure function valid(i: int) -> bool {
@@ -2319,6 +2322,15 @@ export component SettingsPage inherits Page {
                                 Theme.launch-motion = true;
                                 root.debug-hide();
                             }
+                        }
+                        if root.android: ActionRow {
+                            label: "Controller tester";
+                            hint: "Identify connected gamepads and inspect raw and mapped inputs offline";
+                            icon: "gamepad";
+                            want-focus: root.at(36);
+                            nav(k) => { return root.move(36, k); }
+                            entered => { root.nav = 36; }
+                            clicked => { root.open-controller-tester(); }
                         }
                     }
                 }

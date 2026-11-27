@@ -6,6 +6,8 @@ mod android;
 mod clipboard;
 mod display;
 mod gamepads;
+#[cfg(any(target_os = "android", test))]
+mod controller_tester;
 mod input;
 mod keyboard;
 #[cfg(target_os = "android")]
@@ -25,6 +27,8 @@ pub use gamepads::{
 };
 #[cfg(target_os = "android")]
 pub use input::android_input_hook;
+#[cfg(target_os = "android")]
+pub use controller_tester::{controller_tester_active, controller_tester_report};
 pub use input::{has_pointer_capture, set_key_sink, set_pointer_sink};
 pub use keyboard::{has_physical_keyboard, has_soft_keyboard, set_ime_sink, set_keyboard_visible};
 #[cfg(target_os = "android")]

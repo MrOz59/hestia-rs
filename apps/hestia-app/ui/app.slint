@@ -168,6 +168,7 @@ export component AppWindow inherits Window {
         }
         if root.screen != 3 {
             root.launch-preview = false;
+            root.controller-tester = false;
         }
         if root.is-android {
             root.stream-pip-config(root.screen == 4, root.stream-picture-aspect);
@@ -280,6 +281,26 @@ export component AppWindow inherits Window {
     callback debug-hide();
     callback debug-verbose-log-toggled(bool);
     callback debug-copy-info();
+    property <bool> controller-tester;
+    property <string> controller-tester-text;
+    property <string> controller-tester-copy-status;
+    callback controller-tester-toggle(bool);
+    callback controller-tester-read() -> string;
+    callback controller-tester-copy(string) -> string;
+    changed controller-tester => {
+        root.controller-tester-toggle(root.controller-tester);
+        root.controller-tester-copy-status = "";
+        if (root.controller-tester) {
+            root.controller-tester-text = root.controller-tester-read();
+        } else {
+            root.take-focus();
+        }
+    }
+    Timer {
+        running: root.controller-tester;
+        interval: 250ms;
+        triggered => { root.controller-tester-text = root.controller-tester-read(); }
+    }
     // Settings → Debug → Launch screen preview: the launch page with no
     // stream behind it, stepping through the launch stages, until Back.
     property <bool> launch-preview;
@@ -296,6 +317,10 @@ export component AppWindow inherits Window {
         if (root.band-warning-visible) {
             root.band-warning-visible = false;
             root.band-warning-cancel();
+            return true;
+        }
+        if (root.controller-tester) {
+            root.controller-tester = false;
             return true;
         }
         if (root.launch-preview) {
@@ -735,7 +760,7 @@ export component AppWindow inherits Window {
             }
         }
 
-        if root.screen == 3: SettingsPage {
+        if root.screen == 3 && !root.controller-tester: SettingsPage {
             width: 100%;
             height: 100%;
             refocus: root.nav-refocus;
@@ -824,12 +849,78 @@ export component AppWindow inherits Window {
             debug-hide => {
                 root.debug-hide();
             }
+            open-controller-tester => { root.controller-tester = true; }
             back => {
                 root.screen = root.settings-return;
             }
             save => {
                 root.save-settings();
                 root.screen = root.settings-return;
+            }
+        }
+
+        if root.screen == 3 && root.controller-tester: tester-page := Rectangle {
+            width: 100%;
+            height: 100%;
+            background: Theme.bg;
+            property <int> tester-nav: 0;
+            VerticalLayout {
+                padding: Theme.page-padding;
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    ActionButton {
+                        text: "Back";
+                        want-focus: tester-page.tester-nav == 0;
+                        entered => { tester-page.tester-nav = 0; }
+                        clicked => { root.controller-tester = false; }
+                        nav(k) => {
+                            if (k == Key.RightArrow) { tester-page.tester-nav = 1; return true; }
+                            return false;
+                        }
+                    }
+                    Text {
+                        text: "Controller tester";
+                        color: Theme.text;
+                        font-size: Theme.body-size;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    ActionButton {
+                        text: "Copy report";
+                        want-focus: tester-page.tester-nav == 1;
+                        entered => { tester-page.tester-nav = 1; }
+                        nav(k) => {
+                            if (k == Key.LeftArrow) { tester-page.tester-nav = 0; return true; }
+                            return false;
+                        }
+                        clicked => {
+                            root.controller-tester-text = root.controller-tester-read();
+                            root.controller-tester-copy-status = root.controller-tester-copy(root.controller-tester-text);
+                        }
+                    }
+                }
+                Text {
+                    text: "Press each button and move both sticks and triggers. Use the TV remote or touch to leave; gamepad events are captured here, not sent to a host.";
+                    color: Theme.muted;
+                    wrap: word-wrap;
+                }
+                if root.controller-tester-copy-status != "": Text {
+                    text: root.controller-tester-copy-status;
+                    color: Theme.muted;
+                }
+                Flickable {
+                    vertical-stretch: 1;
+                    content-width: self.width;
+                    content-height: report-text.preferred-height;
+                    report-text := Text {
+                        width: parent.width;
+                        text: root.controller-tester-text;
+                        color: Theme.text;
+                        font-size: Theme.caption-size;
+                        wrap: word-wrap;
+                    }
+                }
             }
         }
 

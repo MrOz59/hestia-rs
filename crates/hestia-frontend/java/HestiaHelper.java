@@ -63,6 +63,54 @@ public final class HestiaHelper {
     /** The direct video surface appeared, or went away (null). */
     static native void nativeVideoSurface(Surface surface);
 
+    /** Debug only: enumerate controllers without requiring a stream or Bluetooth permission. */
+    public static String controllerTesterDevices() {
+        StringBuilder out = new StringBuilder();
+        for (int id : InputDevice.getDeviceIds()) {
+            InputDevice device = InputDevice.getDevice(id);
+            if (!isGameController(device)) continue;
+            int vendor = device.getVendorId();
+            int product = device.getProductId();
+            String family = "Unknown / generic";
+            if (vendor == 0x054c) {
+                if (product == 0x05c4 || product == 0x09cc || product == 0x0ba0) {
+                    family = "Sony DualShock 4";
+                } else if (product == 0x0ce6 || product == 0x0df2) {
+                    family = "Sony DualSense";
+                } else {
+                    family = "Sony controller";
+                }
+            } else if (vendor == 0x045e) {
+                family = "Microsoft controller";
+            } else if (device.getName().toLowerCase(java.util.Locale.ROOT).contains("dualshock")) {
+                family = "Possible DualShock (name only)";
+            }
+            out.append(String.format(java.util.Locale.ROOT,
+                "ID %d: %s | %s | VID:PID %04x:%04x | sources 0x%08x\n",
+                id, device.getName(), family, vendor, product, device.getSources()));
+            for (InputDevice.MotionRange range : device.getMotionRanges()) {
+                if ((range.getSource() & InputDevice.SOURCE_JOYSTICK) != InputDevice.SOURCE_JOYSTICK) continue;
+                out.append(String.format(java.util.Locale.ROOT,
+                    "  %s min %.3f max %.3f flat %.3f\n",
+                    android.view.MotionEvent.axisToString(range.getAxis()),
+                    range.getMin(), range.getMax(), range.getFlat()));
+            }
+        }
+        return out.length() == 0 ? "No game controllers detected." : out.toString();
+    }
+
+    private static boolean isGameController(InputDevice device) {
+        if (device == null || device.isVirtual()) return false;
+        int sources = device.getSources();
+        return (sources & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
+            || (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
+    }
+
+    /** A D-pad-only key event can still belong to a real controller. */
+    public static boolean controllerTesterIsDevice(int id) {
+        return isGameController(InputDevice.getDevice(id));
+    }
+
     /** A regular decoder that can accept the requested stream mode. */
     public static String findVideoDecoder(String mime, int width, int height, int fps) {
         for (MediaCodecInfo codec : new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos()) {
