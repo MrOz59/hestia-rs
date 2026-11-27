@@ -2,6 +2,8 @@
 
 HDT starts with one negotiated client-to-host message for WAN streaming. It lets a future Hermes sender distinguish FEC repairs from frames the receiver actually lost and see how those counters change alongside RTT. Video, audio, input and recovery continue to use the existing session. This version introduces no new port, pairing flow or media packet format.
 
+HDT is intended to replace GameStream for Hestia–Hermes sessions. The [transport migration plan](#transport-migration-plan) describes how the feedback experiment leads into a standalone protocol.
+
 ## Trying it in Hestia RS
 
 Tap **Settings → About** seven times. Turn on **Debug → HDT WAN feedback**, then start a stream. The switch applies to new sessions on Linux and Android, including LAN sessions for testing. Hiding Debug or restarting the app clears it. When requested, the stream report includes **Negotiated → HDT WAN feedback** and the negotiation outcome. Production Hermes needs a corresponding implementation before it can receive these samples. The Hestia loopback test includes a host supporting v1.
@@ -59,8 +61,28 @@ For example, if the host last accepted 10,000 ms / 20 lost frames, missed the ne
 
 Run the interoperability test with `cargo test -p hestia-stream hdt_feedback_over_encrypted_control`. It exercises real RTSP and ENet on loopback, a lost shard in each frame, reordered shards, and legacy fallback. WAN and mobile-link measurements are still needed.
 
+## Transport migration plan
+
+The QUIC research proposes WebTransport over HTTP/3 so native and browser clients can speak the same HDT protocol. HTTP connection reuse can already reduce the time to list or launch apps. WebTransport adds reliable streams and time-sensitive datagrams in one session, with QUIC path migration when a client changes networks. [Research and round-trip estimates in issue #33](https://github.com/MrOz59/hestia-rs/issues/33) · [QUIC connection migration](https://www.rfc-editor.org/rfc/rfc9000.html#section-9)
+
+| Stage | Proposed change | How to verify it |
+| --- | --- | --- |
+| GameStream baseline | Pool HTTP/1.1 connections per paired host and port, enable keep-alive in Hermes for Hestia, and fetch box art with bounded concurrency. Retry a stale connection once for safe reads. | Compare cold and warm refresh, launch and a 20-app library at 100 ms RTT. The figures in #33 are estimates. |
+| Opt-in HDT control | Have paired Hermes advertise a WebTransport endpoint and certificate hash. A native client can race connection setup with the existing TCP path, then send the launch once on the selected authenticated connection. Use GameStream if the host lacks HDT or UDP is unreachable. | Exercise a successful handshake, a legacy host, blocked UDP and a rejected host identity. A trust failure must end the attempt. |
+| Standalone HDT session | Send session control and input events on reliable streams. Send deadline-sensitive video and audio in datagrams with application-level FEC. Pass receiver loss, repairs and bitrate advice to the encoder while QUIC controls pacing and congestion. | Compare frame loss after FEC, delivered bitrate and input latency with GameStream on the same WAN trace. Test a Wi-Fi to mobile handover during playback before making HDT the default. |
+
+The first Hermes experiment can log v1 feedback alongside the encoder's actual send rate. Those observations give the new transport a baseline. On WebTransport, the application sees media datagrams after QUIC processing. HDT will need to define where it counts payload bytes and which RTT it reports before comparing counters across transports. The SDP attributes and ENet message IDs above apply to the GameStream session. [QUIC datagram congestion control](https://www.rfc-editor.org/rfc/rfc9221.html#section-5.4)
+
+### Shared implementation and pairing
+
+Issue #33 proposes a runtime-independent Rust protocol crate in this workspace. Native Hestia would use `web-transport` with Quinn, rustls/ring and Tokio behind its blocking interface. WASM would use the browser's WebTransport API with local futures. Hermes would link the shared Rust server as a static library through a C ABI and Corrosion. A client/server loopback test could then exercise both ends of the same handshake. [Rust WebTransport backends](https://github.com/moq-dev/web-transport)
+
+Native clients would authenticate with their paired client certificate. A browser would register a non-extractable WebCrypto key during pairing and sign a fresh host challenge. For a self-signed host, the browser needs a trusted source for the certificate hash and a rotating certificate (ECDSA P-256, valid for at most two weeks). How to bootstrap that hash is still open. State-changing operations such as pairing, launch and input must wait for the handshake. Any future use of 0-RTT is limited to replay-safe reads. [WebTransport certificate hashes](https://www.w3.org/TR/webtransport/#verify-a-certificate-hash) · [HTTP early data](https://www.rfc-editor.org/rfc/rfc8470.html)
+
+Issue #33 also tracks the UDP port layout, the choice of congestion controller and the Android runtime cost. These decisions need host and device measurements.
+
 ## Design reference
 
 Punktfunk's opt-in protocol extension alongside GameStream informed the negotiation approach. The HDT SDP attribute, message layout and counters are defined here. [Punktfunk project overview](https://git.unom.io/unom/punktfunk/src/commit/249da9beb34e1fe06a0693c5f0ec6169b36e4f63)
 
-The client-side decision to request rate changes under persistent damage also draws on the [Punktfunk session overview](https://docs.punktfunk.unom.io/docs/developers/sessions). HDT uses its own counters, timing rules and absolute advisory message.
+Hestia's decision to suggest a lower bitrate after sustained frame loss draws on Punktfunk's documented receiver-side rate decisions. Hestia implements its own controller, and Hermes receivers can use the HDT message layouts, counters and timing rules specified above. [Punktfunk session overview](https://docs.punktfunk.unom.io/docs/developers/sessions)

@@ -93,5 +93,7 @@ not a goal: no item here exists for them.
 
 ## Later (no timeline)
 
-- [ ] Hestia's own streaming protocol, sturdier and faster over WAN. Until
-      then Hestia RS uses GameStream, which is what Hermes speaks today.
+- [ ] Replace GameStream for Hestia–Hermes sessions with Hermes Datagram
+      Transfer (HDT). The receiver-feedback prototype runs on GameStream.
+      The [HDT transport migration plan](hdt-feedback.md#transport-migration-plan)
+      covers opt-in WebTransport control, media over QUIC and legacy fallback.
