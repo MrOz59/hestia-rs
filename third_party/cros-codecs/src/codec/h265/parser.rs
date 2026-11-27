@@ -4083,7 +4083,14 @@ impl Parser {
                 hdr.offset_len_minus1 = r.read_ue_max(31)?;
                 for i in 0..hdr.num_entry_point_offsets as usize {
                     let num_bits = usize::from(hdr.offset_len_minus1 + 1);
-                    hdr.entry_point_offset_minus1[i] = r.read_bits(num_bits)?;
+                    // Hestia RS: wavefront streams with 32x32 CTBs (x265's
+                    // default) have more entry points than this array holds
+                    // from 1080p up. Nothing reads the offsets, so the rest
+                    // are parsed and dropped instead of indexing past it.
+                    let offset: u32 = r.read_bits(num_bits)?;
+                    if let Some(slot) = hdr.entry_point_offset_minus1.get_mut(i) {
+                        *slot = offset;
+                    }
                 }
             }
         }

@@ -124,6 +124,18 @@ pub trait FrameDecoder: Send {
     fn configure(&mut self, _format: VideoFormat, _width: u32, _height: u32, _fps: u32) -> Result<(), String> {
         Ok(())
     }
+    /// Configure a disposable decoder without attaching it to a visible window.
+    fn configure_offscreen(
+        &mut self,
+        format: VideoFormat,
+        width: u32,
+        height: u32,
+        fps: u32,
+        _surface_output: bool,
+    ) -> Result<(), String> {
+        self.configure(format, width, height, fps)
+    }
+
     /// Decodes one access unit; `Ok(true)` when `out` now holds a picture.
     fn decode(&mut self, frame: &EncodedFrame, out: &mut DecodedFrame) -> Result<bool, String>;
 

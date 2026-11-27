@@ -35,6 +35,7 @@ pub mod audio_fifo;
 pub mod audio_out;
 pub mod audio_playback;
 pub mod audio_stats;
+pub mod benchmark;
 pub mod color;
 pub mod decode;
 #[cfg(target_os = "android")]

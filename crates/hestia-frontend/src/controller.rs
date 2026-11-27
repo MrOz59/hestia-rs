@@ -944,8 +944,21 @@ impl Controller {
                     if !c.launch_current(seq) {
                         return Err("cancelled".into());
                     }
+                    let host_modes = c
+                        .state()
+                        .snapshots
+                        .get(&id)
+                        .and_then(|s| s.info.as_ref())
+                        .map(|info| info.codec_mode_support)
+                        .filter(|&m| m != 0);
+                    let benchmark = decoder.benchmark(
+                        &settings,
+                        c.gpu_window.clone(),
+                        host_modes,
+                        launch.shown_at + hestia_media::benchmark::BUDGET,
+                    );
                     core.launch_with(&id, app_id, &device, settings.clone())
-                        .map(|session| (core.stream_host(&session), session, decoder))
+                        .map(|session| (core.stream_host(&session), session, decoder, benchmark))
                         .map_err(|error| error.to_string())
                 });
                 if !c.launch_current(seq) {
@@ -956,7 +969,17 @@ impl Controller {
                     return;
                 }
                 let text: Vec<String> = match launched {
-                    Ok((host, session, decoder)) => {
+                    Ok((host, session, mut decoder, benchmark)) => {
+                        if let Some(benchmark) = benchmark {
+                            let result = benchmark.finish(&mut decoder.decoder.1);
+                            report::lock(&session_report).field("Stream", "Auto codec benchmark", result);
+                        }
+                        if !c.launch_current(seq) {
+                            drop(host);
+                            c.finish_launch(seq);
+                            c.finish_report(session_report, "cancelled while starting", Some(id.clone()));
+                            return;
+                        }
                         report::launched(&session_report, &session);
                         if let Some(why) = &session.prepare_error {
                             c.toast(format!(

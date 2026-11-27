@@ -870,6 +870,29 @@ impl FrameDecoder for MediaCodecDecoder {
         self.start_output(outputs, "could not initialize video output")
     }
 
+    fn configure_offscreen(
+        &mut self,
+        format: VideoFormat,
+        width: u32,
+        height: u32,
+        fps: u32,
+        surface_output: bool,
+    ) -> Result<(), String> {
+        self.config = Some((format, width, height, fps));
+        // A private ImageReader exercises surface output without binding the
+        // activity's SurfaceView. Do not silently score a software fallback.
+        let component = self
+            .components
+            .iter()
+            .find(|(codec, _)| *codec == format.codec)
+            .ok_or("no hardware decoder for the sample")?
+            .1
+            .as_deref();
+        let output = if surface_output { Output::Gpu } else { Output::Images };
+        self.running = Some(self.start(format, width, height, fps, output, component)?);
+        Ok(())
+    }
+
     fn terminal_error(&self) -> Option<&str> {
         self.fatal.as_deref()
     }

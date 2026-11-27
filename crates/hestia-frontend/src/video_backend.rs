@@ -24,6 +24,40 @@ pub(crate) struct StreamVideo {
 }
 
 impl StreamVideo {
+    pub(crate) fn benchmark(
+        &self,
+        settings: &StreamSettings,
+        window: Arc<GpuWindow>,
+        host_modes: Option<u32>,
+        deadline: std::time::Instant,
+    ) -> Option<hestia_media::benchmark::Benchmark> {
+        use hestia_core::nvhttp::codecs::{SCM_MASK_AV1, SCM_MASK_HEVC};
+        use hestia_media::VideoCodec;
+        if settings.codec != hestia_core::CodecPreference::Auto {
+            return None;
+        }
+        let formats = self
+            .decoder
+            .1
+            .iter()
+            .copied()
+            .filter(|f| match f.codec {
+                VideoCodec::H264 => true,
+                VideoCodec::Hevc => host_modes.is_none_or(|m| m & SCM_MASK_HEVC != 0),
+                VideoCodec::Av1 => host_modes.is_none_or(|m| m & SCM_MASK_AV1 != 0),
+                VideoCodec::PyroWave => false,
+            })
+            .collect::<Vec<_>>();
+        let settings = settings.clone();
+        hestia_media::benchmark::Benchmark::start(
+            &formats,
+            (settings.width, settings.height, settings.fps),
+            settings.direct_video || settings.gpu_video,
+            deadline,
+            move || Self::select(&settings, &window).map(|video| video.decoder.0),
+        )
+    }
+
     pub(crate) fn select(settings: &StreamSettings, window: &GpuWindow) -> Result<Self, String> {
         let colorimetry = Colorimetry::default();
         let gpu = settings
