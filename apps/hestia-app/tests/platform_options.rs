@@ -255,6 +255,22 @@ fn settings_follow_the_decoder_and_platform() {
     row(&ui, "Allow tearing", false);
     row(&ui, "Gamescope session", true);
 
+    // The model picker must update the property read by the settings form.
+    for android in [false, true] {
+        ui.set_is_android(android);
+        for (label, expected) in [("DualShock 4", 5), ("Xbox 360", 2), ("Automatic", 0)] {
+            for selected in ["Virtual controller", label] {
+                ElementHandle::find_by_accessible_label(&ui, selected)
+                    .next()
+                    .unwrap_or_else(|| panic!("missing {selected}"))
+                    .mock_single_click(slint::platform::PointerEventButton::Left);
+                i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(400));
+                slint::platform::update_timers_and_animations();
+            }
+            assert_eq!(ui.get_cfg_controller_model(), expected);
+        }
+    }
+
     ui.set_cfg_codec(4); // PyroWave uses a Vulkan decoder with planar output.
     row(&ui, "Direct video", false);
     row(&ui, "Zero-copy video", false);
