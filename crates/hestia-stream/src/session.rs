@@ -295,7 +295,7 @@ impl StreamSession {
     }
 
     pub fn send_input(&self, event: &InputEvent) {
-        for p in input::encode(event) {
+        for p in input::encode_for_host(event, self.negotiated.controller_protocol) {
             if let Err(e) = self.control.send_input(&p.bytes, p.channel) {
                 warn!("input send failed: {e}");
                 break;

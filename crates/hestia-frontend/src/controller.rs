@@ -217,9 +217,9 @@ impl Controller {
             }
         });
         let c = Arc::downgrade(self);
-        platform::set_gamepad_sink(move |state| {
+        platform::set_gamepad_sink(move |state, arrival| {
             if let Some(c) = c.upgrade() {
-                c.stream_gamepad(state);
+                c.stream_gamepad(state, arrival);
             }
         });
         // Physical keys by position, and every finger and pen, below the

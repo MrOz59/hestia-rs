@@ -231,6 +231,7 @@ pub fn settings_form(s: &StreamSettings, native: Option<(u32, u32, u32)>) -> Set
         gpu_video: s.gpu_video,
         direct_video: s.direct_video,
         allow_tearing: s.allow_tearing,
+        controller_model: s.controller_model.map_or(0, |model| model as i32),
         frame_pacing: i32::from(s.frame_pacing == hestia_core::FramePacing::Balanced),
         show_video_through_loss: s.show_video_through_loss,
         orientation: index(
@@ -288,6 +289,9 @@ pub fn settings_from_form(form: &SettingsForm, base: &StreamSettings) -> StreamS
         gpu_video: form.gpu_video,
         direct_video: form.direct_video,
         allow_tearing: form.allow_tearing,
+        controller_model: hestia_core::stream::input::ControllerModel::ALL
+            .into_iter()
+            .find(|m| *m as i32 == form.controller_model),
         frame_pacing: hestia_core::FramePacing::ALL
             .get(form.frame_pacing as usize)
             .copied()
@@ -370,6 +374,7 @@ mod mode_tests {
         s.direct_video = false;
         s.allow_tearing = true;
         s.frame_pacing = hestia_core::FramePacing::Balanced;
+        s.controller_model = Some(hestia_core::stream::input::ControllerModel::DualShock4);
         s.show_video_through_loss = true;
         s.orientation = hestia_core::StreamOrientation::Portrait;
         s.launch_mode = LaunchMode::Gamescope;

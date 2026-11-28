@@ -115,7 +115,7 @@ impl Controllers {
         Self { slots: Vec::new() }
     }
 
-    fn mask(&self) -> u16 {
+    pub(crate) fn mask(&self) -> u16 {
         self.slots.iter().fold(0u16, |m, s| m | 1 << s.state.index)
     }
 
@@ -143,6 +143,12 @@ impl Controllers {
             s.state.active_mask = mask;
         }
         self.slots.last_mut().map(|slot| (slot, true))
+    }
+
+    /// A newly connected controller must arrive before its first button.
+    pub fn connect(&mut self, device: i32) -> Option<GamepadState> {
+        let (slot, joining) = self.slot(device)?;
+        joining.then_some(slot.state)
     }
 
     /// Android device id of controller `index`, for rumble.
@@ -270,6 +276,25 @@ mod tests {
         assert!(!is_controller_source(0x101), "keyboard");
         assert!(!is_controller_source(SOURCE_DPAD), "TV remote d-pad");
         assert!(!is_controller_source(0x1002), "touchscreen");
+    }
+
+    #[test]
+    fn connection_precedes_input_and_reconnection_reuses_a_released_slot() {
+        let mut pads = Controllers::new();
+        let first = pads.connect(17).unwrap();
+        assert_eq!((first.index, first.active_mask, first.buttons), (0, 1, 0));
+        assert_eq!(pads.connect(17), None);
+        assert_eq!(pads.key(17, 96, true).unwrap().index, first.index);
+        let second = pads.connect(18).unwrap();
+        assert_eq!((second.index, second.active_mask), (1, 3));
+        assert_eq!(pads.remove(17).unwrap().active_mask, 2);
+        let replacement = pads.connect(19).unwrap();
+        assert_eq!(
+            (replacement.index, replacement.active_mask, replacement.buttons),
+            (0, 3, 0)
+        );
+        pads.reset();
+        assert_eq!(pads.connect(18).unwrap().index, 0);
     }
 
     #[test]

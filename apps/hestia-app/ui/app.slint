@@ -293,6 +293,7 @@ export component AppWindow inherits Window {
     in-out property <bool> cfg-gpu-video: true;
     in-out property <bool> cfg-direct-video: true;
     in-out property <bool> cfg-allow-tearing: false;
+    in-out property <int> cfg-controller-model;
     in-out property <int> cfg-frame-pacing;
     in-out property <bool> cfg-show-video-through-loss: false;
     in property <[string]> cfg-profile-names;
@@ -852,6 +853,7 @@ export component AppWindow inherits Window {
             gpu-video <=> root.cfg-gpu-video;
             direct-video <=> root.cfg-direct-video;
             allow-tearing <=> root.cfg-allow-tearing;
+            controller-model <=> root.cfg-controller-model;
             frame-pacing <=> root.cfg-frame-pacing;
             theme <=> root.cfg-theme;
             theme-names: root.theme-names;
