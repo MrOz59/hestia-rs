@@ -1453,6 +1453,7 @@ export component SettingsPage inherits Page {
     in-out property <int> launch-style;
     in property <bool> theme-save-failed;
     in-out property <bool> allow-tearing;
+    in-out property <int> controller-model;
     in-out property <int> frame-pacing;
     in-out property <bool> show-video-through-loss;
     in property <bool> android;
@@ -1496,6 +1497,8 @@ export component SettingsPage inherits Page {
     property <[string]> preset-names: ["Custom", "Fast", "Balanced", "Quality", "Battery saver"];
     in property <[string]> codec-names;
     property <[string]> scale-names: ["Fit", "Fill", "Stretch"];
+    property <[string]> controller-models: ["Automatic", "Generic", "Xbox 360", "Xbox One", "Xbox Series", "DualShock 4", "DualSense", "Switch Pro"];
+    property <int> controller-model-row: 40;
     property <[string]> pacing-names: ["Prefer lowest latency", "Balanced"];
     property <[string]> orientation-names: ["Landscape", "Portrait", "Follow the device"];
     property <[string]> speaker-names: ["Stereo", "5.1 surround", "7.1 surround"];
@@ -1584,6 +1587,8 @@ export component SettingsPage inherits Page {
         if (from == root.launch-row) { return dir > 0 ? root.preview-row : root.theme-row; }
         if (from == root.preview-row) { return dir > 0 ? 0 : root.launch-row; }
         if (from == 0 && dir < 0) { return root.preview-row; }
+        if (from == root.controller-model-row) { return dir > 0 ? 15 : 14; }
+        if ((from == 14 && dir > 0) || (from == 15 && dir < 0)) { return root.controller-model-row; }
         if (from == 35) { return dir > 0 ? 4 : 3; }
         if (root.android && ((from == 3 && dir > 0) || (from == 4 && dir < 0))) { return 35; }
         if (from == 24) { return dir > 0 ? 5 : 4; }
@@ -1650,6 +1655,8 @@ export component SettingsPage inherits Page {
             root.orientation = i;
         } else if (id == 15) {
             root.audio = i;
+        } else if (id == root.controller-model-row) {
+            root.controller-model = i;
         } else if (id == 35) {
             root.frame-pacing = i;
         } else if (id == root.theme-row) {
@@ -2083,6 +2090,16 @@ export component SettingsPage inherits Page {
                                 root.nav = 14;
                             }
                         }
+                        ChoiceRow {
+                            label: "Virtual controller";
+                            hint: "Applies on connection. Keep Hermes controller selection on Auto to use this choice";
+                            options: root.controller-models;
+                            index <=> root.controller-model;
+                            want-focus: root.at(root.controller-model-row);
+                            nav(k) => { return root.move(root.controller-model-row, k); }
+                            entered => { root.nav = root.controller-model-row; }
+                            open => { root.sheet = root.controller-model-row; }
+                        }
                     }
 
                     Group {
@@ -2398,13 +2415,13 @@ export component SettingsPage inherits Page {
     if root.sheet >= 0: OptionSheet {
         width: 100%;
         height: 100%;
-        title: root.sheet == root.theme-row ? "Theme" : root.sheet == root.launch-row ? "Loading screen animation"
+        title: root.sheet == root.controller-model-row ? "Virtual controller" : root.sheet == root.theme-row ? "Theme" : root.sheet == root.launch-row ? "Loading screen animation"
             : root.sheet == 0 ? "Preset" : root.sheet == 1 ? "Resolution" : root.sheet == 3 ? "Frame rate"
             : root.sheet == 5 ? "Codec" : root.sheet == 9 ? "Picture" : root.sheet == 10 ? "Orientation" : root.sheet == 35 ? "Video frame pacing" : "Speakers";
-        options: root.sheet == root.theme-row ? root.theme-menu : root.sheet == root.launch-row ? root.launch-styles
+        options: root.sheet == root.controller-model-row ? root.controller-models : root.sheet == root.theme-row ? root.theme-menu : root.sheet == root.launch-row ? root.launch-styles
             : root.sheet == 0 ? root.preset-names : root.sheet == 1 ? root.resolution-options : root.sheet == 3 ? root.fps-options
             : root.sheet == 5 ? root.codec-names : root.sheet == 9 ? root.scale-names : root.sheet == 10 ? root.orientation-names : root.sheet == 35 ? root.pacing-names : root.speaker-names;
-        current: root.sheet == root.theme-row ? root.theme : root.sheet == root.launch-row ? root.launch-style
+        current: root.sheet == root.controller-model-row ? root.controller-model : root.sheet == root.theme-row ? root.theme : root.sheet == root.launch-row ? root.launch-style
             : root.sheet == 0 ? root.preset : root.sheet == 1 ? root.resolution : root.sheet == 3 ? root.fps
             : root.sheet == 5 ? root.codec : root.sheet == 9 ? root.video-scale : root.sheet == 10 ? root.orientation : root.sheet == 35 ? root.frame-pacing : root.audio;
         picked(i) => {

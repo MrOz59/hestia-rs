@@ -183,6 +183,7 @@ pub struct SettingsForm {
     pub direct_video: bool,
     pub allow_tearing: bool,
     pub frame_pacing: i32,
+    pub controller_model: i32,
     pub show_video_through_loss: bool,
     pub orientation: i32,
 }

@@ -150,6 +150,7 @@ struct Output {
     /// Local commands, as the device settings had them when the stream
     /// started (read once, not on every key).
     shortcuts: Shortcuts,
+    controller_model: Option<hestia_core::stream::input::ControllerModel>,
     /// Keys whose press ran a shortcut: their release must not reach the
     /// host either, or it would get a key-up without the key-down.
     swallowed_keys: Mutex<HashSet<u16>>,
@@ -706,6 +707,7 @@ impl Controller {
                 session,
                 held: Mutex::new(Held::default()),
                 shortcuts: launched.settings.shortcuts,
+                controller_model: launched.settings.controller_model,
                 swallowed_keys: Mutex::new(HashSet::new()),
             },
             host_id,
@@ -1479,8 +1481,19 @@ impl Controller {
     }
 
     /// A game controller's new state, for the host.
-    pub(super) fn stream_gamepad(&self, state: hestia_core::stream::input::GamepadState) {
+    pub(super) fn stream_gamepad(
+        &self,
+        state: hestia_core::stream::input::GamepadState,
+        arrival: Option<hestia_core::stream::input::GamepadInfo>,
+    ) {
         if let Some(active) = self.active_stream().as_ref() {
+            if let Some(mut info) = arrival {
+                info.model = active.out.controller_model.or(info.model);
+                active.out.send(&InputEvent::GamepadArrival {
+                    index: state.index,
+                    info,
+                });
+            }
             active.out.send(&InputEvent::Gamepad(state));
         }
     }

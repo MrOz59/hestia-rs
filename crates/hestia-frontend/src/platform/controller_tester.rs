@@ -3,8 +3,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 
-use serde::Deserialize;
-
 use hestia_core::stream::input::{GamepadState, buttons};
 
 use crate::gamepad::{self, Axes, Control, Controllers};
@@ -17,49 +15,12 @@ const AXIS_NAMES: [&str; 12] = [
     "X", "Y", "Z", "RZ", "RX", "RY", "LTRIGGER", "RTRIGGER", "BRAKE", "GAS", "HAT_X", "HAT_Y",
 ];
 
-const SOURCE_KEYBOARD: u32 = 0x0000_0101;
-const SOURCE_MOUSE: u32 = 0x0000_2002;
-const SOURCE_TOUCHPAD: u32 = 0x0010_0008;
-
-#[derive(Deserialize)]
-struct Device {
-    label: String,
-    details: String,
-    sources: u32,
-    joystick_axes: bool,
-    pad_buttons: u32,
-    alphabetic: bool,
-}
-
-// Android also sets GAMEPAD on keyboards, remotes and OEM input helpers with
-// a single gamepad key. Digital pads may lack sticks and handhelds can be internal.
-impl Device {
-    fn is_controller(&self) -> bool {
-        (self.sources & gamepad::SOURCE_JOYSTICK == gamepad::SOURCE_JOYSTICK && self.joystick_axes)
-            || (self.sources & gamepad::SOURCE_GAMEPAD == gamepad::SOURCE_GAMEPAD
-                && !self.alphabetic
-                && self.pad_buttons >= 2)
-    }
-
-    fn accepts_key(&self, source: u32, code: u32, scan: i32) -> bool {
-        if gamepad::is_controller_source(source) && !self.alphabetic {
-            return true;
-        }
-        // Some controller buttons arrive as keyboard or d-pad events. Allow
-        // those signatures only after validating the originating device.
-        (gamepad::is_controller_source(source)
-            || source == SOURCE_KEYBOARD
-            || source & gamepad::SOURCE_DPAD == gamepad::SOURCE_DPAD)
-            && (matches!(code, 19..=23 | 96..=110 | 188..=203)
-                || (0x130..=0x13f).contains(&scan)
-                || (!self.alphabetic && code == 0 && scan > 0))
-    }
-
-    fn accepts_pointer(&self, source: u32) -> bool {
-        self.sources & SOURCE_TOUCHPAD == SOURCE_TOUCHPAD
-            && (source & SOURCE_MOUSE == SOURCE_MOUSE || source & SOURCE_TOUCHPAD == SOURCE_TOUCHPAD)
-    }
-}
+use super::controller_device::Device;
+#[cfg(test)]
+use super::controller_device::SOURCE_KEYBOARD;
+#[cfg(target_os = "android")]
+use super::controller_device::profiles;
+use super::controller_device::{SOURCE_MOUSE, SOURCE_TOUCHPAD};
 
 // Null entries are known non-controller devices and need no further JNI lookup.
 type Inventory = BTreeMap<i32, Option<Device>>;
@@ -662,27 +623,6 @@ mod android {
         ))
     }
 
-    fn profiles<T: serde::de::DeserializeOwned>(id: Option<i32>) -> Result<T, String> {
-        use jni::objects::{JString, JValue};
-        let mut json = String::new();
-        super::super::android::with_helper(|env, _, helper| {
-            let value = match id {
-                Some(id) => env.call_static_method(
-                    helper,
-                    "controllerTesterDevice",
-                    "(I)Ljava/lang/String;",
-                    &[JValue::Int(id)],
-                )?,
-                None => env.call_static_method(helper, "controllerTesterDevices", "()Ljava/lang/String;", &[])?,
-            }
-            .l()?;
-            let value = env.auto_local(JString::from(value));
-            json = env.get_string(&value)?.into();
-            Ok(())
-        })?;
-        serde_json::from_str(&json).map_err(|e| e.to_string())
-    }
-
     // A newly connected controller can deliver its first button before the
     // next inventory refresh. Resolve it once, outside the session lock.
     fn controller_event(id: i32, accepts: impl FnOnce(&Device) -> bool, record: impl FnOnce(&mut Session)) -> bool {
@@ -869,6 +809,13 @@ mod tests {
 
     fn profile(name: &str, sources: u32, joystick_axes: bool, pad_buttons: u32, alphabetic: bool) -> Option<Device> {
         Some(Device {
+            vendor: 0,
+            product: 0,
+            keys: vec![],
+            hat_x: false,
+            hat_y: false,
+            analog_triggers: false,
+            rumble: false,
             label: name.into(),
             details: String::new(),
             sources,
@@ -916,6 +863,24 @@ mod tests {
             assert!(!report.contains(ignored));
         }
         assert!(report.contains("id 13 DOWN scan 312 key 104"));
+        assert!(devices.get(&3).unwrap().as_ref().unwrap().gamepad_info().is_none());
+        let ds4 = devices.get_mut(&13).unwrap().as_mut().unwrap();
+        ds4.vendor = 0x054c;
+        ds4.product = 0x09cc;
+        ds4.keys = vec![96, 100, 108];
+        ds4.hat_x = true;
+        ds4.analog_triggers = true;
+        ds4.rumble = true;
+        let info = ds4.gamepad_info().unwrap();
+        assert_eq!(
+            info.model,
+            Some(hestia_core::stream::input::ControllerModel::DualShock4)
+        );
+        assert_eq!(info.capabilities, 3);
+        assert_eq!(
+            info.supported_buttons,
+            buttons::A | buttons::Y | buttons::PLAY | buttons::LEFT | buttons::RIGHT
+        );
         devices.remove(&13);
         let report = tester.report(&devices);
         assert!(report.contains("No physical game controllers detected"));

@@ -71,6 +71,25 @@ impl HostSdp {
         self.raw.contains("x-nv-video[0].refPicInvalidation")
     }
 
+    pub fn controller_protocol(&self) -> crate::input::ControllerProtocol {
+        use crate::input::ControllerProtocol;
+        if self
+            .raw
+            .lines()
+            .any(|l| l.trim() == "a=x-hermes-general.controllerModels:1")
+        {
+            ControllerProtocol::ModelV1
+        } else if self
+            .raw
+            .lines()
+            .any(|l| l.trim().starts_with("a=x-ss-general.featureFlags:"))
+        {
+            ControllerProtocol::Family
+        } else {
+            ControllerProtocol::StateOnly
+        }
+    }
+
     pub fn feature_flags(&self) -> u32 {
         uint_attribute(&self.raw, "x-ss-general.featureFlags").unwrap_or(0)
     }
@@ -321,6 +340,26 @@ pub fn build_announce(p: &AnnounceParams) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controller_models_require_explicit_version_support() {
+        use crate::input::ControllerProtocol;
+        assert_eq!(HostSdp::new("").controller_protocol(), ControllerProtocol::StateOnly);
+        assert_eq!(
+            HostSdp::new("a=x-ss-general.featureFlags:0\r\n").controller_protocol(),
+            ControllerProtocol::Family
+        );
+        assert_eq!(
+            HostSdp::new("a=x-ss-general.featureFlags:3\r\na=x-hermes-general.controllerModels:1\r\n")
+                .controller_protocol(),
+            ControllerProtocol::ModelV1
+        );
+        assert_eq!(
+            HostSdp::new("a=x-ss-general.featureFlags:3\na=x-hermes-general.controllerModels:10\n")
+                .controller_protocol(),
+            ControllerProtocol::Family
+        );
+    }
 
     const HERMES_DESCRIBE: &str = "a=x-ss-general.featureFlags:3\n\
 a=x-ss-general.encryptionSupported:7\n\

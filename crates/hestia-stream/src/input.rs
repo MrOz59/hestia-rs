@@ -136,7 +136,88 @@ pub enum InputEvent {
         /// Bitmask of `pen_buttons::*` held.
         buttons: u8,
     },
+    GamepadArrival {
+        index: u8,
+        info: GamepadInfo,
+    },
     Gamepad(GamepadState),
+}
+
+/// Explicit Hermes controller-model v1 identifiers. Zero is reserved for host auto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum ControllerModel {
+    Generic = 1,
+    Xbox360 = 2,
+    XboxOne = 3,
+    XboxSeries = 4,
+    DualShock4 = 5,
+    DualSense = 6,
+    SwitchPro = 7,
+}
+
+impl ControllerModel {
+    pub const ALL: [Self; 7] = [
+        Self::Generic,
+        Self::Xbox360,
+        Self::XboxOne,
+        Self::XboxSeries,
+        Self::DualShock4,
+        Self::DualSense,
+        Self::SwitchPro,
+    ];
+
+    fn family(self) -> u8 {
+        match self {
+            Self::Generic => 0,
+            Self::Xbox360 | Self::XboxOne | Self::XboxSeries => 1,
+            Self::DualShock4 | Self::DualSense => 2,
+            Self::SwitchPro => 3,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct GamepadInfo {
+    pub model: Option<ControllerModel>,
+    /// Moonlight LI_CTYPE, also useful when only the vendor is known.
+    pub family: u8,
+    pub capabilities: u16,
+    pub supported_buttons: u32,
+}
+
+impl GamepadInfo {
+    pub fn from_usb(vendor: u16, product: u16) -> Self {
+        use ControllerModel::*;
+        let model = match (vendor, product) {
+            (0x054c, 0x05c4 | 0x09cc | 0x0ba0) => Some(DualShock4),
+            (0x054c, 0x0ce6 | 0x0df2) => Some(DualSense),
+            (0x045e, 0x028e | 0x0719) => Some(Xbox360),
+            (0x045e, 0x02d1 | 0x02dd | 0x02e0 | 0x02ea | 0x02fd) => Some(XboxOne),
+            (0x045e, 0x0b12 | 0x0b13) => Some(XboxSeries),
+            (0x057e, 0x2009) => Some(SwitchPro),
+            _ => None,
+        };
+        let family = match vendor {
+            0x045e => 1,
+            0x054c => 2,
+            0x057e => 3,
+            _ => 0,
+        };
+        Self {
+            model,
+            family,
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControllerProtocol {
+    StateOnly,
+    Family,
+    ModelV1,
 }
 
 /// Full state of one controller, sent whenever anything changes.
@@ -212,6 +293,10 @@ const TILT_UNKNOWN: u8 = 0xff;
 const MAX_TEXT_CHUNK: usize = 32;
 
 pub fn encode(event: &InputEvent) -> Vec<EncodedInput> {
+    encode_for_host(event, ControllerProtocol::Family)
+}
+
+pub(crate) fn encode_for_host(event: &InputEvent, protocol: ControllerProtocol) -> Vec<EncodedInput> {
     let one = |channel: u8, bytes: Vec<u8>| vec![EncodedInput { channel, bytes }];
     match event {
         InputEvent::Key {
@@ -342,6 +427,20 @@ pub fn encode(event: &InputEvent) -> Vec<EncodedInput> {
                 body.extend_from_slice(&f.to_le_bytes());
             }
             one(CHANNEL_PEN, packet(SS_PEN, &body))
+        }
+        InputEvent::GamepadArrival { index, info } => {
+            if protocol == ControllerProtocol::StateOnly {
+                return Vec::new(); // The following state already carries the active mask.
+            }
+            let mut body = vec![*index, info.model.map_or(info.family, ControllerModel::family)];
+            body.extend_from_slice(&info.capabilities.to_le_bytes());
+            body.extend_from_slice(&info.supported_buttons.to_le_bytes());
+            if protocol == ControllerProtocol::ModelV1
+                && let Some(model) = info.model
+            {
+                body.push(model as u8);
+            }
+            one(CHANNEL_GAMEPAD_BASE + (index & 0x0f), packet(0x5500_0004, &body))
         }
         InputEvent::Gamepad(g) => {
             let mut body = Vec::with_capacity(26);
@@ -480,6 +579,47 @@ pub mod vk {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controller_arrival_negotiates_the_model_and_preserves_the_legacy_family() {
+        let info = GamepadInfo {
+            capabilities: 3,
+            supported_buttons: 0xf7ff,
+            ..GamepadInfo::from_usb(0x054c, 0x09cc)
+        };
+        let arrival = InputEvent::GamepadArrival { index: 2, info };
+        let modern = encode_for_host(&arrival, ControllerProtocol::ModelV1);
+        assert_eq!(modern[0].channel, CHANNEL_GAMEPAD_BASE + 2);
+        assert_eq!(
+            modern[0].bytes,
+            [0, 0, 0, 13, 4, 0, 0, 0x55, 2, 2, 3, 0, 0xff, 0xf7, 0, 0, 5]
+        );
+        let family = encode_for_host(&arrival, ControllerProtocol::Family);
+        assert_eq!(
+            family[0].bytes,
+            [0, 0, 0, 12, 4, 0, 0, 0x55, 2, 2, 3, 0, 0xff, 0xf7, 0, 0]
+        );
+        assert!(encode_for_host(&arrival, ControllerProtocol::StateOnly).is_empty());
+        // A manual Xbox selection changes the family for an older host too.
+        let manual = InputEvent::GamepadArrival {
+            index: 2,
+            info: GamepadInfo {
+                model: Some(ControllerModel::Xbox360),
+                ..info
+            },
+        };
+        assert_eq!(encode_for_host(&manual, ControllerProtocol::ModelV1)[0].bytes[9], 1);
+        assert_eq!(encode_for_host(&manual, ControllerProtocol::ModelV1)[0].bytes[16], 2);
+        // Unidentified devices retain host auto, without inventing a model.
+        let unknown = InputEvent::GamepadArrival {
+            index: 0,
+            info: GamepadInfo::from_usb(0x1234, 0x5678),
+        };
+        assert_eq!(
+            encode_for_host(&unknown, ControllerProtocol::ModelV1)[0].bytes.len(),
+            16
+        );
+    }
 
     #[test]
     fn keyboard_layout() {

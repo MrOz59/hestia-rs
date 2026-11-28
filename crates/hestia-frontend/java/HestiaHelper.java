@@ -1,6 +1,10 @@
 package com.mroz59.hestia;
 
 import android.app.Activity;
+import android.hardware.input.InputManager;
+import android.os.Handler;
+import android.os.Looper;
+import org.json.JSONArray;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothManager;
 import android.content.ClipData;
@@ -67,6 +71,31 @@ public final class HestiaHelper {
     /** The direct video surface appeared, or went away (null). */
     static native void nativeVideoSurface(Surface surface);
 
+    static native void nativeControllerChanged(int id, boolean removed);
+    private static InputManager.InputDeviceListener controllerListener;
+    private static InputManager controllerManager;
+
+    public static void watchControllers(Activity activity, boolean on) {
+        activity.runOnUiThread(() -> {
+            if (controllerListener != null) {
+                controllerManager.unregisterInputDeviceListener(controllerListener);
+                controllerListener = null;
+            }
+            if (!on) return;
+            controllerManager = (InputManager) activity.getSystemService(Context.INPUT_SERVICE);
+            controllerListener = new InputManager.InputDeviceListener() {
+                private void changed(int id, boolean removed) {
+                    if (controllerListener == this) nativeControllerChanged(id, removed);
+                }
+                public void onInputDeviceAdded(int id) { changed(id, false); }
+                public void onInputDeviceChanged(int id) { changed(id, false); }
+                public void onInputDeviceRemoved(int id) { changed(id, true); }
+            };
+            controllerManager.registerInputDeviceListener(controllerListener, new Handler(Looper.getMainLooper()));
+            for (int id : controllerManager.getInputDeviceIds()) nativeControllerChanged(id, false);
+        });
+    }
+
     // Inventory and hotplug lookups supply the same capabilities to both capture paths.
     public static String controllerTesterDevices() throws JSONException {
         JSONObject devices = new JSONObject();
@@ -112,9 +141,11 @@ public final class HestiaHelper {
                       196, 197, 198, 199, 200, 201, 202, 203};
         boolean[] present = device.hasKeys(keys);
         int padButtons = 0;
+        JSONArray mappedKeys = new JSONArray();
         details.append("  supported keys:");
         for (int i = 0; i < keys.length; i++) {
             if (!present[i]) continue;
+            mappedKeys.put(keys[i]);
             if (KeyEvent.isGamepadButton(keys[i])) padButtons++;
             details.append(' ').append(KeyEvent.keyCodeToString(keys[i]));
         }
@@ -129,9 +160,20 @@ public final class HestiaHelper {
                     range.getFlat(), range.getFuzz(), range.getResolution()));
         }
         return new JSONObject().put("label", label).put("details", details.toString())
+                .put("vendor", vendor).put("product", product).put("keys", mappedKeys)
+                .put("hat_x", hasJoystickAxis(device, MotionEvent.AXIS_HAT_X))
+                .put("hat_y", hasJoystickAxis(device, MotionEvent.AXIS_HAT_Y))
+                .put("analog_triggers", hasJoystickAxis(device, MotionEvent.AXIS_LTRIGGER)
+                        || hasJoystickAxis(device, MotionEvent.AXIS_RTRIGGER)
+                        || hasJoystickAxis(device, MotionEvent.AXIS_GAS) || hasJoystickAxis(device, MotionEvent.AXIS_BRAKE))
+                .put("rumble", device.getVibrator().hasVibrator())
                 .put("sources", device.getSources()).put("pad_buttons", padButtons)
                 .put("joystick_axes", joystickAxes)
                 .put("alphabetic", device.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC);
+    }
+
+    private static boolean hasJoystickAxis(InputDevice device, int axis) {
+        return device.getMotionRange(axis, InputDevice.SOURCE_JOYSTICK) != null;
     }
 
     /** A regular decoder that can accept the requested stream mode. */

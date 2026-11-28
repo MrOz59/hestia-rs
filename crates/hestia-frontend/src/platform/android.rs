@@ -126,6 +126,11 @@ fn load_helper(
     let class = JClass::from(class);
     let methods = [
         jni::NativeMethod {
+            name: "nativeControllerChanged".into(),
+            sig: "(IZ)V".into(),
+            fn_ptr: native_controller_changed as *mut std::ffi::c_void,
+        },
+        jni::NativeMethod {
             name: "nativeCommitText".into(),
             sig: "(Ljava/lang/String;)V".into(),
             fn_ptr: native_commit_text as *mut std::ffi::c_void,
@@ -144,6 +149,15 @@ fn load_helper(
     env.register_native_methods(&class, &methods)?;
     log::info!("Android helper loaded");
     env.new_global_ref(class)
+}
+
+extern "system" fn native_controller_changed(
+    _env: jni::JNIEnv<'_>,
+    _class: jni::objects::JClass<'_>,
+    id: jni::sys::jint,
+    removed: jni::sys::jboolean,
+) {
+    super::gamepads::android_devices::changed(id, removed != 0);
 }
 
 extern "system" fn native_commit_text(

@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use hestia_core::stream::input::{GamepadInfo, buttons};
 use log::{debug, info};
 
 use crate::padmap::{self, Layout, PadState, Range};
@@ -59,6 +60,7 @@ struct Pad {
     name: String,
     /// Slot key in the shared controller table.
     id: i32,
+    info: GamepadInfo,
     layout: Layout,
     ranges: [Option<Range>; 0x20],
     state: PadState,
@@ -160,7 +162,30 @@ impl Pad {
             )
         };
         let can_rumble = can_write && has_bit(&ff, usize::from(FF_RUMBLE));
+        // EVIOCGID returns four native u16s: bus, vendor, product, version.
+        let mut ids = [0u16; 4];
+        unsafe {
+            libc::ioctl(
+                fd,
+                ioc(IOC_READ, 0x02, std::mem::size_of_val(&ids)) as _,
+                ids.as_mut_ptr(),
+            )
+        };
+        let mut info = GamepadInfo::from_usb(ids[1], ids[2]);
+        info.capabilities = u16::from(layout.triggers.is_some()) | (u16::from(can_rumble) << 1);
+        for key in 0..(keys.len() * 8) {
+            if has_bit(&keys, key) {
+                info.supported_buttons |= padmap::button_bit(key as u16).unwrap_or(0);
+            }
+        }
+        if has_bit(&abs, usize::from(padmap::ABS_HAT0X)) {
+            info.supported_buttons |= buttons::LEFT | buttons::RIGHT;
+        }
+        if has_bit(&abs, usize::from(padmap::ABS_HAT0Y)) {
+            info.supported_buttons |= buttons::UP | buttons::DOWN;
+        }
         let mut pad = Self {
+            info,
             file,
             path,
             name,
@@ -276,7 +301,7 @@ impl Pad {
         }
         self.sent = Some(now);
         let (buttons, left, right, triggers) = now;
-        platform::gamepad_state(self.id, buttons, left, right, triggers);
+        platform::gamepad_state_with_info(self.id, self.info, buttons, left, right, triggers);
     }
 
     /// Starts, changes or stops the rumble (strong = low frequency motor).

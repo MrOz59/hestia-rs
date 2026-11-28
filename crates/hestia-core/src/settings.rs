@@ -238,6 +238,8 @@ pub struct StreamSettings {
     pub touch_mode: Option<TouchMode>,
     /// Show the on-screen controller over the stream.
     pub onscreen_controller: bool,
+    /// None reports each physical controller as detected.
+    pub controller_model: Option<hestia_stream::input::ControllerModel>,
     pub orientation: StreamOrientation,
     /// Local keyboard commands. Never sent to a host profile.
     pub shortcuts: crate::shortcuts::Shortcuts,
@@ -273,6 +275,7 @@ impl Default for StreamSettings {
             show_video_through_loss: false,
             touch_mode: None,
             onscreen_controller: false,
+            controller_model: None,
             orientation: StreamOrientation::Landscape,
             shortcuts: crate::shortcuts::Shortcuts::default(),
         }
@@ -377,6 +380,7 @@ mod tests {
         assert_eq!(partial.codec, CodecPreference::Av1);
         assert_eq!(partial.width, 1920);
         assert_eq!(partial.frame_pacing, FramePacing::MinLatency);
+        assert_eq!(partial.controller_model, None);
         assert_eq!(partial.bitrate_for_network(true), partial.bitrate_kbps);
     }
 
