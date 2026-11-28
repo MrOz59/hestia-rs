@@ -36,6 +36,7 @@ pub struct Appearance {
     pub active_pack: Option<String>,
     pub packs: Vec<ThemePack>,
     pub launch_style: LaunchStyle,
+    pub hidden_themes: Vec<AppearanceTheme>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

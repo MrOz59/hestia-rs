@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt::Write;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -7,7 +8,9 @@ use hestia_core::appearance::{Appearance, LaunchStyle, PaletteRole, ThemePack, r
 use hestia_core::store::{AppearanceTheme, Store};
 use slint::{Color, ComponentHandle, Model, ModelRc, SharedString, StyledText, VecModel};
 
-use crate::{AppWindow, PaletteOverride, Theme, ThemeStyle, VoltagePaths, theme_file};
+use crate::{AppWindow, InstalledThemePack, PaletteOverride, Theme, ThemeStyle, VoltagePaths, theme_file};
+
+const APPEARANCE_ERROR: i32 = -2;
 
 #[derive(Default)]
 struct Catalogue {
@@ -16,81 +19,226 @@ struct Catalogue {
     reading_file: bool,
 }
 
+#[derive(Clone, Copy)]
+enum Selection<'a> {
+    BuiltIn(AppearanceTheme),
+    Imported(&'a ThemePack),
+    Preview(&'a ThemePack),
+}
+
+impl Selection<'_> {
+    fn base(self) -> AppearanceTheme {
+        match self {
+            Self::BuiltIn(base) => base,
+            Self::Imported(pack) | Self::Preview(pack) => pack.base,
+        }
+    }
+}
+
 impl Catalogue {
-    fn active_index(&self) -> usize {
+    fn choices(&self) -> impl Iterator<Item = Selection<'_>> {
+        AppearanceTheme::ALL
+            .into_iter()
+            .filter(|theme| !self.saved.hidden_themes.contains(theme))
+            .map(Selection::BuiltIn)
+            .chain(self.saved.packs.iter().map(Selection::Imported))
+            .chain(self.preview.iter().map(Selection::Preview))
+    }
+
+    fn index(&self, selection: Selection<'_>) -> Option<i32> {
+        self.choices()
+            .position(|entry| match (selection, entry) {
+                (Selection::BuiltIn(a), Selection::BuiltIn(b)) => a == b,
+                (Selection::Imported(a), Selection::Imported(b)) | (Selection::Preview(a), Selection::Preview(b)) => {
+                    a.id == b.id
+                }
+                _ => false,
+            })
+            .map(|i| i as i32)
+    }
+
+    fn active_index(&self) -> i32 {
         self.saved
             .active_pack
             .as_ref()
-            .and_then(|id| self.saved.packs.iter().position(|pack| &pack.id == id))
-            .map_or(self.saved.theme.index(), |i| AppearanceTheme::ALL.len() + i)
+            .and_then(|id| self.saved.packs.iter().find(|pack| &pack.id == id))
+            .and_then(|pack| self.index(Selection::Imported(pack)))
+            .or_else(|| self.index(Selection::BuiltIn(self.saved.theme)))
+            .unwrap_or(-1)
+    }
+
+    fn ensure_active(&mut self) {
+        if self
+            .saved
+            .active_pack
+            .as_ref()
+            .is_some_and(|id| self.saved.packs.iter().any(|pack| &pack.id == id))
+        {
+            return;
+        }
+        self.saved.active_pack = None;
+        if !self.saved.hidden_themes.contains(&self.saved.theme) {
+            return;
+        }
+        if let Some(theme) = AppearanceTheme::ALL
+            .into_iter()
+            .find(|theme| !self.saved.hidden_themes.contains(theme))
+        {
+            self.saved.theme = theme;
+        } else if let Some(pack) = self.saved.packs.first() {
+            self.saved.theme = pack.base;
+            self.saved.active_pack = Some(pack.id.clone());
+        } else {
+            self.saved.theme = AppearanceTheme::Hearth;
+        }
     }
 
     fn update_options(&self, ui: &AppWindow) {
-        let mut names: Vec<SharedString> = ui.get_builtin_theme_names().iter().collect();
-        let mut styles: Vec<ThemeStyle> = AppearanceTheme::ALL
-            .into_iter()
-            .map(|base| ThemeStyle {
-                base: base.index() as i32,
+        let builtin_names = ui.get_builtin_theme_names();
+        let mut names: Vec<SharedString> = Vec::new();
+        let mut styles = Vec::new();
+        for choice in self.choices() {
+            let mut style = ThemeStyle {
+                base: choice.base().index() as i32,
                 ..Default::default()
-            })
-            .collect();
-        for (i, pack) in self.saved.packs.iter().chain(self.preview.iter()).enumerate() {
-            let is_update_preview =
-                i == self.saved.packs.len() && self.saved.packs.iter().any(|saved| saved.id == pack.id);
-            names.push(if is_update_preview {
-                format!("{} (preview)", pack.name).into()
-            } else {
-                pack.name.as_str().into()
-            });
-            let colors = PaletteRole::ALL
-                .into_iter()
-                .map(|role| {
-                    pack.color(role)
-                        .map_or_else(PaletteOverride::default, |[red, green, blue, alpha]| PaletteOverride {
-                            supplied: true,
-                            color: Color::from_argb_u8(alpha, red, green, blue),
-                        })
-                })
-                .collect();
-            styles.push(ThemeStyle {
-                base: pack.base.index() as i32,
-                colors: model(colors),
-            });
+            };
+            match choice {
+                Selection::BuiltIn(base) => names.push(builtin_names.row_data(base.index()).unwrap_or_default()),
+                Selection::Imported(pack) | Selection::Preview(pack) => {
+                    let update = matches!(choice, Selection::Preview(_))
+                        && self.saved.packs.iter().any(|saved| saved.id == pack.id);
+                    names.push(if update {
+                        format!("{} (preview)", pack.name).into()
+                    } else {
+                        pack.name.as_str().into()
+                    });
+                    style.colors = model(
+                        PaletteRole::ALL
+                            .into_iter()
+                            .map(|role| {
+                                pack.color(role)
+                                    .map_or_else(PaletteOverride::default, |[red, green, blue, alpha]| {
+                                        PaletteOverride {
+                                            supplied: true,
+                                            color: Color::from_argb_u8(alpha, red, green, blue),
+                                        }
+                                    })
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            styles.push(style);
         }
         let mut menu = names.clone();
+        menu.push("Manage themes".into());
         menu.push("Load Theme Pack from File".into());
         ui.set_theme_names(model(names));
         ui.set_theme_menu(model(menu));
         ui.set_theme_styles(model(styles));
+        ui.set_can_restore_themes(!self.saved.hidden_themes.is_empty());
     }
 
-    fn save(&mut self, index: usize, style: LaunchStyle, store: &Store) -> std::io::Result<i32> {
+    fn open_manager(&self, ui: &AppWindow) {
+        let active = self.active_index();
+        let builtin_names = ui.get_builtin_theme_names();
+        let rows = self
+            .choices()
+            .enumerate()
+            .filter_map(|(i, choice)| {
+                let active = i as i32 == active;
+                match choice {
+                    Selection::BuiltIn(theme) => Some(InstalledThemePack {
+                        name: builtin_names.row_data(theme.index()).unwrap_or_default(),
+                        builtin_index: theme.index() as i32,
+                        active,
+                        ..Default::default()
+                    }),
+                    Selection::Imported(pack) => Some(InstalledThemePack {
+                        id: pack.id.as_str().into(),
+                        name: pack.name.as_str().into(),
+                        builtin_index: -1,
+                        active,
+                        ..Default::default()
+                    }),
+                    Selection::Preview(_) => None,
+                }
+            })
+            .collect();
+        ui.set_installed_theme_packs(model(rows));
+    }
+
+    fn remove(
+        &mut self,
+        builtins: &[AppearanceTheme],
+        ids: &HashSet<&str>,
+        draft: i32,
+        store: &Store,
+    ) -> std::io::Result<i32> {
+        let mut next = self.snapshot();
+        next.saved.hidden_themes.extend_from_slice(builtins);
+        next.saved.packs.retain(|pack| !ids.contains(pack.id.as_str()));
+        if next.preview.as_ref().is_some_and(|pack| ids.contains(pack.id.as_str())) {
+            next.preview = None;
+        }
+        self.apply_catalogue(next, draft, store)
+    }
+
+    fn restore(&mut self, draft: i32, store: &Store) -> std::io::Result<i32> {
+        let mut next = self.snapshot();
+        next.saved.hidden_themes.clear();
+        self.apply_catalogue(next, draft, store)
+    }
+
+    fn snapshot(&self) -> Self {
+        Self {
+            saved: self.saved.clone(),
+            preview: self.preview.clone(),
+            reading_file: self.reading_file,
+        }
+    }
+
+    fn apply_catalogue(&mut self, mut next: Self, draft: i32, store: &Store) -> std::io::Result<i32> {
+        next.ensure_active();
+        let index = usize::try_from(draft)
+            .ok()
+            .and_then(|i| self.choices().nth(i))
+            .and_then(|selection| match selection {
+                Selection::BuiltIn(_) => next.index(selection),
+                Selection::Imported(_) | Selection::Preview(_) => next
+                    .index(selection)
+                    .or_else(|| next.index(Selection::BuiltIn(selection.base()))),
+            })
+            .unwrap_or_else(|| next.active_index());
+        store.save_appearance(&next.saved)?;
+        *self = next;
+        Ok(index)
+    }
+
+    fn save(&mut self, index: i32, style: LaunchStyle, store: &Store) -> std::io::Result<i32> {
         let mut saved = self.saved.clone();
         saved.launch_style = style;
-        if let Some(base) = AppearanceTheme::ALL.get(index) {
-            saved.theme = *base;
-            saved.active_pack = None;
-        } else {
-            let pack_index = index - AppearanceTheme::ALL.len();
-            let pack = if pack_index == saved.packs.len() {
-                self.preview.as_ref()
-            } else {
-                saved.packs.get(pack_index)
+        match usize::try_from(index).ok().and_then(|i| self.choices().nth(i)) {
+            Some(Selection::BuiltIn(base)) => {
+                saved.theme = base;
+                saved.active_pack = None;
             }
-            .ok_or_else(|| std::io::Error::other("theme selection no longer exists"))?
-            .clone();
-            saved.theme = pack.base;
-            saved.active_pack = Some(pack.id.clone());
-            if let Some(existing) = saved.packs.iter_mut().find(|existing| existing.id == pack.id) {
-                *existing = pack;
-            } else {
-                saved.packs.push(pack);
+            Some(Selection::Imported(pack) | Selection::Preview(pack)) => {
+                saved.theme = pack.base;
+                saved.active_pack = Some(pack.id.clone());
+                if let Some(existing) = saved.packs.iter_mut().find(|existing| existing.id == pack.id) {
+                    *existing = pack.clone();
+                } else {
+                    saved.packs.push(pack.clone());
+                }
             }
+            None if index == -1 && self.active_index() == -1 => {}
+            None => return Err(std::io::Error::other("theme selection no longer exists")),
         }
         store.save_appearance(&saved)?;
         self.saved = saved;
         self.preview = None;
-        Ok(self.active_index() as i32)
+        Ok(self.active_index())
     }
 }
 
@@ -112,27 +260,98 @@ pub(crate) fn install(ui: &AppWindow, data_dir: PathBuf, picker: theme_file::Pic
         ..Default::default()
     };
     state.saved.packs.retain(|pack| pack.validate().is_ok());
+    state.ensure_active();
     state.update_options(ui);
-    ui.set_saved_theme(state.active_index() as i32);
+    ui.set_saved_theme(state.active_index());
     ui.set_saved_launch_style(state.saved.launch_style.index() as i32);
     let state = Arc::new(Mutex::new(state));
 
     let window = ui.as_weak();
     let catalogue = state.clone();
+    let save_dir = data_dir.clone();
     ui.on_save_theme(move |index, launch| {
         let Some(&style) = LaunchStyle::ALL.get(launch as usize) else {
-            return -1;
+            return APPEARANCE_ERROR;
         };
-        let Some(window) = window.upgrade() else { return -1 };
+        let Some(window) = window.upgrade() else {
+            return APPEARANCE_ERROR;
+        };
         let mut catalogue = catalogue.lock().unwrap();
-        match Store::open(&data_dir).and_then(|store| catalogue.save(index as usize, style, &store)) {
+        match Store::open(&save_dir).and_then(|store| catalogue.save(index, style, &store)) {
             Ok(index) => {
                 catalogue.update_options(&window);
                 index
             }
             Err(error) => {
                 log::warn!("could not save appearance: {error}");
-                -1
+                APPEARANCE_ERROR
+            }
+        }
+    });
+
+    let window = ui.as_weak();
+    let catalogue = state.clone();
+    ui.on_open_theme_manager(move || {
+        if let Some(window) = window.upgrade() {
+            catalogue.lock().unwrap().open_manager(&window);
+        }
+    });
+
+    let window = ui.as_weak();
+    let catalogue = state.clone();
+    let remove_dir = data_dir.clone();
+    ui.on_remove_theme_packs(move |draft| {
+        let Some(window) = window.upgrade() else {
+            return APPEARANCE_ERROR;
+        };
+        let selected: Vec<_> = window
+            .get_installed_theme_packs()
+            .iter()
+            .filter(|pack| pack.checked)
+            .collect();
+        let builtins = selected
+            .iter()
+            .filter_map(|row| AppearanceTheme::ALL.get(row.builtin_index as usize).copied())
+            .collect::<Vec<_>>();
+        let ids = selected
+            .iter()
+            .filter(|row| row.builtin_index < 0)
+            .map(|row| row.id.as_str())
+            .collect();
+        let mut catalogue = catalogue.lock().unwrap();
+        let had_preview = catalogue.preview.is_some();
+        match Store::open(&remove_dir).and_then(|store| catalogue.remove(&builtins, &ids, draft, &store)) {
+            Ok(index) => {
+                catalogue.update_options(&window);
+                window.set_saved_theme(catalogue.active_index());
+                if had_preview && catalogue.preview.is_none() {
+                    window.set_theme_import_message("".into());
+                }
+                index
+            }
+            Err(error) => {
+                log::warn!("could not remove themes: {error}");
+                APPEARANCE_ERROR
+            }
+        }
+    });
+
+    let window = ui.as_weak();
+    let catalogue = state.clone();
+    ui.on_restore_builtin_themes(move |draft| {
+        let Some(window) = window.upgrade() else {
+            return APPEARANCE_ERROR;
+        };
+        let mut catalogue = catalogue.lock().unwrap();
+        match Store::open(&data_dir).and_then(|store| catalogue.restore(draft, &store)) {
+            Ok(index) => {
+                catalogue.update_options(&window);
+                window.set_saved_theme(catalogue.active_index());
+                index
+            }
+            Err(error) => {
+                log::warn!("could not restore built-in themes: {error}");
+                APPEARANCE_ERROR
             }
         }
     });
@@ -171,7 +390,13 @@ pub(crate) fn install(ui: &AppWindow, data_dir: PathBuf, picker: theme_file::Pic
                     Ok(Some(pack)) => {
                         catalogue.preview = Some(pack);
                         catalogue.update_options(&ui);
-                        ui.invoke_preview_theme((AppearanceTheme::ALL.len() + catalogue.saved.packs.len()) as i32);
+                        if let Some(index) = catalogue
+                            .preview
+                            .as_ref()
+                            .and_then(|pack| catalogue.index(Selection::Preview(pack)))
+                        {
+                            ui.invoke_preview_theme(index);
+                        }
                         ui.set_theme_import_message("Theme pack preview. Save to keep it.".into());
                     }
                     Ok(None) => {}
@@ -294,19 +519,159 @@ mod tests {
     use super::*;
 
     #[test]
+    fn removing_a_pack_preserves_surviving_selection_and_changes_state_only_after_save() {
+        let dir = std::env::temp_dir().join(format!("hestia-theme-remove-{}", std::process::id()));
+        let store = Store::open(&dir).unwrap();
+        let harbor = read_theme_pack(include_bytes!("../../../tools/theme-packs/harbor.zip")).unwrap();
+        let blue = read_theme_pack(include_bytes!("../../../tools/theme-packs/blue.zip")).unwrap();
+        let mut catalogue = Catalogue {
+            saved: Appearance {
+                theme: blue.base,
+                active_pack: Some(blue.id.clone()),
+                packs: vec![harbor.clone(), blue.clone()],
+                launch_style: LaunchStyle::Orbit,
+                ..Default::default()
+            },
+            preview: Some(harbor.clone()),
+            ..Default::default()
+        };
+        store.save_appearance(&catalogue.saved).unwrap();
+        let first_pack = AppearanceTheme::ALL.len() as i32;
+        let selected = HashSet::from([harbor.id.as_str()]);
+        let obstruction = dir.join(".appearance.json.tmp");
+        std::fs::create_dir(&obstruction).unwrap();
+        assert!(catalogue.remove(&[], &selected, first_pack + 1, &store).is_err());
+        assert_eq!(catalogue.active_index(), first_pack + 1);
+        assert!(catalogue.preview.is_some());
+        std::fs::remove_dir(obstruction).unwrap();
+
+        assert_eq!(
+            catalogue.remove(&[], &selected, first_pack + 1, &store).unwrap(),
+            first_pack
+        );
+        assert_eq!(catalogue.active_index(), first_pack);
+        assert!(catalogue.preview.is_none());
+        let saved = Store::open(&dir).unwrap().load_appearance().unwrap();
+        assert_eq!(saved.active_pack.as_deref(), Some(blue.id.as_str()));
+        assert_eq!(saved.packs.len(), 1);
+        assert_eq!(saved.launch_style, LaunchStyle::Orbit);
+
+        // The imported pack stays eligible even when its built-in base is hidden.
+        assert_eq!(
+            catalogue
+                .remove(&AppearanceTheme::ALL, &HashSet::new(), first_pack, &store)
+                .unwrap(),
+            0
+        );
+        assert_eq!(catalogue.active_index(), 0);
+        assert_eq!(catalogue.restore(0, &store).unwrap(), first_pack);
+        assert_eq!(catalogue.active_index(), first_pack);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(all(target_os = "linux", debug_assertions))]
+    #[test]
+    fn manager_removes_all_themes_with_a_remote_and_restores_builtins() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::platform::{Key, PointerEventButton, WindowEvent};
+        use std::time::Duration;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let dir = std::env::temp_dir().join(format!("hestia-theme-manager-{}", std::process::id()));
+        let store = Store::open(&dir).unwrap();
+        let harbor = read_theme_pack(include_bytes!("../../../tools/theme-packs/harbor.zip")).unwrap();
+        let blue = read_theme_pack(include_bytes!("../../../tools/theme-packs/blue.zip")).unwrap();
+        store
+            .save_appearance(&Appearance {
+                theme: blue.base,
+                active_pack: Some(blue.id.clone()),
+                packs: vec![harbor, blue],
+                launch_style: LaunchStyle::Orbit,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let ui = AppWindow::new().unwrap();
+        install(&ui, dir.clone(), theme_file::Picker::new());
+        ui.set_starting(false);
+        ui.set_is_android(true);
+        ui.show().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(432.0, 880.0));
+        let settle = || {
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(400));
+            slint::platform::update_timers_and_animations();
+        };
+        let tap = |label: &str| {
+            ElementHandle::find_by_accessible_label(&ui, label)
+                .next()
+                .unwrap_or_else(|| panic!("missing {label}"))
+                .mock_single_click(PointerEventButton::Left);
+            settle();
+        };
+        let key = |key: Key| {
+            ui.window().dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+            settle();
+        };
+
+        ui.set_screen(3);
+        settle();
+        tap("Theme");
+        tap("Manage themes");
+        assert_eq!(
+            ui.get_installed_theme_packs().row_count(),
+            AppearanceTheme::ALL.len() + 2
+        );
+        tap("Harbor");
+        tap("Cancel");
+        assert_eq!(store.load_appearance().unwrap().packs.len(), 2);
+
+        tap("Theme");
+        tap("Manage themes");
+        assert!(ui.get_installed_theme_packs().iter().all(|pack| !pack.checked));
+        key(Key::DownArrow);
+        for i in 0..ui.get_installed_theme_packs().row_count() {
+            if i > 0 {
+                key(Key::DownArrow);
+            }
+            key(Key::Return);
+        }
+        assert!(ui.get_installed_theme_packs().iter().all(|pack| pack.checked));
+        key(Key::DownArrow);
+        key(Key::RightArrow);
+        key(Key::Return);
+        let saved = Store::open(&dir).unwrap().load_appearance().unwrap();
+        assert!(saved.packs.is_empty());
+        assert_eq!(saved.active_pack, None);
+        assert_eq!(saved.hidden_themes.len(), AppearanceTheme::ALL.len());
+        assert_eq!(saved.theme, AppearanceTheme::Hearth);
+        assert_eq!(saved.launch_style, LaunchStyle::Orbit);
+        assert_eq!(ui.get_saved_theme(), -1);
+        assert_eq!(ui.get_theme_names().row_count(), 0);
+        assert_eq!(ui.global::<Theme>().get_selection(), 0);
+
+        tap("Theme");
+        tap("Manage themes");
+        assert_eq!(ui.get_installed_theme_packs().row_count(), 0);
+        tap("Restore built-in themes");
+        assert!(store.load_appearance().unwrap().hidden_themes.is_empty());
+        assert_eq!(ui.get_theme_names().row_count(), AppearanceTheme::ALL.len());
+        assert_eq!(ui.get_saved_theme(), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn saving_a_pack_keeps_it_for_other_selections_and_replaces_the_same_id() {
         let dir = std::env::temp_dir().join(format!("hestia-theme-catalogue-{}", std::process::id()));
         let store = Store::open(&dir).unwrap();
         let starter = read_theme_pack(include_bytes!("../../../tools/theme-packs/harbor.zip")).unwrap();
-        let imported = AppearanceTheme::ALL.len();
+        let imported = AppearanceTheme::ALL.len() as i32;
         let mut catalogue = Catalogue {
             preview: Some(starter.clone()),
             ..Default::default()
         };
-        assert_eq!(
-            catalogue.save(imported, LaunchStyle::Orbit, &store).unwrap(),
-            imported as i32
-        );
+        assert_eq!(catalogue.save(imported, LaunchStyle::Orbit, &store).unwrap(), imported);
         let saved = store.load_appearance().unwrap();
         assert_eq!(saved.packs.len(), 1);
         assert_eq!(saved.active_pack.as_deref(), Some(starter.id.as_str()));
@@ -319,7 +684,7 @@ mod tests {
         catalogue.preview = Some(revision);
         assert_eq!(
             catalogue.save(imported + 1, LaunchStyle::Flame, &store).unwrap(),
-            imported as i32
+            imported
         );
         let saved = Store::open(&dir).unwrap().load_appearance().unwrap();
         assert_eq!(saved.packs.len(), 1);

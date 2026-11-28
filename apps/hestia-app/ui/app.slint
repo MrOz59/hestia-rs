@@ -2,9 +2,11 @@ import { Theme, ThemeStyle, Nav, FrostBackdrop, FrostGlints, Icon, ActionButton,
 import { HostCard, AppCard, CommandRow, PreflightRow, HostsPage, AppsPage, SessionPage, SettingsPage, ToolsPage, ReportPage } from "pages.slint";
 import { SessionLaunch } from "session-launch.slint";
 import { StreamView, PadControl } from "stream.slint";
+import { InstalledThemePack } from "controls.slint";
 
 export { HostCard, AppCard, CommandRow, PreflightRow } from "pages.slint";
 export { PadControl } from "stream.slint";
+export { InstalledThemePack } from "controls.slint";
 // Themes set the palette's run-time roles (the launch's, for now) from Rust.
 export { Theme, ThemeStyle, PaletteOverride, VoltagePaths } from "theme.slint";
 
@@ -52,6 +54,8 @@ export component AppWindow inherits Window {
     in property <[string]> theme-menu: root.theme-names;
     in property <[ThemeStyle]> theme-styles;
     in-out property <string> theme-import-message;
+    in property <[InstalledThemePack]> installed-theme-packs;
+    in property <bool> can-restore-themes;
     out property <int> appearance-session;
     private property <int> cfg-theme: 0;
     private property <int> cfg-launch-style: 0;
@@ -62,7 +66,7 @@ export component AppWindow inherits Window {
             Theme.selection = root.theme-styles[root.effective-theme].base;
             Theme.overrides = root.theme-styles[root.effective-theme].colors;
         } else {
-            Theme.selection = root.effective-theme;
+            Theme.selection = Math.max(0, root.effective-theme);
             Theme.overrides = [];
         }
     }
@@ -81,6 +85,9 @@ export component AppWindow inherits Window {
         Theme.effects-motion = root.effects-motion;
     }
     callback import-theme(int);
+    callback open-theme-manager();
+    callback remove-theme-packs(int) -> int;
+    callback restore-builtin-themes(int) -> int;
     callback discard-theme-preview();
     callback save-theme(int, int) -> int;
 
@@ -832,6 +839,11 @@ export component AppWindow inherits Window {
             theme-menu: root.theme-menu;
             theme-import-message: root.theme-import-message;
             import-theme => { root.import-theme(root.appearance-session); }
+            installed-theme-packs: root.installed-theme-packs;
+            can-restore-themes: root.can-restore-themes;
+            open-theme-manager => { root.open-theme-manager(); }
+            remove-theme-packs(index) => { return root.remove-theme-packs(index); }
+            restore-builtin-themes(index) => { return root.restore-builtin-themes(index); }
             launch-style <=> root.cfg-launch-style;
             theme-save-failed: root.theme-save-failed;
             show-video-through-loss <=> root.cfg-show-video-through-loss;
@@ -890,7 +902,8 @@ export component AppWindow inherits Window {
             save => {
                 let selected = root.cfg-theme != root.saved-theme || root.cfg-launch-style != root.saved-launch-style
                     ? root.save-theme(root.cfg-theme, root.cfg-launch-style) : root.saved-theme;
-                if selected < 0 {
+                // An empty theme list uses -1. Storage errors return -2.
+                if selected < -1 {
                     root.theme-save-failed = true;
                 } else {
                     root.saved-theme = selected;
